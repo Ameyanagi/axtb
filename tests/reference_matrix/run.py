@@ -156,7 +156,7 @@ def lands_on(d: dict, orig: dict, tol: dict) -> bool:
 
 
 def diagnose_xtb(case: dict, ax: dict, xt: dict, tol: dict) -> dict:
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     out = {}
     spec = dict(case)
     # xtb restarted from axtb's converged moments
@@ -172,7 +172,7 @@ def diagnose_xtb(case: dict, ax: dict, xt: dict, tol: dict) -> dict:
     # axtb started from xtb's converged moments
     if "restart" in xt and "dpat" in xt["restart"]:
         try:
-            calc = axtb.Calculator("gfn2", np.asarray(case["numbers"]), np.asarray(case["positions"]),
+            calc = flat.Calculator("gfn2", np.asarray(case["numbers"]), np.asarray(case["positions"]),
                                    **{k: v for k, v in P.axtb_kwargs(case, P.XTB_CONVENTIONS).items() if k != "max_iter"})
             r = xt["restart"]
             calc.set_guess(r["qsh"], np.asarray(r["dpat"]), np.asarray(r["qpat"]))
@@ -234,7 +234,7 @@ def diagnose_tblite(case, ax, tb, store):
     (1) axtb (tblite conventions) started from other converged moments (xtb's, axtb's xtb
     mode) lands on tblite's energy and charges; (2) tblite started from its EEQ guess
     instead of zero charges lands on axtb's solution."""
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     out = {}
     tol = tolerances("tblite", case)
     starts = {}
@@ -250,7 +250,7 @@ def diagnose_tblite(case, ax, tb, store):
         starts["axtb[xtb]"] = (axx["shell_charges"], axx["atomic_dipoles"], axx["atomic_quadrupoles"])
     for name, (qsh, dp, qp) in starts.items():
         try:
-            calc = axtb.Calculator("gfn2", np.asarray(case["numbers"]), np.asarray(case["positions"]),
+            calc = flat.Calculator("gfn2", np.asarray(case["numbers"]), np.asarray(case["positions"]),
                                    **{k: v for k, v in P.axtb_kwargs(case, "tblite").items() if k != "max_iter"})
             calc.set_guess(qsh, np.asarray(dp), np.asarray(qp))
             a2 = P._result(calc.singlepoint(np.asarray(case["positions"]), gradient=True))
@@ -329,9 +329,9 @@ KB_CODATA2022 = 3.1668115634564e-6
 def restart_axtb(case, conv, start, target):
     """axtb in conventions `conv` started from the moments of result `start`, compared with
     result `target` (the other mode's own solution)."""
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     try:
-        calc = axtb.Calculator("gfn2", np.asarray(case["numbers"]), np.asarray(case["positions"]),
+        calc = flat.Calculator("gfn2", np.asarray(case["numbers"]), np.asarray(case["positions"]),
                                **{k: v for k, v in P.axtb_kwargs(case, conv).items() if k != "max_iter"})
         calc.set_guess(start["shell_charges"], np.asarray(start["atomic_dipoles"]), np.asarray(start["atomic_quadrupoles"]))
         r2 = P._result(calc.singlepoint(np.asarray(case["positions"]), gradient=True))
@@ -387,10 +387,10 @@ def xtb_masses():
     """xtb's atomic masses (u) by atomic number - 1 (`src/param/atomicmass.f90`, the same in
     6.7.1 and 6.8.0), from axtb's copy of the table (its vibrational analysis in xtb
     conventions)."""
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     out = []
     for z in range(1, 87):
-        v = axtb.vibrational_analysis([z], np.zeros((1, 3)), np.zeros((3, 3)), conventions="xtb", thermo=False)
+        v = flat.analysis([z], np.zeros((1, 3)), np.zeros((3, 3)), conventions="xtb", thermo=False)
         out.append(float(np.asarray(v["masses"])[0]))
     return np.array(out)
 
@@ -436,7 +436,7 @@ def is_linear(pos):
 
 
 def check_hessian(case, store):
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     nums = np.asarray(case["numbers"])
     pos = np.asarray(case["positions"], dtype=float)
     rpos = rotmol(pos)
@@ -458,7 +458,7 @@ def check_hessian(case, store):
             continue
         hx = np.asarray(xt["hessian"])
         try:
-            calc = axtb.Calculator("gfn2", nums, rpos, accuracy=spec["accuracy"], **kw)
+            calc = flat.Calculator("gfn2", nums, rpos, accuracy=spec["accuracy"], **kw)
             h = np.asarray(calc.hessian(rpos, step=0.005, accuracy=ax_acc, method="numerical")["hessian"])
         except Exception as e:  # noqa: BLE001
             out[name] = {"status": "axtb_failed", "error": str(e)}
@@ -514,9 +514,9 @@ def _solvated(case):
 
 
 def _hess_calc(case, conv, pos, threads=None):
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     kw = P.axtb_kwargs(case if threads is None else dict(case, threads=threads), conv)
-    return axtb.Calculator("gfn2", np.asarray(case["numbers"]), pos, **kw)
+    return flat.Calculator("gfn2", np.asarray(case["numbers"]), pos, **kw)
 
 
 def _hessian_compare(h, ref, nums, pos, masses, tol, asym=None):
@@ -634,12 +634,12 @@ def check_threads(case, store):
 
 
 def check_threads_hessian(case, store):
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     nums = np.asarray(case["numbers"])
     pos = np.asarray(case["positions"], dtype=float)
     hs = {}
     for t in (1, 8):
-        calc = axtb.Calculator("gfn2", nums, pos, **{k: v for k, v in P.axtb_kwargs(dict(case, threads=t), "axtb").items()})
+        calc = flat.Calculator("gfn2", nums, pos, **{k: v for k, v in P.axtb_kwargs(dict(case, threads=t), "axtb").items()})
         hs[t] = np.asarray(calc.hessian(pos, step=0.005, accuracy=1e-3, method="numerical")["hessian"])
     same = bool(np.array_equal(hs[1], hs[8]))
     return {"status": "pass" if same else "fail", "bit_identical": same, "max_abs_diff": float(np.abs(hs[1] - hs[8]).max())}
@@ -686,12 +686,12 @@ def check_failure(case, store):
 
 
 def check_calculator(case, store):
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     nums = np.asarray(case["numbers"])
     pos0 = np.asarray(case["positions"], dtype=float)
     rng = np.random.default_rng(7)
     kw = P.axtb_kwargs(case, "axtb")
-    calc = axtb.Calculator("gfn2", nums, pos0, **kw)
+    calc = flat.Calculator("gfn2", nums, pos0, **kw)
     worst = {"dE": 0.0, "dG": 0.0, "dq": 0.0, "ddip": 0.0}
     iters = []
     pos = pos0.copy()

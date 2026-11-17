@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import flat  # tests/flat.py (the CLI's response)
 from axtb import _axtb
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -52,15 +53,14 @@ def caffeine():
     return xyz("caffeine.xyz")
 
 
+@pytest.mark.skipif(not Path(flat.AXTB_BIN).exists(), reason="needs the release CLI")
 def test_compute_once_is_the_cli_calculation(caffeine):
     numbers, pos = caffeine
-    import axtb
-
     for method in ("gfn2", "gxtb-v2.0.1"):
         r = _axtb.compute_once(request(method=method, threads=1), numbers, pos, GRADIENT)
-        old = axtb.singlepoint(numbers, pos, method=method, gradient=True, threads=1)
-        assert r["energy"] == old["energy"]
-        assert np.array_equal(r["gradient"], old["gradient"])
+        cli = flat.cli({"numbers": numbers, "positions": pos, "method": method, "gradient": True, "threads": 1})
+        assert r["energy"] == cli["energy"]
+        assert np.array_equal(r["gradient"], cli["gradient"])
         assert r["threads"] == 1
         assert r["numerics"] == _axtb.numerics(method, False)
 

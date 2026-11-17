@@ -483,15 +483,15 @@ MEPD_CONV = {"gfn2": "gfn2", "gxtb2": "gxtb"}
 
 
 def axtb_files(kind: str, mol: dict, charge: int, uhf: int, acc: float = 1.0) -> tuple[str, str]:
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
 
     method, conv = AXTB[kind]
     conv = conv or xtb_path_conventions()
     numbers = [z for z, _ in mol["atoms"]]
     pos = np.array([p for _, p in mol["atoms"]])
     kw = dict(charge=charge, uhf=uhf, method=method, conventions=conv, accuracy=acc)
-    sph = axtb.singlepoint(numbers, pos, molden=True, **kw)["molden"]
-    cart = axtb.singlepoint(numbers, pos, molden="cartesian", **kw)["molden"]
+    sph = flat.singlepoint(numbers, pos, molden=True, **kw)["molden"]
+    cart = flat.singlepoint(numbers, pos, molden="cartesian", **kw)["molden"]
     return sph, cart
 
 

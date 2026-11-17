@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
-"""GFN-FF through the Python package, the CLI and the qccodec codec.
+"""GFN-FF through the Python package (axtb 0.1's calls through tests/flat.py) and the CLI.
 
 Run with the extension built from this tree (a wheel built from ``crates/axtb-py``) and the CLI
 at ``target/release/axtb`` (or ``$AXTB_BIN``)::
@@ -20,9 +20,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import old_qccompute
 
-import axtb
+import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
+
 
 ROOT = Path(__file__).resolve().parents[3]
 AXTB_BIN = Path(os.environ.get("AXTB_BIN", ROOT / "target/release/axtb"))
@@ -51,7 +51,7 @@ def cli(numbers, pos, **extra):
 
 def test_singlepoint_equals_cli():
     numbers, pos = caffeine()
-    r = axtb.singlepoint(numbers, pos, method="gfnff", gradient=True)
+    r = flat.singlepoint(numbers, pos, method="gfnff", gradient=True)
     c = cli(numbers, pos, gradient=True)
     assert r["energy"] == c["energy"]
     assert np.array_equal(r["gradient"], np.array(c["gradient"]))
@@ -68,9 +68,9 @@ def test_singlepoint_equals_cli():
 def test_fixed_topology():
     numbers, pos = caffeine()
     moved = pos + np.random.default_rng(1).normal(0.0, 0.05, pos.shape)
-    calc = axtb.Calculator("gfnff", numbers, pos)
+    calc = flat.Calculator("gfnff", numbers, pos)
     a = calc.singlepoint(moved, gradient=True)
-    b = axtb.singlepoint(numbers, moved, method="gfnff", gradient=True, topology_positions=pos)
+    b = flat.singlepoint(numbers, moved, method="gfnff", gradient=True, topology_positions=pos)
     assert a["energy"] == b["energy"]
     assert np.array_equal(a["gradient"], b["gradient"])
     c = cli(numbers, moved, gradient=True, topology_positions=pos.tolist())
@@ -79,27 +79,28 @@ def test_fixed_topology():
 
 def test_fragment_charges():
     numbers, pos = WATERS
-    r = axtb.singlepoint(numbers, pos, method="gfnff", fragment_charges=[1.0, -1.0])
+    r = flat.singlepoint(numbers, pos, method="gfnff", fragment_charges=[1.0, -1.0])
     assert r["topology"]["fragment_charges"].tolist() == [1.0, -1.0]
     assert r["charges"][:3].sum() == pytest.approx(1.0, abs=1e-10)
     assert r["charges"][3:].sum() == pytest.approx(-1.0, abs=1e-10)
-    # default: the total charge on the first fragment
-    r = axtb.singlepoint(numbers, pos, method="gfnff", charge=-1.0)
-    assert r["charges"][:3].sum() == pytest.approx(-1.0, abs=1e-10)
+    # default: the total charge on the first fragment (an even electron count: GFN-FF models
+    # singlets only, and 0.2 refuses an odd count rather than ignore its multiplicity)
+    r = flat.singlepoint(numbers, pos, method="gfnff", charge=-2.0)
+    assert r["charges"][:3].sum() == pytest.approx(-2.0, abs=1e-10)
 
 
 def test_hessian_thermo_xtb_conventions():
     numbers, pos = caffeine()
-    h = axtb.Calculator("gfnff", numbers, pos, conventions="xtb").hessian(pos, method="numerical")
-    assert h["hessian_method"] == "numerical" and h["vibrational_conventions"] == "xtb"
+    h = flat.Calculator("gfnff", numbers, pos, conventions="xtb").hessian(pos, method="numerical")
+    assert h["hessian_method"] == "numerical" and h["vibrational_conventions"] == "xtb-6.8.0"
     assert h["thermo"]["frequency_scale"] == 1.03
     assert h["thermo"]["free_energy"] == pytest.approx(XTB_CAFFEINE_G, abs=1e-10)
     assert h["thermo"]["zpve"] == pytest.approx(XTB_CAFFEINE_ZPVE, abs=1e-10)
-    h = axtb.Calculator("gfnff", numbers, pos, conventions="xtb-6.7.1").hessian(pos, method="numerical")
+    h = flat.Calculator("gfnff", numbers, pos, conventions="xtb-6.7.1").hessian(pos, method="numerical")
     assert h["vibrational_conventions"] == "xtb-6.7.1" and h["thermo"]["frequency_scale"] == 1.03
     assert h["thermo"]["free_energy"] == pytest.approx(XTB671_CAFFEINE_G, abs=1e-10)
     assert h["thermo"]["zpve"] == pytest.approx(XTB671_CAFFEINE_ZPVE, abs=1e-10)
-    a = axtb.Calculator("gfnff", numbers, pos).hessian(pos)
+    a = flat.Calculator("gfnff", numbers, pos).hessian(pos)
     assert a["hessian_method"] == "analytic" and a["vibrational_conventions"] == "axtb"
     assert a["thermo"]["frequency_scale"] == 1.0
     assert a["dipole_derivatives"].shape == (3 * len(numbers), 3)
@@ -107,69 +108,34 @@ def test_hessian_thermo_xtb_conventions():
     c = cli(numbers, pos, hessian=True, vibrations=False)
     assert np.array_equal(a["hessian"], np.array(c["hessian"]))
     assert np.array_equal(a["dipole_derivatives"], np.array(c["dipole_derivatives"]))
-    s = axtb.Calculator("gfnff", numbers, pos).hessian(pos, frequency_scale=1.03, analysis_conventions="xtb")
+    s = flat.Calculator("gfnff", numbers, pos).hessian(pos, frequency_scale=1.03, analysis_conventions="xtb")
     assert s["thermo"]["frequency_scale"] == 1.03
     # the default (axtb) and xtb conventions share 6.8.0's force field; 6.7.1's differs
-    e = {c: axtb.Calculator("gfnff", numbers, pos, conventions=c).singlepoint(pos)["energy"] for c in ("axtb", "xtb", "xtb-6.7.1")}
+    e = {c: flat.Calculator("gfnff", numbers, pos, conventions=c).singlepoint(pos)["energy"] for c in ("axtb", "xtb", "xtb-6.7.1")}
     assert e["axtb"] == e["xtb"] and 1e-9 < abs(e["xtb"] - e["xtb-6.7.1"]) < 1e-6
 
 
 def test_rejected_settings():
     numbers, pos = WATERS
     for kw in ({"etemp": 300.0}, {"alpb": "water"}, {"mixer": "diis"}, {"accuracy": 0.1}, {"conventions": "gxtb"}):
-        with pytest.raises(ValueError, match="gfnff"):
-            axtb.singlepoint(numbers, pos, method="gfnff", **kw)
+        with pytest.raises(ValueError, match="GFN-FF|'gxtb'"):
+            flat.singlepoint(numbers, pos, method="gfnff", **kw)
     with pytest.raises(ValueError, match="orbitals"):
-        axtb.singlepoint(numbers, pos, method="gfnff", molden=True)
-    with pytest.raises(ValueError, match="GFN-FF settings"):
-        axtb.singlepoint(numbers, pos, method="gfn2", fragment_charges=[0.0, 0.0])
-    calc = axtb.Calculator("gfnff", numbers, pos)
-    with pytest.raises(axtb.InputError):
+        flat.singlepoint(numbers, pos, method="gfnff", molden=True)
+    with pytest.raises(ValueError, match="GFN-FF setting"):
+        flat.singlepoint(numbers, pos, method="gfn2", fragment_charges=[0.0, 0.0])
+    calc = flat.Calculator("gfnff", numbers, pos)
+    with pytest.raises(flat.Failed):
         calc.hessian(pos, method="response")
-    with pytest.raises(axtb.InputError):
+    with pytest.raises(flat.Failed):
         calc.hessian(pos, accuracy=0.1)
-    with pytest.raises(axtb.InputError):
+    with pytest.raises(flat.Failed):
         calc.set_guess([], np.zeros((6, 3)), np.zeros((6, 6)))
-    with pytest.raises(axtb.InputError, match="threads"):
-        axtb.Calculator("gfnff", numbers, pos, threads=0)
+    with pytest.raises(flat.Failed, match="threads"):
+        flat.Calculator("gfnff", numbers, pos, threads=0)
     # errors of the Hessian keep their kind: invalid positions are input, not a numerical failure
     bad = pos.copy()
     bad[0, 0] = np.nan
-    with pytest.raises(axtb.InputError) as err:
+    with pytest.raises(flat.Failed) as err:
         calc.hessian(bad)
     assert err.value.kind == "input"
-
-
-def test_qccodec():
-    qccompute = old_qccompute()
-    from qcdata import CalcType, Model, ProgramInput, Structure
-
-    numbers, pos = caffeine()
-    syms = {v: k for k, v in SYMBOLS.items()}
-    structure = Structure(symbols=[syms[z] for z in numbers], geometry=pos)
-    out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.gradient, structure=structure,
-                                         model=Model(method="gfnff")))
-    assert out.success, out.logs
-    r = axtb.singlepoint(numbers, pos, method="gfnff", gradient=True)
-    assert out.results.energy == r["energy"]
-    assert np.array_equal(np.asarray(out.results.gradient), r["gradient"])
-    assert np.array_equal(np.asarray(out.results.atomic_charges), r["charges"])
-    ex = out.results.extras
-    assert ex["topology"]["bonds"] == r["topology"]["bonds"].tolist()
-    assert ex["energy_terms"]["bond"] == r["terms"]["bond"]
-    moved = pos + 0.02
-    out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.energy,
-                                         structure=Structure(symbols=structure.symbols, geometry=moved),
-                                         model=Model(method="gfnff"), keywords={"topology_positions": pos.tolist()}))
-    assert out.success, out.logs
-    assert out.results.energy == axtb.Calculator("gfnff", numbers, pos).singlepoint(moved)["energy"]
-    out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.hessian, structure=structure,
-                                         model=Model(method="gfnff"),
-                                         keywords={"conventions": "xtb", "hessian_method": "numerical"}))
-    assert out.success, out.logs
-    assert out.results.gibbs_free_energy == pytest.approx(XTB_CAFFEINE_G, abs=1e-10)
-    assert out.results.extras["thermo"]["frequency_scale"] == 1.03
-    assert len(out.results.extras["vibrations"]["dipole_derivatives"]) == 3 * len(numbers)
-    with pytest.raises(Exception, match="Unknown axtb keywords"):
-        qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.energy, structure=structure,
-                                       model=Model(method="gfnff"), keywords={"etemp": 300.0}), raise_exc=True)

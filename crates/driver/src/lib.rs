@@ -5,7 +5,7 @@
 //! arguments; [`run`] checks it, dispatches it to GFN2-xTB (`axtb`), g-xTB and its solvation
 //! composite (`axtb-gxtb`) or GFN-FF (`axtb-gfnff`), and returns a
 //! [`Response`] with the same fields for every front end (the CLI writes it as JSON, Python
-//! returns it as a dict). A stateful [`Calculator`] (Python's `axtb.Calculator`) builds the
+//! returns it as a dict). A stateful [`Calculator`] (under Python's `axtb.Session`) builds the
 //! request's method behind axtb-base's `Method` trait and runs a [`Task`] at one geometry
 //! after another, each SCF from the previous geometry's [`Wavefunction`] as the method's
 //! restart policy says.
@@ -111,8 +111,8 @@ pub fn run(req: &Request) -> Result<Response> {
 /// The threads one task of `req` runs on in [`run`]: the requested ones, or one for a molecule
 /// of at most [`single_thread_atoms`] atoms, where starting the pool and synchronizing its
 /// parallel loops cost more than they save. Systems that small (far below 200 basis functions)
-/// give the same bits on any thread count. A [`Calculator`] of its own (Python's
-/// `axtb.Calculator`) keeps the requested threads: its tasks vary.
+/// give the same bits on any thread count. A [`Calculator`] of its own (under Python's
+/// `axtb.Session`) keeps the requested threads: its tasks vary.
 pub fn task_threads(req: &Request, task: &Task) -> usize {
     let threads = req.threads.unwrap_or(1);
     if threads <= 1 {

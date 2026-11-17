@@ -498,7 +498,7 @@ pub struct Response {
     /// Wall time per phase of the single point (s).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timings: Option<Named>,
-    /// Wall time of the request (s; the CLI and `axtb.singlepoint`: with the setup).
+    /// Wall time of the request (s; the CLI and `axtb.compute`: with the setup).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
 }

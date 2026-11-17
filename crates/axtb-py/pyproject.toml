@@ -55,12 +55,12 @@ strip = true
 compatibility = "manylinux_2_28"
 
 [project.optional-dependencies]
-qc = ["qccodec>=0.21", "qcdata<0.24"]
+# the tests: the conformance checks (qccompute.testing.check_program, with jsonschema) and the
+# runner and worker tests
+test = ["pytest", "qccompute[testing]>=0.23.0a4,<0.24"]
 
 # axtb as a program of qccompute (qccompute.program.find_program("axtb")); no qccompute import at
 # run time: the protocol is structural
 [project.entry-points."qccompute.programs"]
 axtb = "axtb:program"
 
-[project.entry-points."qccodec.codecs"]
-axtb = "axtb.qccodec:codec"

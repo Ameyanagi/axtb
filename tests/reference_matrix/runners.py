@@ -10,7 +10,7 @@
 * tblite 0.8.0 (Python wheel), always in a child process: tblite aborts the interpreter on
   some inputs ("double free or corruption" after impossible charges), so it must not run
   inside the matrix process. `python runners.py tblite` reads one JSON request on stdin.
-* axtb, in process through the Python API (`axtb.singlepoint` / `axtb.Calculator`).
+* axtb, in process through the Python API (`axtb.compute` / `axtb.Session` (through tests/flat.py)).
 
 Every runner returns a dict with `ok` (bool) and either results or `error`.
 """
@@ -328,12 +328,12 @@ def _result(r: dict) -> dict:
 
 
 def run_axtb(spec: dict, conventions: str = "axtb", gradient: bool = True) -> dict:
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     nums = np.asarray(spec["numbers"])
     pos = np.asarray(spec["positions"], dtype=float)
     t0 = time.perf_counter()
     try:
-        r = axtb.singlepoint(nums, pos, gradient=gradient, **axtb_kwargs(spec, conventions))
+        r = flat.singlepoint(nums, pos, gradient=gradient, **axtb_kwargs(spec, conventions))
     except BaseException as e:  # noqa: BLE001  (pyo3 PanicException derives from BaseException)
         if isinstance(e, KeyboardInterrupt):
             raise
