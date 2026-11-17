@@ -1211,7 +1211,8 @@ ammine ions, halides, oxides, radicals), the program (`xtb --gxtb --grad`, defau
 - 155 agree: total energies ≤ 4.9e-11 Eh, the same SCF iterations, the printed terms (core
   increments, three-body dispersion, electronic energy) ≤ 1.1e-12 Eh, analytic gradients
   ≤ 2.3e-10 Eh/bohr (default; NdCl3, an open f shell, 2.5e-9) and ≤ 2.1e-10 (tight); the default
-  conventions are ≤ 9.0e-10 Eh from the program. This includes H2, which needed the early DIIS
+  conventions are ≤ 1.3e-7 Eh from the program, since they end with one unmixed iteration after
+  the program's convergence test (≤ 9.0e-10 before that iteration). This includes H2, which needed the early DIIS
   switch (§4.17; before it, 5 iterations against the program's 4).
 - 12 are rounding-sensitive, diagnosed by rerunning both programs on a translated copy with the
   atoms in reverse order and, for gradient mismatches, on a rotated copy (2.0.1 is rotation

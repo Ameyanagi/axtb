@@ -368,13 +368,14 @@ KNOWN_TIGHT: dict[tuple[str, str], tuple[str, str]] = {}
 # differ in the printed "Ex (Mulliken)" by <= 1.7e-8 Eh with totals <= 9e-12 Eh; axtb's gradients
 # (both conventions) against five-point differences of its energies <= 8.8e-8 Eh/bohr. 2.0.1:
 # total energies <= 4.9e-11 Eh, printed terms <= 1.1e-12 Eh, gradients <= 2.3e-10 Eh/bohr (NdCl3
-# 2.5e-9) and <= 2.1e-10 (tight), the default conventions <= 9.0e-10 Eh from the program.
+# 2.5e-9) and <= 2.1e-10 (tight), the default conventions <= 1.3e-7 Eh from the program (they end
+# with one unmixed iteration after the program's convergence test; 9.0e-10 before it).
 LIMITS = {
     "1.1": {"unexpected status": 0, "max_abs_dE": 2.8e-12, "max_dterm": 5.0e-9, "far-pair max_abs_dE": 9e-12,
             "far-pair max_dterm": 1.7e-8, "max_dG_fd_gxtb": 8.8e-8, "max_dG_fd_axtb": 8.8e-8,
             "FD failures or energy steps (unexpected)": 0},
     "2.0.1": {"unexpected status": 0, "max_abs_dE": 4.9e-11, "max_dterm": 1.1e-12, "max_dG": 2.3e-10,
-              "max_dG NdCl3": 2.5e-9, "max_dG_tight": 2.1e-10, "max_abs_dE_default": 9.0e-10},
+              "max_dG NdCl3": 2.5e-9, "max_dG_tight": 2.1e-10, "max_abs_dE_default": 1.3e-7},
 }
 FAR_PAIR = {"020-Ca-2", "045-Rh-2", "056-Ba-2", "057-La-2"}
 # "<version> <id>": the molecules that are not `ok`, or whose tight runs or finite differences

@@ -428,7 +428,7 @@ conventions that reproduce it:
 |---|---|---|---|---|
 | g-xTB 2.0.1 (`xtb --gxtb --molden`) | water, caffeine, O2 triplet, [Cu(NH3)4]2+, ferrocene, UF6, GdCl3 (octet), CeCl3 (doublet) | ≤ 1.1e-9 | ≤ 6.5e-11 | ≤ 3.3e-12 |
 | g-xTB 1.1.0 (`gxtb -molden`) | water, caffeine, O2 triplet, [Cu(NH3)4]2+, ferrocene, CeCl3 | ≤ 6.1e-11 | ≤ 6.5e-11 | ≤ 6.4e-8 |
-| g-xTB 1.1.0 | UF6 | 1.1e-7 | 1.1e-10 | 8.6e-6 |
+| g-xTB 1.1.0 | UF6 | 1.9e-5 | 1.1e-10 | 8.6e-6 |
 | GFN2-xTB (`xtb --gfn 2 --molden`), default accuracy | water, caffeine, O2 triplet, [Cu(NH3)4]2+, ferrocene | ≤ 1.1e-10 | ≤ 2.9e-11 | ≤ 3.0e-10 |
 | GFN2-xTB, `--acc 1e-4` (both) | caffeine, ferrocene | ≤ 1.0e-10 | ≤ 1.7e-11 | ≤ 7.0e-10 |
 
@@ -437,10 +437,13 @@ The remaining differences are SCF convergence (GFN2-xTB: the g-xTB build's xtb 6
 (see [xtb's SCC loop](../README.md#xtbs-scc-loop-conventionsxtb-and-xtb-671)), so at the default
 accuracy it agrees as closely as at `--acc 1e-4`; with tblite's loop it would agree only to the
 SCF thresholds. For UF6 axtb's v1.1 SCF
-takes 40 iterations where the 1.1.0 program takes 50 (total energies 1.1e-10 Eh apart): in
-iteration 2 both fill two of three exactly degenerate orbitals, and which two-dimensional
-subspace each eigensolver returns is round-off, so the paths part there and meet again at the
-same state within the SCF thresholds (`docs/gxtb-v1.1-spec.md` §4.17). Every file, axtb's
+takes 36 iterations where the 1.1.0 program takes 50. In iteration 2 both fill two of three
+exactly degenerate orbitals, and which two-dimensional subspace each eigensolver returns is
+round-off. So the paths part there and meet again at the same state within the SCF thresholds
+(`docs/gxtb-v1.1-spec.md` §4.17). The occupied space agrees to 2e-11 and the orbital energies
+to 1.7e-6 Eh. Orbitals of near-degenerate pairs (gaps of ~2e-5 Eh) differ by rotations of up to
+1.9e-5 in 1 − |⟨i|i⟩|. Before the v1.1 merge onto the 2.0.1 engine, axtb took 40 iterations and
+those orbitals agreed to 1.1e-7. Every file, axtb's
 spherical and Cartesian ones and the programs', reads back with orthonormal occupied orbitals
 (C^T S C = 1 to ≤ 6e-11 for axtb's files). The orbital viewer of the private mepd workflow
 (`orbitals.py`; not reproducible outside it) reads only Cartesian files: it reads axtb's
