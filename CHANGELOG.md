@@ -5,6 +5,17 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- Numerics epochs (afh-stack decision 29): every response names the identity of the code that
+  produced it, `numerics`, and `axtb_driver::numerics(method, composite)` gives it before a run.
+  The rule: each method has an epoch, `"<method>:<epoch>"` (`"gfn2:1"`, `"gxtb-v1.1:1"`,
+  `"gxtb-v2.0.1:1"`, `"gfnff:1"`), one epoch per method across all its conventions; the g-xTB
+  solvation composite joins its parts' (`"gxtb-v2.0.1:1+gfn2:1"`), and GFN2-xTB in solvent is
+  GFN2-xTB's. A method's epoch changes with every commit that may change its results for an
+  unchanged request (classed R, round-off, or M, a model or default change, below) and never
+  with one that keeps every result bit for bit (B). The vibrational analysis is part of every
+  method's numbers; the analysis of a given Hessian has its own identity, `"analysis:1"`. Thread
+  counts and a run-time LAPACK are not part of it (round-off). The history is in "Numerics
+  epochs" at the end of this file.
 - AO matrices on request: `overlap` (the SCF's S, with its screening; g-xTB: of the SCF basis)
   and `hamiltonian` (the matrix whose generalized eigenvectors with S are the returned orbitals:
   GFN2-xTB's last Fock matrix, one for both spins; g-xTB's unmixed last build per spin channel),
@@ -216,3 +227,17 @@ wrong; the program modes keep it.
 
 docs/validation.md lists the other program behaviours found on the way, which are documented
 but not reported.
+
+## Numerics epochs
+
+Each method's epoch (`axtb_driver::numerics`; the rule in the alpha 1 entry above) and the
+commits that changed it. All start at 1 with alpha 1 of 0.2, whose round-off and model changes
+before the epochs existed are listed in the entries above.
+
+| method | epoch | since | what changed |
+|---|---|---|---|
+| `gfn2` | 1 | 0.2.0 alpha 1 | start |
+| `gxtb-v1.1` | 1 | 0.2.0 alpha 1 | start |
+| `gxtb-v2.0.1` | 1 | 0.2.0 alpha 1 | start (includes the unmixed final iteration of the axtb conventions) |
+| `gfnff` | 1 | 0.2.0 alpha 1 | start |
+| `analysis` | 1 | 0.2.0 alpha 1 | start (the analysis of a given Hessian) |

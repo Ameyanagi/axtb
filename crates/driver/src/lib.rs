@@ -23,7 +23,22 @@
 //!   electrons for GFN-FF ([`uhf_warning`]) and about a run-time LAPACK that was not used
 //!   ([`eigensolver_warning`]) are the front ends' to print;
 //! - XYZ files in Ångström are converted with the factor of the method's conventions
-//!   ([`read_xyz`]).
+//!   ([`read_xyz`]);
+//! - every response names the numerics identity of what it ran ([`numerics`]).
+//!
+//! # Numerics epochs
+//!
+//! [`numerics`] gives the identity of the code that produced a result, per method (afh-stack
+//! decision 29): `"<method>:<epoch>"`, e.g. `"gfn2:1"`, `"gxtb-v1.1:1"`, `"gxtb-v2.0.1:1"`,
+//! `"gfnff:1"`, and for the g-xTB solvation composite its parts joined, `"gxtb-v2.0.1:1+gfn2:1"`.
+//! A method's epoch changes with every commit whose results for an unchanged request of that
+//! method may change (classed R, round-off, or M, a model or default change, in the changelog),
+//! and never with a commit that keeps every result bit for bit (B). One epoch covers every
+//! conventions of a method: a change in any of them bumps it. GFN2-xTB in solvent is GFN2-xTB's.
+//! The vibrational analysis belongs to every method's numbers (a change there bumps every
+//! method), and the analysis of a given Hessian has its own epoch ([`ANALYSIS_NUMERICS`]). Thread
+//! counts and a run-time LAPACK move results only by round-off and are not part of it. The
+//! epochs start at 1 with alpha 1 of 0.2; their history is in the changelog.
 
 mod calculator;
 mod error;
@@ -44,6 +59,31 @@ pub use task::{HessianTask, MoldenTask, Task, ThermoSettings, VibSettings};
 
 use axtb::units::{reference::MCTC_AATOAU, AATOAU};
 use std::time::Instant;
+
+/// The numerics epoch of each method ([`numerics`], "Numerics epochs" above): bumped by every
+/// commit classed R or M that changes that method's results, never by a B commit.
+pub const NUMERICS_EPOCHS: [(Method, u32); 4] =
+    [(Method::Gfn2, 1), (Method::GxtbV1_1, 1), (Method::GxtbV2_0_1, 1), (Method::Gfnff, 1)];
+
+/// The numerics identity of the analysis of a given Hessian (`analyze_hessian`).
+pub const ANALYSIS_NUMERICS: &str = "analysis:1";
+
+/// The numerics identity of `method` (afh-stack decision 29; "Numerics epochs" above):
+/// `"<canonical name>:<epoch>"`, the same for every conventions of the method; with `composite`,
+/// the g-xTB solvation composite (a g-xTB method with `solvation_correction`), its parts joined by
+/// `+`, the g-xTB part first: `"gxtb-v2.0.1:1+gfn2:1"` (`composite` means nothing for the other
+/// methods: GFN2-xTB in solvent is GFN2-xTB's).
+pub fn numerics(method: Method, composite: bool) -> String {
+    let one = |m: Method| {
+        let epoch = NUMERICS_EPOCHS.iter().find(|(x, _)| *x == m).map(|(_, e)| *e).expect("every method has an epoch");
+        format!("{}:{epoch}", m.name())
+    };
+    if composite && method.is_gxtb() {
+        format!("{}+{}", one(method), one(Method::Gfn2))
+    } else {
+        one(method)
+    }
+}
 
 /// Run a request: the calculation it describes, or with `analyze_hessian` the vibrational
 /// analysis of the given Hessian ([`analyze`]). `seconds` of the response includes the
@@ -168,6 +208,7 @@ pub fn analyze(req: &Request) -> Result<Response> {
         version: VERSION,
         method: None,
         conventions: v.conventions.label(),
+        numerics: ANALYSIS_NUMERICS.into(),
         energy: req.energy,
         vibrations: Some(Vibrations::new(v, req.energy)),
         seconds: Some(t0.elapsed().as_secs_f64()),

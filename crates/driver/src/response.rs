@@ -411,8 +411,8 @@ pub struct Composite {
 /// The response to a [`crate::Request`], the same for every front end.
 ///
 /// Every response has `program`, `version`, `method` (canonical; `null` for an analysis of a
-/// given Hessian) and `conventions` (the method's, canonical; the analysis conventions for an
-/// analysis); SCF methods add `eigensolver` (`SinglePoint::eigensolver`: `faer`, or the run-time
+/// given Hessian), `conventions` (the method's, canonical; the analysis conventions for an
+/// analysis) and `numerics` (the numerics identity, [`crate::numerics`]); SCF methods add `eigensolver` (`SinglePoint::eigensolver`: `faer`, or the run-time
 /// LAPACK library). A calculation has `energy`, `charges`, `dipole`, `terms`, `timings` and
 /// `seconds`, and `gradient` when asked for or with a Hessian; the groups below are present
 /// when they apply.
@@ -422,6 +422,9 @@ pub struct Response {
     pub version: &'static str,
     pub method: Option<&'static str>,
     pub conventions: &'static str,
+    /// The numerics identity of the calculation ([`crate::numerics`]): `"gfn2:1"`,
+    /// `"gxtb-v2.0.1:1+gfn2:1"` for the composite, [`crate::ANALYSIS_NUMERICS`] for an analysis.
+    pub numerics: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eigensolver: Option<String>,
     /// Eh (an analysis: the given energy).

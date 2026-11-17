@@ -26,6 +26,8 @@ pub use axtb::method::Wavefunction;
 pub struct Calculator {
     method: Box<dyn MethodTrait>,
     kind: Method,
+    /// The numerics identity of its responses ([`crate::numerics`]).
+    numerics: String,
     numbers: Vec<usize>,
     charge: f64,
     uhf: Option<usize>,
@@ -180,12 +182,18 @@ impl Calculator {
             }
             Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_method(req, kind, threads, uhf, guess)?,
         };
-        Ok(Self { method, kind, numbers: req.numbers.clone(), charge: req.charge, uhf, threads })
+        let numerics = crate::numerics(kind, kind.is_gxtb() && req.solvation_correction.is_some());
+        Ok(Self { method, kind, numerics, numbers: req.numbers.clone(), charge: req.charge, uhf, threads })
     }
 
     /// The method.
     pub fn method(&self) -> Method {
         self.kind
+    }
+
+    /// The numerics identity of its results ([`crate::numerics`]).
+    pub fn numerics(&self) -> &str {
+        &self.numerics
     }
 
     /// The canonical name of the method's conventions.
@@ -232,6 +240,7 @@ impl Calculator {
             version: response::VERSION,
             method: Some(info.name),
             conventions: info.conventions,
+            numerics: self.numerics.clone(),
             ..Default::default()
         };
         let orbitals = fill(&mut out, sp, hessian);
