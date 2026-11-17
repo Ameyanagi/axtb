@@ -230,6 +230,29 @@ pub fn canonical(kind: &str, name: &str, method: Option<&str>) -> Result<&'stati
     }
 }
 
+/// The electrons a neutral atom of atomic number `z` brings to the orbitals of `method`: the sum
+/// of its reference shell occupations (the shells of its basis), so Z less them are its core
+/// electrons (`Electronic::core_electrons`); GFN-FF, which has no orbitals, all Z. `None` where the
+/// method's tables end (GFN2-xTB above Rn, g-xTB above Lr; [`supported_elements`] says which
+/// elements a method has parameters for). For the Python binding's check of the spin parity
+/// before any calculation runs.
+pub fn valence_electrons(method: Method, z: usize) -> Option<f64> {
+    if z == 0 {
+        return None;
+    }
+    let i = z - 1;
+    match method {
+        Method::Gfnff => Some(z as f64),
+        Method::Gfn2 => {
+            use axtb::param::gfn2_data::{ANG_SHELL, NSHELL, REFERENCE_OCC};
+            let n = *NSHELL.get(i)?;
+            Some((0..n).map(|ish| REFERENCE_OCC[i][ANG_SHELL[i][ish]]).sum())
+        }
+        Method::GxtbV2_0_1 => axtb_gxtb::data::v2_0_1::REF_OCC.get(i).map(|occ| occ.iter().sum()),
+        Method::GxtbV1_1 => axtb_gxtb::data::runtime::REF_SHELL_OCC.get(i).map(|occ| occ.iter().sum()),
+    }
+}
+
 /// The atomic numbers `method` has parameters for (every element a one-atom calculation of the
 /// method can be set up for; computed once per process).
 pub fn supported_elements(method: Method) -> Vec<usize> {

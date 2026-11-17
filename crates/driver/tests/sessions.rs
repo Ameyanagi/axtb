@@ -245,3 +245,36 @@ fn codes_names_and_elements() {
     let want: Vec<usize> = (1..=58).chain(70..=89).chain([92]).collect();
     assert_eq!(v11, want);
 }
+
+/// The valence electrons of every element of a method's tables are the electrons its
+/// calculations' orbitals hold: Z less the core electrons the response reports.
+#[test]
+fn valence_electrons_are_the_responses() {
+    use axtb_driver::valence_electrons;
+    let hard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/scf_hard/random-mbheavy-112.xyz");
+    let (numbers, positions) =
+        axtb_driver::read_xyz(&std::fs::read_to_string(hard).unwrap(), Method::Gfn2, None).unwrap();
+    // La, Gd, Pt, Sb, Se, B: an odd valence count in GFN2-xTB (47), an even one in g-xTB 2.0.1 (54)
+    let heavy = Request::new(numbers, positions);
+    let zncl4 = Request { charge: -2.0, ..structure("zncl4.xyz") };
+    let cu = Request { charge: 2.0, uhf: Some(1), ..structure("cu-nh3-4.xyz") };
+    for (method, molecules) in [
+        ("gfn2", vec![structure("caffeine.xyz"), zncl4.clone(), cu.clone(), heavy.clone()]),
+        ("gxtb-v2.0.1", vec![structure("caffeine.xyz"), zncl4.clone(), cu.clone(), heavy]),
+        ("gxtb-v1.1", vec![structure("caffeine.xyz"), zncl4, cu]),
+    ] {
+        let m = Method::parse(method).unwrap();
+        for req in molecules {
+            let req = Request { method: Some(method.into()), accuracy: Some(10.0), ..req };
+            let r = run(&req).unwrap();
+            let scf = r.scf.as_ref().unwrap();
+            for (&z, &core) in req.numbers.iter().zip(&scf.core_electrons) {
+                let v = valence_electrons(m, z).unwrap();
+                assert!((z as f64 - v - core as f64).abs() < 1e-6, "{method} Z = {z}: {v} valence, {core} core");
+            }
+        }
+    }
+    assert_eq!(valence_electrons(Method::Gfnff, 30), Some(30.0));
+    assert_eq!(valence_electrons(Method::Gfn2, 87), None);
+    assert_eq!(valence_electrons(Method::GxtbV2_0_1, 104), None);
+}

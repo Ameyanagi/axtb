@@ -1,0 +1,379 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+"""``axtb.compute``: one calculation of a `qcdata.ProgramInput`, and the mapping of the
+driver's response onto qcdata (`SinglePointData`, ``record``, ``execution``).
+
+The input is planned (`axtb._keywords.plan_input`), its threads chosen (`threads`), and the
+driver runs it as the CLI does (`axtb._axtb.compute_once`: the same calculator, threads rule and
+numbers, bit for bit). The response becomes qcdata's typed fields (`results`), axtb's own detail
+goes in ``record`` (`record`), phase timings in ``execution.timings``. A refused input or a
+failed calculation raises `qcdata.ProgramError` with the whole failed output attached.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+from qcdata import (
+    ExecutionInfo,
+    ProgramError,
+    ProgramInput,
+    ProgramOutput,
+    ProgramWarning,
+    Provenance,
+    Resolved,
+    SinglePointData,
+    Thermochemistry,
+    ThermoTerm,
+    VibrationalAnalysis,
+)
+
+from . import _axtb
+from ._errors import from_driver
+from ._models import build
+from ._keywords import Planned, plan_input, plan_threads
+
+__all__ = ["compute", "provenance", "results", "record", "threads", "task", "VERSION", "COMMIT"]
+
+
+def _version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("axtb")
+    except Exception:  # noqa: BLE001 - not installed (a build tree): the crate's version
+        return str(_axtb.__version__)
+
+
+def _commit() -> str | None:
+    try:
+        from ._build import COMMIT  # written by build.rs
+
+        return COMMIT
+    except ImportError:
+        return None
+
+
+#: axtb's version as pip reports it (PEP 440: "0.2.0a1"), and the git commit of the build.
+VERSION = _version()
+COMMIT = _commit()
+#: The output type of a calculation. Outputs, results and their parts are built from trusted
+#: values of the right shapes without validation (`model_construct`: validation costs more than
+#: a small molecule's whole calculation); the tests validate them again.
+_OUTPUT = ProgramOutput[ProgramInput, SinglePointData]
+
+
+_build = build
+
+
+def provenance() -> Provenance:
+    """axtb's `Provenance`: program, version and (from a git checkout) commit."""
+    return _build(Provenance, program="axtb", program_version=VERSION, program_commit=COMMIT)
+
+
+def _cpus() -> int:
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
+def threads(p: Planned, largest: str, ctx: Any) -> tuple[int, list[ProgramWarning], str]:
+    """The threads of a calculation (or a session, by its largest calctype), the warnings and
+    the reason: the ``threads`` keyword, at most the grant (``resource_capped`` above it); without
+    the keyword the grant; without a grant (a direct call) the plan's threads (None: this
+    machine's CPUs)."""
+    grant = getattr(ctx, "threads", None) if ctx is not None else None
+    if p.threads is not None:
+        if grant is not None and p.threads > grant:
+            w = ProgramWarning(
+                code="resource_capped",
+                message=f"threads {p.threads} capped to the {grant} granted",
+                path="threads",
+            )
+            return grant, [w], f"the keyword ({p.threads}) capped to the grant"
+        return p.threads, [], "the keyword"
+    if grant is not None:
+        return grant, [], "the runner's grant"
+    planned = plan_threads(p, largest)
+    if planned is None:
+        return _cpus(), [], "a direct call: this machine's CPUs (the plan asks for all)"
+    return planned, [], f"a direct call: the plan's {planned}"
+
+
+def task(p: Planned, calctype: str, outputs: frozenset[str]) -> str:
+    """The driver task (JSON) of a calctype with outputs."""
+    t: dict[str, Any] = {"numbers": [], "positions": []}
+    if calctype == "gradient":
+        t["gradient"] = True
+    elif calctype == "hessian":
+        t["hessian"] = True
+        t.update(p.task)
+    if "bond_orders" in outputs:
+        t["bond_orders"] = True
+    if "overlap" in outputs:
+        t["overlap"] = True
+    if "hamiltonian" in outputs:
+        t["hamiltonian"] = True
+    return json.dumps(t, separators=(",", ":"))
+
+
+def _quadrupole(q: np.ndarray) -> np.ndarray:
+    """The 3 x 3 tensor of a packed one (xx, xy, yy, xz, yz, zz)."""
+    xx, xy, yy, xz, yz, zz = q
+    return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
+
+
+def _thermo(r: Mapping[str, Any], p: Planned) -> tuple[dict[str, Any], list[Thermochemistry]]:
+    """The VibrationalAnalysis fields of the thermochemistry, and its entries per temperature."""
+    v = r["vibrations"]
+    t = v.get("thermo")
+    if t is None:
+        return {}, []
+    energy = r["energy"]
+    rot = [c if c != 0.0 else None for c in t["rotational_constants"]]
+    fields = {
+        "rotational_constants": rot,
+        "point_group": t["point_group"],
+        "symmetry_number": t["symmetry_number"],
+        "symmetry_number_source": "input" if "freq.symmetry_number" in p.given else "detected",
+    }
+    zpve = t["zpve"]
+    entries = []
+    for pt in t["points"]:
+        tr, ro, vi = pt["translation"], pt["rotation"], pt["vibration"]
+        entries.append(
+            Thermochemistry(
+                temperature=pt["temperature"],
+                pressure=t["pressure"],
+                electronic_energy=energy,
+                zero_point_energy=zpve,
+                translational=ThermoTerm(enthalpy=tr["enthalpy"], entropy=tr["entropy"], cp=tr["heat_capacity"]),
+                rotational=ThermoTerm(enthalpy=ro["enthalpy"], entropy=ro["entropy"], cp=ro["heat_capacity"]),
+                # qcdata's vibrational term includes the zero-point energy, axtb's does not
+                vibrational=ThermoTerm(enthalpy=zpve + vi["enthalpy"], entropy=vi["entropy"], cp=vi["heat_capacity"]),
+                total=ThermoTerm(
+                    enthalpy=pt["total_enthalpy"],
+                    entropy=pt["entropy"],
+                    cp=pt["heat_capacity"],
+                    gibbs=pt["free_energy"],
+                ),
+                symmetry_number=t["symmetry_number"],
+                electronic_degeneracy=1.0,
+                entropy_model="qrrho_grimme",
+                enthalpy_model="rrho",
+                qrrho_frequency=t["rotor_cutoff"],
+                qrrho_alpha=4.0,
+                qrrho_bav=t["average_moment"],
+                frequency_scale_factor=t["frequency_scale"],
+                excluded_imaginary=list(t["dropped_frequencies"]),
+                inverted_imaginary=list(t["inverted_frequencies"]),
+            )
+        )
+    return fields, entries
+
+
+def results(r: Mapping[str, Any], p: Planned, calctype: str, outputs: frozenset[str]) -> SinglePointData:
+    """The `SinglePointData` of a response."""
+    nat = len(p.numbers)
+    d: dict[str, Any] = {
+        "provenance": provenance(),
+        "energy": r["energy"],
+        "calcinfo_natoms": nat,
+        "dipole_moment": [float(x) for x in r["dipole"]],
+        "atomic_charges": r["charges"],
+        "atomic_charges_kind": "mulliken" if p.scf else "eeq",
+    }
+    subtotals = set(r["subtotals"])
+    d["energy_components"] = {k: x for k, x in r["terms"].items() if k not in subtotals}
+    if calctype != "energy":
+        d["gradient"] = r["gradient"]
+    scf = r.get("scf")
+    if scf is not None:
+        d["scf_iterations"] = scf["iterations"]
+        d["quadrupole_moment"] = _quadrupole(scf["quadrupole_traceless"])
+        d["calcinfo_nmo"] = len(scf["orbital_energies_alpha"])
+        d["calcinfo_nbasis"] = sum(2 * ell + 1 for ell in scf["shell_angular_momenta"])
+        for spin, name in (("alpha", "calcinfo_nalpha"), ("beta", "calcinfo_nbeta")):
+            n = float(np.sum(scf[f"occupations_{spin}"]))
+            if abs(n - round(n)) <= 1e-6:
+                d[name] = int(round(n))
+        if "bond_orders" in scf and "bond_orders" in outputs:
+            d["bond_orders"] = scf["bond_orders"]
+            d["bond_orders_kind"] = "mayer"
+    h = r.get("hessian")
+    if h is not None:
+        d["hessian"] = h["hessian"]
+    v = r.get("vibrations")
+    if v is not None:
+        fields, entries = _thermo(r, p)
+        va: dict[str, Any] = {
+            "masses": v["masses"],
+            "projection": "translations_rotations",
+            "frequencies": v["frequencies"],
+            "normal_modes_cartesian": v["normal_modes"],
+            "reduced_masses": v["reduced_masses"],
+            "force_constants": v["force_constants"],
+            "rotor_type": "atom" if nat == 1 else ("linear" if v["linear"] else "nonlinear"),
+            **fields,
+        }
+        if "ir_intensities" in v:
+            va["ir_intensities"] = v["ir_intensities"]
+            va["dipole_derivatives"] = h["dipole_derivatives"]
+        d["vibrational_analysis"] = VibrationalAnalysis(**va)
+        d["thermochemistry"] = entries
+    # trusted values of the right shapes: built without validation (tests revalidate them)
+    return _build(SinglePointData, **d)
+
+
+def record(r: Mapping[str, Any] | None, p: Planned, *, session: bool = False) -> dict[str, Any]:
+    """axtb's ``record`` of a response (`None`: a failure before the driver answered)."""
+    rec: dict[str, Any] = {
+        "method": p.method,
+        "conventions": p.conventions,
+        "numerics": r["numerics"] if r else _axtb.numerics(p.method, p.composite),
+    }
+    if r is None:
+        return rec
+    if r.get("eigensolver"):
+        rec["eigensolver"] = r["eigensolver"]
+    scf = r.get("scf")
+    if scf is not None:
+        s: dict[str, Any] = {"start": scf["guess"], "iterations": scf["iterations"]}
+        if scf["mixer_used"] is not None:
+            s["mixer_used"] = scf["mixer_used"]
+        if scf["scf_attempts"]:
+            s["attempts"] = scf["scf_attempts"]
+        rec["scf"] = s
+    subtotals = {k: r["terms"][k] for k in r["subtotals"]}
+    if subtotals:
+        rec["energy_subtotals"] = subtotals
+    contingent: dict[str, Any] = {}
+    if "scf.mixer" in p.contingent and scf is not None:
+        contingent["scf.mixer"] = {"fired": scf["mixer_used"] == "diis-fallback"}
+    comp = r.get("composite")
+    if comp is not None:
+        rec["composite"] = {
+            "definition": comp["composite"],
+            "components": comp["components"],
+            "parts": comp["parts"],
+        }
+        if comp.get("hessian_parts") is not None:
+            rec["composite"]["hessian_parts"] = comp["hessian_parts"]
+        rec["wavefunction"] = {"part": "gxtb"}
+        retried = [k for k, part in comp["parts"].items() if part.get("retry")]
+        contingent["composite.retries"] = {"fired": bool(retried), "parts": retried}
+    if contingent:
+        rec["contingent"] = contingent
+    h = r.get("hessian")
+    if h is not None:
+        rec["hessian"] = {"method": h["hessian_method"], "max_asymmetry": h["hessian_max_asymmetry"]}
+    g = r.get("gfnff")
+    if g is not None:
+        topo = g["topology"]
+        rec["gfnff"] = {
+            "n_hbonds": g["n_hbonds"],
+            "n_xbonds": g["n_xbonds"],
+            "fragment_charges": topo["fragment_charges"],
+        }
+        if not session:
+            rec["gfnff"]["topology"] = topo
+    return rec
+
+
+def timings(r: Mapping[str, Any], total: float) -> dict[str, float]:
+    """``execution.timings``: the single point's phases, the Hessian's (``hessian:``), ``total``."""
+    t = {k: float(x) for k, x in (r.get("timings") or {}).items()}
+    h = r.get("hessian")
+    if h is not None:
+        t.update({f"hessian:{k}": float(x) for k, x in h["hessian_timings"].items()})
+    t["total"] = total
+    return t
+
+
+def warnings_of(r: Mapping[str, Any]) -> list[ProgramWarning]:
+    """The warnings of a response: a run-time LAPACK that was not used."""
+    if r.get("eigensolver_warning"):
+        return [ProgramWarning(code="eigensolver_fallback", message=r["eigensolver_warning"])]
+    return []
+
+
+def failed_output(
+    inp: ProgramInput,
+    e: ProgramError,
+    *,
+    p: Planned | None = None,
+    resolved: Resolved | None = None,
+    warnings: list[ProgramWarning] | None = None,
+    rec: dict[str, Any] | None = None,
+    execution: ExecutionInfo | None = None,
+) -> ProgramOutput[Any, Any]:
+    """The failed output of an input: empty results with axtb's provenance, the error, and what
+    planning learnt (``resolved``, ``record``)."""
+    fields: dict[str, Any] = {"record": rec or {}, "warnings": warnings or []}
+    if resolved is not None:
+        fields["resolved"] = resolved
+    if execution is not None:
+        fields["execution"] = execution
+    return ProgramOutput.failure(inp, e.error, results=SinglePointData(provenance=provenance()), **fields)
+
+
+def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, SinglePointData]:
+    """One calculation: ``energy``, ``gradient`` or ``hessian`` (with the vibrational analysis
+    and thermochemistry unless ``freq.analysis`` is ``off``).
+
+    Args:
+        inp: The input: structure, ``model.method``, keywords (see ``docs/python.md``).
+        ctx: A runner's `qccompute.program.RunContext`; only ``ctx.threads`` is read.
+
+    Returns:
+        The successful output.
+
+    Raises:
+        ProgramError: The input is refused or the calculation failed; ``exc.output`` is the
+            failed output.
+        TypeError: ``inp`` is not a `qcdata.ProgramInput`.
+    """
+    start = time.perf_counter()
+    if not isinstance(inp, ProgramInput):
+        raise TypeError(f"axtb.compute takes a qcdata.ProgramInput, not {type(inp).__name__}")
+    try:
+        p = plan_input(inp)
+    except ProgramError as e:
+        e.output = failed_output(inp, e)
+        raise
+    calctype = inp.calctype.value
+    n, warnings, why = threads(p, calctype, ctx)
+    resolved = _build(Resolved, settings={**p.settings, "threads": n}, reasons={**p.reasons, "threads": why})
+    request = json.dumps({**p.request, "threads": n}, separators=(",", ":"))
+    try:
+        r = _axtb.compute_once(request, p.numbers, p.positions, task(p, calctype, p.outputs))
+    except _axtb.Error as x:
+        error, fields = from_driver(x)
+        rec = record(None, p)
+        rec["error"] = fields
+        out_error = ProgramError(error)
+        execution = ExecutionInfo(threads=n, timings={"total": time.perf_counter() - start})
+        out_error.output = failed_output(
+            inp, out_error, p=p, resolved=resolved, warnings=warnings, rec=rec, execution=execution
+        )
+        raise out_error from None
+    res = results(r, p, calctype, p.outputs)
+    rec = record(r, p)
+    out = _build(
+        _OUTPUT,
+        input_data=inp,
+        success=True,
+        results=res,
+        resolved=resolved,
+        warnings=warnings + warnings_of(r),
+        record=rec,
+        execution=_build(
+            ExecutionInfo, devices=[], threads=r["threads"], timings=timings(r, time.perf_counter() - start)
+        ),
+    )
+    return out

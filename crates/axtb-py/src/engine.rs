@@ -611,6 +611,14 @@ pub(crate) fn numerics(py: Python<'_>, method: &str, composite: bool) -> PyResul
     Ok(axtb_driver::numerics(m, composite))
 }
 
+/// The electrons a neutral atom brings to the orbitals of `method`, for Z = 1..=118 (index Z - 1;
+/// None beyond the method's tables): `axtb_driver::valence_electrons`.
+#[pyfunction]
+pub(crate) fn valence_electrons(py: Python<'_>, method: &str) -> PyResult<Vec<Option<f64>>> {
+    let m = axtb_driver::Method::parse(method).map_err(|e| Failure::from(e).into_py(py))?;
+    Ok((1..=118).map(|z| axtb_driver::valence_electrons(m, z)).collect())
+}
+
 /// The largest molecule (atoms) whose single point (`hessian` false) or Hessian of `method`
 /// runs on one thread (`axtb_driver::single_thread_atoms`).
 #[pyfunction]

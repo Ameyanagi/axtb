@@ -718,6 +718,7 @@ fn _axtb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(engine::supported_elements, m)?)?;
     m.add_function(wrap_pyfunction!(engine::numerics, m)?)?;
     m.add_function(wrap_pyfunction!(engine::single_thread_atoms, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::valence_electrons, m)?)?;
     m.add_function(wrap_pyfunction!(engine::solvents, m)?)?;
     m.add_function(wrap_pyfunction!(engine::canonical_solvent, m)?)?;
     m.add_function(wrap_pyfunction!(engine::lapack_warning, m)?)?;

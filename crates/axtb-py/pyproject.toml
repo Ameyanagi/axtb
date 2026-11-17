@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "axtb"
 description = "Extended tight binding (GFN2-xTB, g-xTB) and the GFN-FF force field: energies, gradients, Hessians, vibrational analysis"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # every part, g-xTB included (LICENSE, NOTICE)
 license = "LGPL-3.0-or-later"
 license-files = ["COPYING", "COPYING.LESSER", "LICENSE", "NOTICE"]
@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
     "Typing :: Typed",
 ]
-dependencies = ["numpy>=1.22"]
+dependencies = ["numpy>=1.22", "qcdata>=0.24.0a5,<0.25"]
 dynamic = ["version"]
 
 [project.urls]

@@ -49,7 +49,7 @@ mod task;
 
 pub use calculator::{gxtb_solvent_hint, Calculator, Wavefunction};
 pub use error::{Error, Result};
-pub use names::{canonical, canonical_method, supported_elements, Method};
+pub use names::{canonical, canonical_method, supported_elements, valence_electrons, Method};
 pub use request::{Request, Temperatures};
 pub use response::{
     Attempt, Composite, Contribution, Details, Gfnff, HessianPart, Matrix, Named, Part, Parts, Response, Scf, Thermo,

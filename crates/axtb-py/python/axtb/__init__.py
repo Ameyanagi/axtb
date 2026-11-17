@@ -94,12 +94,14 @@ from ._axtb import (  # noqa: E402  (after the CPU check)
     InputError,
     ScfNotConvergedError,
     ScfState,
-    __version__,
     canonical_method,
     gxtb_solvent_hint,
     singlepoint,
     vibrational_analysis,
 )
+from ._program import program  # noqa: E402
+from ._qc import VERSION as __version__  # noqa: E402
+from ._qc import compute  # noqa: E402
 
 __all__ = [
     "Calculator",
@@ -108,7 +110,9 @@ __all__ = [
     "ScfState",
     "__version__",
     "canonical_method",
+    "compute",
     "gxtb_solvent_hint",
+    "program",
     "singlepoint",
     "vibrational_analysis",
 ]

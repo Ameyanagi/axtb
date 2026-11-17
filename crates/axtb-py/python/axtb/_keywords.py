@@ -14,7 +14,9 @@ order of qcdata's conventions (D41; the first error raises):
 4. ``not_applicable``: a setting of a calctype that will not run; ``files``,
    ``cmdline_args``, ``subprograms``, ``structures``; a ``given`` with nothing usable;
 5. ``missing_setting``: a value that needs another key;
-6. the structure: ``invalid_structure`` (parity, non-finite positions), ``unsupported_element``,
+6. the structure: ``invalid_structure`` (non-finite positions), ``unsupported_element``,
+   ``invalid_structure`` (a multiplicity whose parity is not that of the electrons the method's
+   orbitals hold: valence-only methods leave cores out, `axtb._axtb.valence_electrons`),
    ``not_modeled`` (GFN-FF with multiplicity > 1);
 7. kind ``unsupported``: a shared setting axtb cannot honour (``unsupported_setting``), an
    output it cannot give (``not_applicable``).
@@ -31,7 +33,9 @@ calculation runs exactly what the CLI runs for the same request.
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
+import json
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -84,7 +88,12 @@ _CONVENTION_ALIASES = {"xtb": "xtb-6.8.0", "tblite": "tblite-0.8.0", "gxtb": Non
 #: The vibrational analysis' conventions: canonical name and driver name.
 ANALYSIS_CONVENTIONS = {"axtb": "axtb", "xtb-6.8.0": "xtb", "xtb-6.7.1": "xtb671"}
 #: The analysis conventions of a calculation's conventions (MethodInfo::analysis).
-_ANALYSIS_OF = {"xtb-6.8.0": "xtb-6.8.0", "xtb-6.7.1": "xtb-6.7.1", "gxtb-1.1.0": "xtb-6.7.1", "gxtb-2.0.1": "xtb-6.7.1"}
+_ANALYSIS_OF = {
+    "xtb-6.8.0": "xtb-6.8.0",
+    "xtb-6.7.1": "xtb-6.7.1",
+    "gxtb-1.1.0": "xtb-6.7.1",
+    "gxtb-2.0.1": "xtb-6.7.1",
+}
 
 
 def _enum(value: Any, allowed: Iterable[str], path: str, aliases: Mapping[str, str] | None = None) -> str:
@@ -201,129 +210,577 @@ _GEOMETRY_SCHEMA = {"type": "array", "items": {"type": "array", "items": _NUM, "
 _UNSUPPORTED_SCHEMA: dict[str, Any] = {"not": {}}
 
 KEYS: tuple[Key, ...] = (
-    Key("threads", True, "common", "resource", None, _INT1, _ALL, _EGH,
-        "the runner's grant (a plan without one: deferred), else the plan's", "CPU threads of the calculation, "
-        "at most the grant (more: the grant and the warning resource_capped).", "threads"),
-    Key("accuracy", True, "common", "convergence", "Eh, Eh/bohr, Eh/bohr²", _ACCURACY_SCHEMA, _ALL, _EGH,
-        "none", "Accuracy targets (energy, gradient, hessian), turned into the SCF accuracy factor by axtb's "
-        "error model and recorded under record.accuracy; GFN-FF meets every target (no thresholds)."),
-    Key("accuracy_scale", False, "expert", "convergence", None, _POS, _SCF, _EGH, "1",
+    Key(
+        "threads",
+        True,
+        "common",
+        "resource",
+        None,
+        _INT1,
+        _ALL,
+        _EGH,
+        "the runner's grant (a plan without one: deferred), else the plan's",
+        "CPU threads of the calculation, at most the grant (more: the grant and the warning resource_capped).",
+        "threads",
+    ),
+    Key(
+        "accuracy",
+        True,
+        "common",
+        "convergence",
+        "Eh, Eh/bohr, Eh/bohr²",
+        _ACCURACY_SCHEMA,
+        _ALL,
+        _EGH,
+        "none",
+        "Accuracy targets (energy, gradient, hessian), turned into the SCF accuracy factor by axtb's "
+        "error model and recorded under record.accuracy; GFN-FF meets every target (no thresholds).",
+    ),
+    Key(
+        "accuracy_scale",
+        False,
+        "expert",
+        "convergence",
+        None,
+        _POS,
+        _SCF,
+        _EGH,
+        "1",
         "Multiplier of every SCF threshold, and of GFN2-xTB's integral screening (xtb's --acc); a floor under "
-        "the accuracy targets.", "accuracy"),
-    Key("conventions", False, "common", "model", None, {"type": "string"}, _ALL, _EGH, "axtb",
+        "the accuracy targets.",
+        "accuracy",
+    ),
+    Key(
+        "conventions",
+        False,
+        "common",
+        "model",
+        None,
+        {"type": "string"},
+        _ALL,
+        _EGH,
+        "axtb",
         "Whose numbers to reproduce: axtb (CODATA 2022, fixes), or a reference program: GFN2-xTB "
         "xtb-6.8.0, xtb-6.7.1, tblite-0.8.0; g-xTB gxtb-1.1.0, gxtb-2.0.1; GFN-FF xtb-6.8.0, xtb-6.7.1 "
-        "(aliases xtb, tblite, gxtb).", "conventions"),
-    Key("scf.max_iter", True, "expert", "convergence", None, _INT1, _SCF, _EGH,
-        "GFN2-xTB, g-xTB 2.0.1 250; v1.1 1000", "Iteration limit of one SCF.", "max_iter"),
-    Key("scf.etemp", False, "common", "model", "K", _NONNEG, _SCF, _EGH,
+        "(aliases xtb, tblite, gxtb).",
+        "conventions",
+    ),
+    Key(
+        "scf.max_iter",
+        True,
+        "expert",
+        "convergence",
+        None,
+        _INT1,
+        _SCF,
+        _EGH,
+        "GFN2-xTB, g-xTB 2.0.1 250; v1.1 1000",
+        "Iteration limit of one SCF.",
+        "max_iter",
+    ),
+    Key(
+        "scf.etemp",
+        False,
+        "common",
+        "model",
+        "K",
+        _NONNEG,
+        _SCF,
+        _EGH,
         "GFN2-xTB 300; g-xTB 0; the composite each part's (g-xTB 0, GFN2 300; not echoed)",
         "Electronic temperature of the Fermi smearing; given for the composite, it sets every part (and "
-        "turns off the g-xTB part's retries at 1000 and 3000 K).", "etemp"),
-    Key("scf.mixer", False, "expert", "algorithm", None, _enum_schema("broyden", "diis", "broyden-then-diis"),
-        frozenset({"gfn2", "composite"}), _EGH,
+        "turns off the g-xTB part's retries at 1000 and 3000 K).",
+        "etemp",
+    ),
+    Key(
+        "scf.mixer",
+        False,
+        "expert",
+        "algorithm",
+        None,
+        _enum_schema("broyden", "diis", "broyden-then-diis"),
+        frozenset({"gfn2", "composite"}),
+        _EGH,
         "axtb conventions broyden-then-diis; the programs' broyden",
         "Mixer of GFN2-xTB's SCF (and of the composite's GFN2 parts): broyden-then-diis falls back to DIIS "
-        "when Broyden fails (contingent).", "mixer"),
-    Key("scf.guess", True, "expert", "algorithm", None, _enum_schema("eeq", "sad", "eeq-bc", "given"),
-        frozenset({"gfn2", "gxtb-v1.1", "gxtb-v2.0.1"}), _EGH,
+        "when Broyden fails (contingent).",
+        "mixer",
+    ),
+    Key(
+        "scf.guess",
+        True,
+        "expert",
+        "algorithm",
+        None,
+        _enum_schema("eeq", "sad", "eeq-bc", "given"),
+        frozenset({"gfn2", "gxtb-v1.1", "gxtb-v2.0.1"}),
+        _EGH,
         "GFN2-xTB eeq (tblite-0.8.0 sad); g-xTB eeq-bc",
         "Where an SCF without history starts: GFN2-xTB eeq (charges) or sad (neutral atoms), g-xTB eeq-bc; "
-        "given: from the input's given wavefunction.", "guess"),
-    Key("scf.restart", False, "expert", "algorithm", None, _enum_schema("previous", "off"), _SCF, _EGH,
+        "given: from the input's given wavefunction.",
+        "guess",
+    ),
+    Key(
+        "scf.restart",
+        False,
+        "expert",
+        "algorithm",
+        None,
+        _enum_schema("previous", "off"),
+        _SCF,
+        _EGH,
         "previous; g-xTB in its program's conventions off",
-        "Sessions: whether an SCF starts from its lineage's history (previous) or fresh (off).", "restart"),
-    Key("scf.e_tol", True, "expert", "convergence", "Eh", _UNSUPPORTED_SCHEMA, frozenset(), frozenset(), "-",
-        "Not supported.", unsupported="axtb's SCF thresholds follow accuracy_scale and accuracy, not "
-        "explicit tolerances"),
-    Key("scf.g_tol", True, "expert", "convergence", None, _UNSUPPORTED_SCHEMA, frozenset(), frozenset(), "-",
-        "Not supported.", unsupported="axtb's SCF thresholds follow accuracy_scale and accuracy, not "
-        "explicit tolerances"),
-    Key("solvent.name", True, "common", "model", None, {"type": "string"},
-        frozenset({"gfn2", "composite"}), _EGH, "none",
+        "Sessions: whether an SCF starts from its lineage's history (previous) or fresh (off).",
+        "restart",
+    ),
+    Key(
+        "scf.e_tol",
+        True,
+        "expert",
+        "convergence",
+        "Eh",
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not supported.",
+        unsupported="axtb's SCF thresholds follow accuracy_scale and accuracy, not explicit tolerances",
+    ),
+    Key(
+        "scf.g_tol",
+        True,
+        "expert",
+        "convergence",
+        None,
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not supported.",
+        unsupported="axtb's SCF thresholds follow accuracy_scale and accuracy, not explicit tolerances",
+    ),
+    Key(
+        "solvent.name",
+        True,
+        "common",
+        "model",
+        None,
+        {"type": "string"},
+        frozenset({"gfn2", "composite"}),
+        _EGH,
+        "none",
         "Implicit solvent (ALPB or GBSA parameters of GFN2-xTB). g-xTB has none: with solvent.correction "
-        "gfn2 it runs the composite E(g-xTB) + [E(GFN2-xTB + solvent) - E(GFN2-xTB)].", "alpb, gbsa"),
-    Key("solvent.model", True, "common", "model", None, _enum_schema("alpb", "gbsa"),
-        frozenset({"gfn2", "composite"}), _EGH, "alpb", "The continuum model of solvent.name.", "alpb, gbsa"),
-    Key("solvent.eps", True, "expert", "model", None, _UNSUPPORTED_SCHEMA, frozenset(), frozenset(), "-",
-        "Not supported.", unsupported="axtb's ALPB and GBSA models are parametrized per solvent name "
-        "(solvent.name), not by a permittivity"),
-    Key("solvent.state", False, "expert", "model", None, _enum_schema("gsolv", "bar1M", "reference"),
-        frozenset({"gfn2", "composite"}), _EGH, "gsolv",
-        "Reference state of the solvation free energy.", "solvation_state"),
-    Key("solvent.correction", False, "common", "model", None, _enum_schema("gfn2"),
-        frozenset({"composite"}), _EGH, "none",
-        "g-xTB in solvent: the composite with GFN2-xTB's solvation correction.", "solvation_correction"),
-    Key("solvent.correction_conventions", False, "expert", "model", None,
-        _enum_schema("axtb", "xtb-6.8.0", "xtb-6.7.1", "tblite-0.8.0"), frozenset({"composite"}), _EGH,
+        "gfn2 it runs the composite E(g-xTB) + [E(GFN2-xTB + solvent) - E(GFN2-xTB)].",
+        "alpb, gbsa",
+    ),
+    Key(
+        "solvent.model",
+        True,
+        "common",
+        "model",
+        None,
+        _enum_schema("alpb", "gbsa"),
+        frozenset({"gfn2", "composite"}),
+        _EGH,
+        "alpb",
+        "The continuum model of solvent.name.",
+        "alpb, gbsa",
+    ),
+    Key(
+        "solvent.eps",
+        True,
+        "expert",
+        "model",
+        None,
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not supported.",
+        unsupported="axtb's ALPB and GBSA models are parametrized per solvent name "
+        "(solvent.name), not by a permittivity",
+    ),
+    Key(
+        "solvent.state",
+        False,
+        "expert",
+        "model",
+        None,
+        _enum_schema("gsolv", "bar1M", "reference"),
+        frozenset({"gfn2", "composite"}),
+        _EGH,
+        "gsolv",
+        "Reference state of the solvation free energy.",
+        "solvation_state",
+    ),
+    Key(
+        "solvent.correction",
+        False,
+        "common",
+        "model",
+        None,
+        _enum_schema("gfn2"),
+        frozenset({"composite"}),
+        _EGH,
+        "none",
+        "g-xTB in solvent: the composite with GFN2-xTB's solvation correction.",
+        "solvation_correction",
+    ),
+    Key(
+        "solvent.correction_conventions",
+        False,
+        "expert",
+        "model",
+        None,
+        _enum_schema("axtb", "xtb-6.8.0", "xtb-6.7.1", "tblite-0.8.0"),
+        frozenset({"composite"}),
+        _EGH,
         "axtb; xtb-6.7.1 with g-xTB's program conventions",
-        "Conventions of the composite's GFN2-xTB parts.", "correction_conventions"),
-    Key("topology.geometry", False, "expert", "model", "bohr", _GEOMETRY_SCHEMA, frozenset({"gfnff"}), _EGH,
+        "Conventions of the composite's GFN2-xTB parts.",
+        "correction_conventions",
+    ),
+    Key(
+        "topology.geometry",
+        False,
+        "expert",
+        "model",
+        "bohr",
+        _GEOMETRY_SCHEMA,
+        frozenset({"gfnff"}),
+        _EGH,
         "the input's geometry (a session: the opening one; not echoed)",
-        "The positions GFN-FF sets its topology up from.", "topology_positions"),
-    Key("topology.fragment_charges", False, "expert", "model", "e", {"type": "array", "items": _NUM},
-        frozenset({"gfnff"}), _EGH, "the charge on atom 1's fragment (in record.gfnff; not echoed)",
+        "The positions GFN-FF sets its topology up from.",
+        "topology_positions",
+    ),
+    Key(
+        "topology.fragment_charges",
+        False,
+        "expert",
+        "model",
+        "e",
+        {"type": "array", "items": _NUM},
+        frozenset({"gfnff"}),
+        _EGH,
+        "the charge on atom 1's fragment (in record.gfnff; not echoed)",
         "Charges of the molecular fragments, in the order of their first atoms, summing to the charge.",
-        "fragment_charges"),
-    Key("hessian.method", False, "common", "algorithm", None, _enum_schema("analytic", "response", "numerical"),
-        _ALL, _H, "analytic; g-xTB v1.1 numerical; the composite each part's",
+        "fragment_charges",
+    ),
+    Key(
+        "hessian.method",
+        False,
+        "common",
+        "algorithm",
+        None,
+        _enum_schema("analytic", "response", "numerical"),
+        _ALL,
+        _H,
+        "analytic; g-xTB v1.1 numerical; the composite each part's",
         "analytic second derivatives, response (central differences of the response gradient) or numerical "
         "(central differences of analytic gradients). g-xTB v1.1: numerical, response (axtb conventions); "
-        "GFN-FF: analytic, numerical.", "hessian_method"),
-    Key("hessian.step", False, "expert", "approximation", "bohr", _POS, _ALL, _H,
+        "GFN-FF: analytic, numerical.",
+        "hessian_method",
+    ),
+    Key(
+        "hessian.step",
+        False,
+        "expert",
+        "approximation",
+        "bohr",
+        _POS,
+        _ALL,
+        _H,
         "numerical 0.005; response GFN2-xTB 5e-4, g-xTB 2e-4",
-        "Finite-difference step of the numerical and response Hessians.", "hessian_step"),
-    Key("hessian.accuracy_scale", False, "expert", "convergence", None, _POS, _SCF, _H,
+        "Finite-difference step of the numerical and response Hessians.",
+        "hessian_step",
+    ),
+    Key(
+        "hessian.accuracy_scale",
+        False,
+        "expert",
+        "convergence",
+        None,
+        _POS,
+        _SCF,
+        _H,
         "numerical 0.01; analytic and response GFN2-xTB 1e-3, g-xTB 1e-5",
         "SCF accuracy factor of the numerical Hessian's displacements, or of the analytic and response "
-        "Hessians' reference; never looser than the calculation's.", "hessian_accuracy"),
-    Key("freq.analysis", False, "common", "output", None, _enum_schema("harmonic", "off"), _ALL, _H, "harmonic",
-        "The harmonic analysis of the Hessian (vibrational_analysis), and its thermochemistry.", "vibrations"),
-    Key("freq.thermo", False, "common", "output", None, _enum_schema("qrrho", "off"), _ALL, _H, "qrrho",
-        "Thermochemistry: Grimme's quasi-RRHO (xtb's), or none.", "thermo"),
-    Key("freq.conventions", False, "expert", "model", None, _enum_schema("axtb", "xtb-6.8.0", "xtb-6.7.1"),
-        _ALL, _H, "the calculation's (axtb; xtb-6.8.0 or xtb-6.7.1 in those; g-xTB's programs xtb-6.7.1)",
-        "Constants, masses and projection of the analysis.", "analysis_conventions"),
-    Key("freq.masses", False, "expert", "model", "u", {"type": "array", "items": _POS}, _ALL, _H,
-        "the analysis conventions' table (not echoed)", "Atomic masses of the analysis.", "masses"),
-    Key("freq.temperature", True, "common", "model", "K",
-        {"anyOf": [_POS, {"type": "array", "items": _POS, "minItems": 1}]}, _ALL, _H, "298.15",
-        "Temperature, or several: one thermochemistry entry each, in order.", "temperature"),
-    Key("freq.pressure", True, "common", "model", "Pa", _POS, _ALL, _H, "101325", "Pressure of the ideal gas.",
-        "pressure"),
-    Key("freq.scale", True, "expert", "model", None, _POS, _ALL, _H,
-        "1 (GFN-FF in the xtb analysis conventions 1.03)", "Scale factor of the frequencies in the "
-        "thermochemistry.", "frequency_scale"),
-    Key("freq.imaginary_cutoff", True, "expert", "model", "cm⁻¹", _NONNEG, _ALL, _H, "20",
+        "Hessians' reference; never looser than the calculation's.",
+        "hessian_accuracy",
+    ),
+    Key(
+        "freq.analysis",
+        False,
+        "common",
+        "output",
+        None,
+        _enum_schema("harmonic", "off"),
+        _ALL,
+        _H,
+        "harmonic",
+        "The harmonic analysis of the Hessian (vibrational_analysis), and its thermochemistry.",
+        "vibrations",
+    ),
+    Key(
+        "freq.thermo",
+        False,
+        "common",
+        "output",
+        None,
+        _enum_schema("qrrho", "off"),
+        _ALL,
+        _H,
+        "qrrho",
+        "Thermochemistry: Grimme's quasi-RRHO (xtb's), or none.",
+        "thermo",
+    ),
+    Key(
+        "freq.conventions",
+        False,
+        "expert",
+        "model",
+        None,
+        _enum_schema("axtb", "xtb-6.8.0", "xtb-6.7.1"),
+        _ALL,
+        _H,
+        "the calculation's (axtb; xtb-6.8.0 or xtb-6.7.1 in those; g-xTB's programs xtb-6.7.1)",
+        "Constants, masses and projection of the analysis.",
+        "analysis_conventions",
+    ),
+    Key(
+        "freq.masses",
+        False,
+        "expert",
+        "model",
+        "u",
+        {"type": "array", "items": _POS},
+        _ALL,
+        _H,
+        "the analysis conventions' table (not echoed)",
+        "Atomic masses of the analysis.",
+        "masses",
+    ),
+    Key(
+        "freq.temperature",
+        True,
+        "common",
+        "model",
+        "K",
+        {"anyOf": [_POS, {"type": "array", "items": _POS, "minItems": 1}]},
+        _ALL,
+        _H,
+        "298.15",
+        "Temperature, or several: one thermochemistry entry each, in order.",
+        "temperature",
+    ),
+    Key(
+        "freq.pressure",
+        True,
+        "common",
+        "model",
+        "Pa",
+        _POS,
+        _ALL,
+        _H,
+        "101325",
+        "Pressure of the ideal gas.",
+        "pressure",
+    ),
+    Key(
+        "freq.scale",
+        True,
+        "expert",
+        "model",
+        None,
+        _POS,
+        _ALL,
+        _H,
+        "1 (GFN-FF in the xtb analysis conventions 1.03)",
+        "Scale factor of the frequencies in the thermochemistry.",
+        "frequency_scale",
+    ),
+    Key(
+        "freq.imaginary_cutoff",
+        True,
+        "expert",
+        "model",
+        "cm⁻¹",
+        _NONNEG,
+        _ALL,
+        _H,
+        "20",
         "Imaginary modes below this magnitude count as real in the thermochemistry (xtb's ithr).",
-        "imaginary_cutoff"),
-    Key("freq.rotor_cutoff", False, "expert", "model", "cm⁻¹", _POS, _ALL, _H, "50",
-        "The quasi-RRHO rotor cutoff (xtb's sthr).", "rotor_cutoff"),
-    Key("freq.symmetry_number", False, "expert", "model", None, _INT1, _ALL, _H,
-        "from the point group (not echoed)", "Rotational symmetry number.", "symmetry_number"),
-    Key("freq.symmetry_tol", False, "expert", "model", "bohr", _POS, _ALL, _H, "0.1",
-        "Tolerance of the point-group detection (xtb's desy).", "symmetry_threshold"),
-    Key("output.orbitals", True, "common", "output", None, _BOOL, _SCF, _EGH, "false",
-        "The orbitals' coefficients with their basis set (wavefunction.orbitals).", ""),
-    Key("output.overlap", True, "common", "output", None, _BOOL, _SCF, _EGH, "false",
-        "The AO overlap matrix (wavefunction.overlap), with the basis set.", "overlap"),
-    Key("output.hamiltonian", True, "common", "output", None, _BOOL, _SCF, _EGH, "false",
+        "imaginary_cutoff",
+    ),
+    Key(
+        "freq.rotor_cutoff",
+        False,
+        "expert",
+        "model",
+        "cm⁻¹",
+        _POS,
+        _ALL,
+        _H,
+        "50",
+        "The quasi-RRHO rotor cutoff (xtb's sthr).",
+        "rotor_cutoff",
+    ),
+    Key(
+        "freq.symmetry_number",
+        False,
+        "expert",
+        "model",
+        None,
+        _INT1,
+        _ALL,
+        _H,
+        "from the point group (not echoed)",
+        "Rotational symmetry number.",
+        "symmetry_number",
+    ),
+    Key(
+        "freq.symmetry_tol",
+        False,
+        "expert",
+        "model",
+        "bohr",
+        _POS,
+        _ALL,
+        _H,
+        "0.1",
+        "Tolerance of the point-group detection (xtb's desy).",
+        "symmetry_threshold",
+    ),
+    Key(
+        "output.orbitals",
+        True,
+        "common",
+        "output",
+        None,
+        _BOOL,
+        _SCF,
+        _EGH,
+        "false",
+        "The orbitals' coefficients with their basis set (wavefunction.orbitals).",
+        "",
+    ),
+    Key(
+        "output.overlap",
+        True,
+        "common",
+        "output",
+        None,
+        _BOOL,
+        _SCF,
+        _EGH,
+        "false",
+        "The AO overlap matrix (wavefunction.overlap), with the basis set.",
+        "overlap",
+    ),
+    Key(
+        "output.hamiltonian",
+        True,
+        "common",
+        "output",
+        None,
+        _BOOL,
+        _SCF,
+        _EGH,
+        "false",
         "The Hamiltonian whose eigenvectors are the orbitals (wavefunction.hamiltonian_a/_b), with the "
-        "overlap and the orbitals; not g-xTB 2.0.1 in its program's conventions.", "hamiltonian"),
-    Key("output.core_hamiltonian", True, "expert", "output", None, _UNSUPPORTED_SCHEMA, frozenset(), frozenset(),
-        "-", "Not available.", unsupported="tight binding's H0 is model data, not a core Hamiltonian"),
-    Key("output.bond_orders", True, "common", "output", None, _BOOL, _SCF, _EGH, "false",
-        "Mayer bond orders (bond_orders).", "bond_orders"),
-    Key("output.molden", True, "expert", "output", None, _UNSUPPORTED_SCHEMA, frozenset(), frozenset(), "-",
-        "Not available.", unsupported="request output.orbitals and write the Molden file with qcinf"),
-    Key("output.density", False, "expert", "output", None, _UNSUPPORTED_SCHEMA, frozenset(), frozenset(), "-",
-        "Not available.", unsupported="the SCF density is Orbitals.density() of output.orbitals"),
-    Key("memory_gib", True, "expert", "resource", "GiB", _UNSUPPORTED_SCHEMA, frozenset(), frozenset(), "-",
-        "Not supported.", unsupported="axtb has no memory setting"),
-    Key("backend", True, "expert", "resource", None, _UNSUPPORTED_SCHEMA, frozenset(), frozenset(), "-",
-        "Not supported.", unsupported="axtb runs on the CPU only"),
-    Key("device_memory_gib", True, "expert", "resource", "GiB", _UNSUPPORTED_SCHEMA, frozenset(), frozenset(),
-        "-", "Not supported.", unsupported="axtb runs on the CPU only"),
+        "overlap and the orbitals; not g-xTB 2.0.1 in its program's conventions.",
+        "hamiltonian",
+    ),
+    Key(
+        "output.core_hamiltonian",
+        True,
+        "expert",
+        "output",
+        None,
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not available.",
+        unsupported="tight binding's H0 is model data, not a core Hamiltonian",
+    ),
+    Key(
+        "output.bond_orders",
+        True,
+        "common",
+        "output",
+        None,
+        _BOOL,
+        _SCF,
+        _EGH,
+        "false",
+        "Mayer bond orders (bond_orders).",
+        "bond_orders",
+    ),
+    Key(
+        "output.molden",
+        True,
+        "expert",
+        "output",
+        None,
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not available.",
+        unsupported="request output.orbitals and write the Molden file with qcinf",
+    ),
+    Key(
+        "output.density",
+        False,
+        "expert",
+        "output",
+        None,
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not available.",
+        unsupported="the SCF density is Orbitals.density() of output.orbitals",
+    ),
+    Key(
+        "memory_gib",
+        True,
+        "expert",
+        "resource",
+        "GiB",
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not supported.",
+        unsupported="axtb has no memory setting",
+    ),
+    Key(
+        "backend",
+        True,
+        "expert",
+        "resource",
+        None,
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not supported.",
+        unsupported="axtb runs on the CPU only",
+    ),
+    Key(
+        "device_memory_gib",
+        True,
+        "expert",
+        "resource",
+        "GiB",
+        _UNSUPPORTED_SCHEMA,
+        frozenset(),
+        frozenset(),
+        "-",
+        "Not supported.",
+        unsupported="axtb runs on the CPU only",
+    ),
 )
 _BY_PATH = {k.path: k for k in KEYS}
 GROUPS = ("scf", "solvent", "topology", "hessian", "freq", "output")
@@ -462,7 +919,7 @@ def _flatten(keywords: Mapping[str, Any]) -> dict[str, Any]:
                 raise refuse(
                     "input",
                     "invalid_value",
-                    f"{k}: a group of settings (an object, e.g. {{\"{k}\": {{...}}}}), not {v!r}{hint}",
+                    f'{k}: a group of settings (an object, e.g. {{"{k}": {{...}}}}), not {v!r}{hint}',
                 )
             for kk, vv in v.items():
                 path = f"{k}.{kk}"
@@ -534,7 +991,66 @@ def _restart_default(method: str, conventions: str) -> bool:
     return conventions == "axtb"
 
 
+#: Plans of recent inputs by everything but their geometry (an optimizer's or a list's inputs
+#: repeat their settings): planning costs ~35 us, a water gradient ~150 us.
+_CACHE: dict[tuple[Any, ...], Planned] = {}
+_CACHE_SIZE = 64
+
+
+def _copy_tree(s: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a settings tree (groups and lists copied; values are immutable)."""
+    return {k: (_copy_tree(x) if isinstance(x, dict) else list(x) if isinstance(x, list) else x) for k, x in s.items()}
+
+
 def plan_input(
+    inp: ProgramInput,
+    *,
+    calctypes: frozenset[str] | None = None,
+    session: bool = False,
+) -> Planned:
+    """Check an input and resolve its settings (see the module documentation); plans of inputs
+    that differ only in their geometry are reused."""
+    key = None
+    if inp.given is None and inp.structure is not None and inp.model is not None:
+        try:
+            s = inp.structure
+            key = (
+                inp.model.method,
+                inp.model.basis,
+                inp.calctype,
+                calctypes,
+                session,
+                json.dumps(inp.keywords, sort_keys=True),
+                tuple(s.symbols),
+                s.charge,
+                s.multiplicity,
+                bool(inp.files or inp.cmdline_args or inp.subprograms or inp.structures),
+            )
+        except (TypeError, ValueError):
+            key = None
+    if key is not None and key in _CACHE:
+        p = _CACHE[key]
+        positions = np.asarray(inp.structure.geometry, dtype=float).reshape(-1, 3)
+        if not np.all(np.isfinite(positions)):
+            raise refuse("input", "invalid_structure", "structure.geometry: positions must be finite numbers")
+        return dataclasses.replace(
+            p,
+            positions=positions,
+            settings=_copy_tree(p.settings),
+            reasons=dict(p.reasons),
+            request=_copy_tree(p.request),
+            task=_copy_tree(p.task),
+            record=_copy_tree(p.record),
+        )
+    p = _plan_input(inp, calctypes=calctypes, session=session)
+    if key is not None:
+        if len(_CACHE) >= _CACHE_SIZE:
+            del _CACHE[next(iter(_CACHE))]
+        _CACHE[key] = dataclasses.replace(p, settings=_copy_tree(p.settings), request=_copy_tree(p.request))
+    return p
+
+
+def _plan_input(
     inp: ProgramInput,
     *,
     calctypes: frozenset[str] | None = None,
@@ -567,12 +1083,16 @@ def plan_input(
 
     # 2. values: the model, the conventions, then every key
     if inp.model is None:
-        raise refuse("input", "invalid_value", 'model: axtb needs model.method ("gfn2", "gfnff", "gxtb-v1.1" or '
-                     '"gxtb-v2.0.1")')
+        raise refuse(
+            "input", "invalid_value", 'model: axtb needs model.method ("gfn2", "gfnff", "gxtb-v1.1" or "gxtb-v2.0.1")'
+        )
     method = canonical_method(inp.model.method)
     if inp.model.basis:
-        raise refuse("input", "invalid_value", f"model.basis: {inp.model.method} has its own basis; leave model.basis "
-                     f"out, not {inp.model.basis!r}")
+        raise refuse(
+            "input",
+            "invalid_value",
+            f"model.basis: {inp.model.method} has its own basis; leave model.basis out, not {inp.model.basis!r}",
+        )
     structure = inp.require_structure()
     nat = len(structure.symbols)
     v: dict[str, Any] = {}
@@ -636,8 +1156,9 @@ def plan_input(
             if path in v:
                 raise no_effect(path, 'freq.thermo is "off"')
     if "scf.restart" in v and not session:
-        raise no_effect("scf.restart", "a calculation of its own has one SCF and no history (scf.restart is a "
-                        "session setting)")
+        raise no_effect(
+            "scf.restart", "a calculation of its own has one SCF and no history (scf.restart is a session setting)"
+        )
 
     # 4. not_applicable
     def not_applicable(path: str, why: str) -> ProgramError:
@@ -682,16 +1203,6 @@ def plan_input(
     positions = np.asarray(structure.geometry, dtype=float).reshape(-1, 3)
     if not np.all(np.isfinite(positions)):
         raise refuse("input", "invalid_structure", "structure.geometry: positions must be finite numbers")
-    electrons = sum(numbers) - charge
-    if electrons < 0 or (electrons - (mult - 1)) % 2 or mult - 1 > electrons:
-        ok = [m for m in range(1, 8) if (electrons - (m - 1)) % 2 == 0 and m - 1 <= max(electrons, 0)][:3]
-        raise refuse(
-            "input",
-            "invalid_structure",
-            f"structure.multiplicity: {mult} with {electrons} electrons is impossible; use "
-            + ", ".join(str(m) for m in ok)
-            + ", ...",
-        )
     supported = _supported(method, composite)
     bad = sorted({z for z in numbers if z not in supported})
     if bad:
@@ -702,6 +1213,20 @@ def plan_input(
             + ", ".join(map(str, bad)),
             {"z": bad[0]},
         )
+    # the electrons the method's orbitals hold (GFN-FF: all), whose parity the multiplicity must have
+    # (the composite: in its g-xTB and its GFN2-xTB parts)
+    for m in (method, "gfn2") if composite else (method,):
+        electrons = _electrons(m, numbers) - charge
+        if electrons < 0 or (electrons - (mult - 1)) % 2 or mult - 1 > electrons:
+            ok = [k for k in range(1, 9) if (electrons - (k - 1)) % 2 == 0 and k - 1 <= max(electrons, 0)][:3]
+            held = "electrons" if m == "gfnff" else f"electrons in {m}'s orbitals"
+            raise refuse(
+                "input",
+                "invalid_structure",
+                f"structure.multiplicity: {mult} with {electrons} {held} is impossible; use "
+                + ", ".join(str(k) for k in ok)
+                + ", ...",
+            )
     if method == "gfnff" and mult > 1:
         raise refuse(
             "input",
@@ -738,7 +1263,9 @@ def plan_input(
     accuracy = None
     if "accuracy" in v:
         accuracy = v["accuracy"]
-    return _resolve(inp, method, conventions, composite, allowed, session, v, accuracy, numbers, positions, charge, mult)
+    return _resolve(
+        inp, method, conventions, composite, allowed, session, v, accuracy, numbers, positions, charge, mult
+    )
 
 
 _THERMO = (
@@ -754,6 +1281,18 @@ _THERMO = (
 
 def _applies(key: Key, kind: str) -> bool:
     return kind in key.methods
+
+
+_VALENCE: dict[str, list[float | None]] = {}
+
+
+def _electrons(method: str, numbers: list[int]) -> int:
+    """The electrons a neutral molecule brings to `method`'s orbitals (valence-only methods
+    leave the cores out: Zn 12 of 30 in GFN2-xTB and g-xTB; GFN-FF: all)."""
+    if method not in _VALENCE:
+        _VALENCE[method] = _axtb.valence_electrons(method)
+    table = _VALENCE[method]
+    return round(sum(table[z - 1] or 0.0 for z in numbers))
 
 
 _SUPPORTED: dict[tuple[str, bool], frozenset[int]] = {}
@@ -789,8 +1328,15 @@ def _value(path: str, value: Any, method: str, nat: int, flat: Mapping[str, Any]
                 raise
             raise refuse("input", "invalid_value", e.error.message) from None
         return target
-    if path in ("accuracy_scale", "hessian.step", "hessian.accuracy_scale", "freq.pressure", "freq.scale",
-                "freq.rotor_cutoff", "freq.symmetry_tol"):
+    if path in (
+        "accuracy_scale",
+        "hessian.step",
+        "hessian.accuracy_scale",
+        "freq.pressure",
+        "freq.scale",
+        "freq.rotor_cutoff",
+        "freq.symmetry_tol",
+    ):
         return _number(value, path, positive=True)
     if path in ("scf.etemp", "freq.imaginary_cutoff"):
         return _number(value, path, nonnegative=True)
@@ -799,7 +1345,9 @@ def _value(path: str, value: Any, method: str, nat: int, flat: Mapping[str, Any]
     if path == "conventions":
         return canonical_conventions(value, method)
     if path == "scf.mixer":
-        return _enum(value, ("broyden", "diis", "broyden-then-diis"), path, {"auto": "broyden-then-diis", "pulay": "diis"})
+        return _enum(
+            value, ("broyden", "diis", "broyden-then-diis"), path, {"auto": "broyden-then-diis", "pulay": "diis"}
+        )
     if path == "scf.guess":
         allowed = {"gfn2": ("eeq", "sad", "given"), "gfnff": ("eeq", "sad", "eeq-bc", "given")}.get(
             method, ("eeq-bc", "given")
@@ -819,8 +1367,9 @@ def _value(path: str, value: Any, method: str, nat: int, flat: Mapping[str, Any]
             names = _axtb.solvents(alias(model))
             close = difflib.get_close_matches(value.lower(), names, n=1, cutoff=0.6)
             hint = f"; did you mean {close[0]!r}?" if close else ""
-            raise refuse("input", "invalid_value", f"solvent.name: {value!r} has no {alias(model).upper()} "
-                         f"parameters{hint}")
+            raise refuse(
+                "input", "invalid_value", f"solvent.name: {value!r} has no {alias(model).upper()} parameters{hint}"
+            )
         return name
     if path == "solvent.state":
         return _enum(value, ("gsolv", "bar1M", "reference"), path)
@@ -835,7 +1384,9 @@ def _value(path: str, value: Any, method: str, nat: int, flat: Mapping[str, Any]
             raise refuse("input", "invalid_value", f"{path}: a list of charges, one per fragment")
         return [_number(x, path) for x in value]
     if path == "hessian.method":
-        return _enum(value, ("analytic", "response", "numerical"), path, {"analytical": "analytic", "numeric": "numerical"})
+        return _enum(
+            value, ("analytic", "response", "numerical"), path, {"analytical": "analytic", "numeric": "numerical"}
+        )
     if path == "freq.analysis":
         return _enum(value, ("harmonic", "off"), path)
     if path == "freq.thermo":
@@ -1177,8 +1728,9 @@ def markdown_table() -> str:
         if key.unsupported is not None:
             rows.append(f"| `{key.path}` | {tier} | | | refused: kind `unsupported` | | {key.unsupported} |")
             continue
-        methods = ", ".join(_METHOD_LABELS[m] for m in ("gfn2", "gxtb-v1.1", "gxtb-v2.0.1", "composite", "gfnff")
-                            if m in key.methods)
+        methods = ", ".join(
+            _METHOD_LABELS[m] for m in ("gfn2", "gxtb-v1.1", "gxtb-v2.0.1", "composite", "gfnff") if m in key.methods
+        )
         calc = "".join(c[0].upper() for c in CALCTYPES if c in key.calctypes)
         rows.append(
             f"| `{key.path}` | {tier} | {key.unit or ''} | {key.default} | {methods} | {calc} | {key.description} |"
