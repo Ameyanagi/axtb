@@ -107,6 +107,13 @@ pub struct Request {
     /// Add the Mayer-Wiberg bond orders (N x N) to the response (SCF methods).
     #[serde(default)]
     pub bond_orders: bool,
+    /// Add the AO overlap matrix of the SCF to the response (SCF methods).
+    #[serde(default)]
+    pub overlap: bool,
+    /// Add the Hamiltonian whose eigenvectors are the orbitals, and the overlap, to the response
+    /// (SCF methods; not g-xTB 2.0.1 in the program's conventions).
+    #[serde(default)]
+    pub hamiltonian: bool,
 
     /// `false` skips the vibrational analysis of the Hessian.
     pub vibrations: Option<bool>,

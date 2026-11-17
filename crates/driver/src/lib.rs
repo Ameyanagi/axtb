@@ -136,6 +136,8 @@ pub fn analyze(req: &Request) -> Result<Response> {
         ("hessian_accuracy", req.hessian_accuracy.is_some()),
         ("molden", req.molden || req.molden_file.is_some() || req.molden_cartesian),
         ("bond_orders", req.bond_orders),
+        ("overlap", req.overlap),
+        ("hamiltonian", req.hamiltonian),
         ("vibrations", req.vibrations.is_some()),
     ];
     let given: Vec<&str> = calculation.iter().filter(|(_, g)| *g).map(|(k, _)| *k).collect();

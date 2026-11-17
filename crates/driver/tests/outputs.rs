@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //! Requesting an output changes no other returned number: a single point with the gradient,
-//! with and without each optional output (orbitals as a Molden file, bond orders), gives the
+//! with and without each optional output (orbitals as a Molden file, bond orders, the AO overlap,
+//! the Hamiltonian), gives the
 //! same bits in the energy, the terms, the gradient, the charges, the multipoles, the orbital
 //! energies and occupations and the iterations, for every SCF method in each of its conventions
 //! (and the g-xTB solvation composite), closed and open shells, small systems (below the 200
@@ -49,7 +50,12 @@ fn numbers(r: &Response) -> Vec<(&'static str, Vec<u64>)> {
 /// The optional outputs of a single point, each as a change of the request.
 #[allow(clippy::type_complexity)]
 fn outputs() -> Vec<(&'static str, fn(&mut Request))> {
-    vec![("orbitals", |r| r.molden = true), ("bond_orders", |r| r.bond_orders = true)]
+    vec![
+        ("orbitals", |r| r.molden = true),
+        ("bond_orders", |r| r.bond_orders = true),
+        ("overlap", |r| r.overlap = true),
+        ("hamiltonian", |r| r.hamiltonian = true),
+    ]
 }
 
 /// Every number of `req` with the gradient alone equals those with each optional output.
@@ -60,7 +66,23 @@ fn check(label: &str, req: &Request) {
     for (name, set) in outputs() {
         let mut r = plain.clone();
         set(&mut r);
-        let got = run(&r).unwrap_or_else(|e| panic!("{label} with {name}: {e}"));
+        let got = match run(&r) {
+            Ok(got) => got,
+            // g-xTB 2.0.1 in the program's conventions has no Hamiltonian
+            Err(e) if name == "hamiltonian" && label.starts_with("gxtb-v2.0.1 gxtb") => {
+                assert_eq!(e.kind(), "not_applicable", "{label}: {e}");
+                continue;
+            }
+            Err(e) => panic!("{label} with {name}: {e}"),
+        };
+        match name {
+            "overlap" => assert!(got.scf.as_ref().is_some_and(|s| s.overlap.is_some()), "{label}: no overlap"),
+            "hamiltonian" => {
+                let s = got.scf.as_ref().unwrap();
+                assert!(s.hamiltonian.is_some() && s.overlap.is_some(), "{label}: the Hamiltonian brings the overlap");
+            }
+            _ => {}
+        }
         for ((q, a), (_, b)) in want.iter().zip(&numbers(&got)) {
             assert!(a == b, "{label}: {q} changes when {name} is requested");
         }
@@ -156,4 +178,40 @@ fn fermi_levels_and_temperature() {
             open(at(&with(&cu, method, conv), Some(3000.0)), 3000.0, &format!("{method} {conv} Cu doublet 3000 K"));
         }
     }
+}
+
+/// AO matrices that do not apply are refused as `not_applicable` (qcdata's code), an input
+/// error, before anything runs: the Hamiltonian of g-xTB 2.0.1 in the program's conventions
+/// (also as the composite's base; with max_iter 1 its SCF would fail) and both matrices of
+/// GFN-FF. Their overlap is offered; the Hamiltonian brings the overlap; an analysis refuses both.
+#[test]
+fn ao_matrices_not_applicable() {
+    let water = structure("water.xyz");
+    let refused = |req: Request| {
+        let e = run(&req).unwrap_err();
+        assert!(e.kind() == "not_applicable" && e.is_input(), "{e:?}");
+        assert!(e.to_string().starts_with("not applicable: "), "{e}");
+    };
+    let program = with(&water, "gxtb-v2.0.1", "gxtb");
+    refused(Request { hamiltonian: true, max_iter: Some(1), ..program.clone() });
+    refused(Request {
+        hamiltonian: true,
+        alpb: Some("water".into()),
+        solvation_correction: Some("gfn2".into()),
+        ..program.clone()
+    });
+    refused(Request { hamiltonian: true, hessian: true, ..program.clone() });
+    refused(Request { overlap: true, ..with(&water, "gfnff", "axtb") });
+    refused(Request { hamiltonian: true, ..with(&water, "gfnff", "axtb") });
+    let s = run(&Request { overlap: true, ..program }).unwrap().scf.unwrap();
+    assert!(s.overlap.is_some() && s.hamiltonian.is_none());
+    let s = run(&Request { hamiltonian: true, ..with(&water, "gfn2", "axtb") }).unwrap().scf.unwrap();
+    let (o, h) = (s.overlap.unwrap(), s.hamiltonian.unwrap());
+    assert_eq!((o.rows, o.cols, h.len(), h[0].rows), (6, 6, 1, 6));
+    let analysis = Request {
+        overlap: true,
+        analyze_hessian: Some(vec![vec![0.0; 9]; 9]),
+        ..Request::new(water.numbers.clone(), water.positions.clone())
+    };
+    assert_eq!(run(&analysis).unwrap_err().kind(), "input");
 }

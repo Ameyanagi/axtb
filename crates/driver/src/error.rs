@@ -21,11 +21,15 @@ pub enum Error {
     ScfNotConverged { iterations: usize, energy_change: f64, residual: f64 },
     /// A numerical failure (singular matrices, non-finite results).
     Numerical(String),
+    /// A request the method or its conventions cannot honour by design, refused before the
+    /// calculation runs (e.g. a Hamiltonian matrix of g-xTB 2.0.1 in the program's conventions,
+    /// orbitals or AO matrices of GFN-FF): qcdata's `not_applicable`.
+    NotApplicable(String),
 }
 
 impl Error {
     /// The kind as the front ends name it: `input`, `unsupported_element`, `topology`,
-    /// `scf_not_converged` or `numerical`.
+    /// `scf_not_converged`, `numerical` or `not_applicable`.
     pub fn kind(&self) -> &'static str {
         match self {
             Error::Input(_) => "input",
@@ -33,13 +37,17 @@ impl Error {
             Error::Topology(_) => "topology",
             Error::ScfNotConverged { .. } => "scf_not_converged",
             Error::Numerical(_) => "numerical",
+            Error::NotApplicable(_) => "not_applicable",
         }
     }
 
-    /// Whether the request is at fault (input, unsupported element, topology): Python raises
-    /// `axtb.InputError`, a `ValueError`.
+    /// Whether the request is at fault (input, unsupported element, topology, not applicable):
+    /// Python raises `axtb.InputError`, a `ValueError`.
     pub fn is_input(&self) -> bool {
-        matches!(self, Error::Input(_) | Error::UnsupportedElement { .. } | Error::Topology(_))
+        matches!(
+            self,
+            Error::Input(_) | Error::UnsupportedElement { .. } | Error::Topology(_) | Error::NotApplicable(_)
+        )
     }
 }
 
@@ -54,6 +62,7 @@ impl fmt::Display for Error {
                 "SCF not converged in {iterations} iterations (last energy change {energy_change:.3e} Eh, residual {residual:.3e})"
             ),
             Error::Numerical(msg) => write!(f, "numerical failure: {msg}"),
+            Error::NotApplicable(msg) => write!(f, "not applicable: {msg}"),
         }
     }
 }
@@ -90,6 +99,7 @@ impl From<axtb::Error> for Error {
             }
             axtb::Error::Topology(msg) => Error::Topology(msg),
             axtb::Error::Numerical(msg) => Error::Numerical(msg),
+            axtb::Error::NotApplicable(msg) => Error::NotApplicable(msg),
         }
     }
 }

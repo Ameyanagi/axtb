@@ -763,6 +763,10 @@ pub struct ScfResult {
     pub timings: Timings,
     /// The eigensolver of the SCF (`axtb::linalg::GenEigSolver::backend`).
     pub eigensolver: String,
+    /// With [`crate::ScfOptions::hamiltonian`]: the Fock matrices of the last diagonalization
+    /// (row-major n x n per spin channel), the unmixed last build, whose eigenvectors with the
+    /// overlap `Setup::s` are the orbitals.
+    pub hamiltonian: Option<Vec<Vec<f64>>>,
 }
 
 impl Setup {
@@ -853,7 +857,7 @@ impl Setup {
             energies: Energies::default(),
             history: Vec::new(),
             every,
-            keep_last: opts.all_orbitals && !every,
+            keep_last: (opts.all_orbitals && !every) || opts.hamiltonian,
             last: None,
             dp: (version == Version::V1_1).then_some(f64::NAN),
         };
@@ -917,6 +921,13 @@ impl Setup {
             }
             t.lap("scf: virtual orbitals");
         }
+        // the matrices of the unmixed last iteration (2.0.1 in the program's conventions, which
+        // has none, refuses the request in `ScfOptions::check`)
+        let hamiltonian = match (opts.hamiltonian, last) {
+            (false, _) => None,
+            (true, Some(last)) => Some(last),
+            (true, None) => return Err(Error::Numerical("the SCF ended without an unmixed iteration".into())),
+        };
         let st = out.state;
         Ok(ScfResult {
             energies,
@@ -935,6 +946,7 @@ impl Setup {
             history,
             timings: t.laps,
             eigensolver: solver.backend(),
+            hamiltonian,
         })
     }
 }

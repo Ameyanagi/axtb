@@ -89,6 +89,10 @@ pub(crate) struct ScfOptions {
     pub keep_orbitals: bool,
     /// Compute the Mayer–Wiberg bond orders ([`Gfn2Result::bond_orders`]).
     pub bond_orders: bool,
+    /// Keep the overlap matrix ([`Gfn2Result::overlap`]) and the last Fock matrix, the one whose
+    /// eigenvectors are the orbitals ([`Gfn2Result::hamiltonian`]).
+    pub keep_overlap: bool,
+    pub keep_hamiltonian: bool,
     /// Print every SCF iteration (energy, energy change, residual) to stderr, for debugging
     /// SCFs that do not converge.
     pub trace: bool,
@@ -173,6 +177,11 @@ pub(crate) struct Gfn2Result {
     /// Mayer–Wiberg bond orders (N x N row-major, zero diagonal), when asked for (see
     /// `crate::properties`).
     pub bond_orders: Option<Vec<f64>>,
+    /// The overlap matrix of the SCF (with its screening) and its last Fock matrix, H0 plus the
+    /// potentials of the last input moments, the matrix whose eigenvectors are the orbitals (one
+    /// for both spins): n x n row-major, when asked for.
+    pub overlap: Option<Vec<f64>>,
+    pub hamiltonian: Option<Vec<f64>>,
     /// Where the SCF started: `"previous"` (a given wavefunction, usually the previous
     /// geometry's), or the method's own start: `"eeq"` (GFN2-xTB: EEQ charges), `"sad"` (neutral
     /// atoms, also when the EEQ charges cannot be computed), `"eeq-bc"` (g-xTB: the program's
@@ -785,6 +794,9 @@ impl XtbModel {
                 crate::properties::mayer_bond_orders(nat, &bas.ao2at, s, &[pa.as_ref(), pb.as_ref()], par)
             }
         });
+        let row_major = |m: &Mat<f64>| (0..m.nrows()).flat_map(|i| (0..m.ncols()).map(move |j| m[(i, j)])).collect();
+        let overlap = opts.keep_overlap.then(|| row_major(&ints.overlap));
+        let hamiltonian = opts.keep_hamiltonian.then(|| row_major(&fock));
         let state = if keep_state {
             Some(ScfState {
                 geo,
@@ -826,6 +838,8 @@ impl XtbModel {
                 fermi_levels: efermi,
                 electronic_temperature: if kt > 0.0 { opts.etemp } else { 0.0 },
                 bond_orders,
+                overlap,
+                hamiltonian,
                 guess: start_label,
                 eigensolver: solver.backend(),
             },

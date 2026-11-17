@@ -5,6 +5,16 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- AO matrices on request: `overlap` (the SCF's S, with its screening; g-xTB: of the SCF basis)
+  and `hamiltonian` (the matrix whose generalized eigenvectors with S are the returned orbitals:
+  GFN2-xTB's last Fock matrix, one for both spins; g-xTB's unmixed last build per spin channel),
+  which brings the overlap. Request fields `overlap` and `hamiltonian` (CLI `--overlap`,
+  `--hamiltonian`), response fields of the same names, in Rust `Want::overlap`,
+  `Want::hamiltonian`, `Electronic::overlap`, `Electronic::hamiltonian`; axtb's AO order (atom by
+  atom, shell by shell, m = -l..l, p as y, z, x). Asking for them changes no other number.
+  g-xTB 2.0.1 in the program's conventions refuses the Hamiltonian (its SCF diagonalizes a
+  DIIS-mixed matrix last) and GFN-FF both, before anything runs, with the new error kind
+  `not_applicable` (`axtb_base::Error::NotApplicable`; Python: `axtb.InputError` with that kind).
 - Every SCF result reports the Fermi levels of the alpha and beta electrons (`fermi_levels`, Eh;
   `null` where the occupations are the Aufbau filling, the same level twice for a closed shell)
   and the electronic temperature the occupations used (`electronic_temperature`, K; 0 for the

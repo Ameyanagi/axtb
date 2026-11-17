@@ -333,6 +333,8 @@ impl Calculator {
                 electronic_temperature: sp.electronic_temperature,
                 orbitals: sp.orbitals,
                 bond_orders: sp.bond_orders,
+                overlap: sp.overlap,
+                hamiltonian: sp.hamiltonian.map(|h| vec![h]),
                 scf: ScfReport {
                     iterations: sp.iterations,
                     start: sp.guess,

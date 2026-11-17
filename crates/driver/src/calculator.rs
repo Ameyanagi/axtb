@@ -217,6 +217,8 @@ impl Calculator {
             gradient: task.gradient || task.hessian.is_some(),
             orbitals: task.molden.is_some(),
             bond_orders: task.bond_orders,
+            overlap: task.overlap,
+            hamiltonian: task.hamiltonian,
         };
         let hessian =
             task.hessian.as_ref().map(|h| HessianOptions { method: h.method, step: h.step, accuracy: h.accuracy });
@@ -458,6 +460,8 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
         occupations_alpha: a.occupations,
         occupations_beta: b.occupations,
         bond_orders: e.bond_orders.map(|bo| Matrix { rows: nat, cols: nat, data: bo }),
+        overlap: e.overlap.map(Matrix::square),
+        hamiltonian: e.hamiltonian.map(|h| h.into_iter().map(Matrix::square).collect()),
     });
     e.orbitals
 }

@@ -239,13 +239,20 @@ pub struct Want {
     pub orbitals: bool,
     /// The Mayer–Wiberg bond orders ([`Electronic::bond_orders`]).
     pub bond_orders: bool,
+    /// The AO overlap matrix of the SCF ([`Electronic::overlap`]).
+    pub overlap: bool,
+    /// The Hamiltonian whose eigenvectors are the orbitals ([`Electronic::hamiltonian`]), with
+    /// the overlap. Refused ([`Error::NotApplicable`]) where the SCF diagonalizes a mixed
+    /// matrix last (g-xTB 2.0.1 in the program's conventions) and without orbitals (GFN-FF).
+    pub hamiltonian: bool,
 }
 
 impl Want {
     /// The energy alone.
-    pub const ENERGY: Want = Want { gradient: false, orbitals: false, bond_orders: false };
+    pub const ENERGY: Want =
+        Want { gradient: false, orbitals: false, bond_orders: false, overlap: false, hamiltonian: false };
     /// The energy and the gradient.
-    pub const GRADIENT: Want = Want { gradient: true, orbitals: false, bond_orders: false };
+    pub const GRADIENT: Want = Want { gradient: true, ..Want::ENERGY };
 
     /// The energy, and the gradient when `gradient`.
     pub fn gradient(gradient: bool) -> Want {

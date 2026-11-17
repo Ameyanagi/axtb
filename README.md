@@ -224,6 +224,7 @@ stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF sing
 | `hessian`, `hessian_method`, `hessian_step`, `hessian_accuracy` | `--hess`, `--hess-method M`, `--hess-step H`, `--hess-acc X` | the Hessian, see [Hessians](#hessians) |
 | `molden`, `molden_file`, `molden_cartesian` | `--molden[=FILE]`, `--molden-cartesian` | the Molden file's text in the response; a file to write; Cartesian functions |
 | `bond_orders` | `--wbo` | Mayer-Wiberg bond orders |
+| `overlap`, `hamiltonian` | `--overlap`, `--hamiltonian` | the AO overlap matrix of the SCF; the Hamiltonian whose eigenvectors are the orbitals, with the overlap (SCF methods; not g-xTB 2.0.1 in the `gxtb` conventions, whose SCF diagonalizes a DIIS-mixed matrix last: refused as `not_applicable`) |
 | `vibrations`, `thermo`, `analysis_conventions`, `masses`, `temperature`, `pressure`, `rotor_cutoff`, `imaginary_cutoff`, `frequency_scale`, `symmetry_number`, `symmetry_threshold` | `--novib`, `--nothermo`, `--analysis-conventions C`, —, `--temp T[,T]`, `--pressure P`, `--sthr X`, `--ithr X`, `--scale X`, `--symnum N`, `--desy X` | the vibrational analysis of a Hessian, see [Vibrational analysis](#vibrational-analysis-and-thermochemistry) |
 | `analyze_hessian`, `dipole_derivatives`, `energy` | — | the analysis of a given Hessian, like `xtb thermo` (no calculation settings then) |
 
@@ -236,6 +237,7 @@ The response, for every front end (a field is present when it applies):
 | `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `fermi_levels`, `electronic_temperature`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB; `fermi_levels`: alpha and beta, `null` for the Aufbau filling, the same level twice for a closed shell; `electronic_temperature`: K, 0 for the Aufbau filling) |
 | `n_hbonds`, `n_xbonds`, `topology` | GFN-FF |
 | `molden`, `molden_file` | Molden file |
+| `overlap`, `hamiltonian` | the AO overlap matrix S of the SCF (n x n, with the screening the SCF used; g-xTB: its SCF basis) and the Hamiltonian H (a list: one n x n matrix for GFN2-xTB, open shells included, and for a g-xTB closed shell; alpha and beta for a g-xTB open shell): the operator of one build at the last input, whose generalized eigenvectors with S are the orbitals (GFN2-xTB: H0 and the potentials of the last input moments; g-xTB: the unmixed last build). AO order: atom by atom, shell by shell, m = -l..l, p as y, z, x (not the Molden file's) |
 | `hessian`, `hessian_method`, `hessian_max_asymmetry`, `hessian_timings`, `dipole_derivatives` | Hessian |
 | `vibrational_conventions`, `frequencies`, `normal_modes`, `reduced_masses`, `force_constants`, `ir_intensities`, `n_imaginary`, `linear`, `masses`, `thermo` | vibrational analysis |
 | `composite`, `components`, `parts`, `hessian_parts` | g-xTB in solvent |

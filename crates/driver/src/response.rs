@@ -124,6 +124,17 @@ pub struct Scf {
     /// Mayer-Wiberg bond orders (N x N), when asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bond_orders: Option<Matrix>,
+    /// The AO overlap matrix of the SCF (n x n, with its screening; g-xTB: of the SCF basis),
+    /// when asked for or with the Hamiltonian. The AO order is axtb's (atom by atom, shell by
+    /// shell, m = -l..l, p as y, z, x), not the Molden file's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<Matrix>,
+    /// The Hamiltonian whose generalized eigenvectors with the overlap are the orbitals (n x n,
+    /// the operator of one build at the last input), one per spin channel of the orbitals:
+    /// GFN2-xTB one (open shells included: one spin-averaged Hamiltonian), g-xTB one for a closed
+    /// shell, alpha and beta for an open shell; when asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hamiltonian: Option<Vec<Matrix>>,
 }
 
 /// The GFN-FF topology (0-based atom indices).

@@ -149,6 +149,9 @@ impl Method for Calculator {
                 return Err(Error::Input("gfnff Hessians take no hessian_accuracy (no SCF)".into()));
             }
         }
+        if want.overlap || want.hamiltonian {
+            return Err(Error::NotApplicable("gfnff has no orbitals: no overlap or Hamiltonian matrix".into()));
+        }
         if want.orbitals || want.bond_orders {
             return Err(Error::Input("gfnff has no orbitals (no Molden file, no bond orders; see topology)".into()));
         }

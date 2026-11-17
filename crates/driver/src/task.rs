@@ -103,13 +103,16 @@ pub struct MoldenTask {
 }
 
 /// What a call computes besides the energy (and the SCF properties): the gradient, a Hessian
-/// with its analysis, a Molden file, the bond orders.
+/// with its analysis, a Molden file, the bond orders, the AO overlap and the Hamiltonian (which
+/// brings the overlap).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Task {
     pub gradient: bool,
     pub hessian: Option<HessianTask>,
     pub molden: Option<MoldenTask>,
     pub bond_orders: bool,
+    pub overlap: bool,
+    pub hamiltonian: bool,
 }
 
 impl Task {
@@ -163,7 +166,14 @@ impl Task {
             text: req.molden,
             file: req.molden_file.clone(),
         });
-        Ok(Self { gradient: req.gradient, hessian, molden, bond_orders: req.bond_orders })
+        Ok(Self {
+            gradient: req.gradient,
+            hessian,
+            molden,
+            bond_orders: req.bond_orders,
+            overlap: req.overlap,
+            hamiltonian: req.hamiltonian,
+        })
     }
 
     /// Refuse what the task asks of the method `info` describes that does not apply: a

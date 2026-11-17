@@ -145,6 +145,7 @@ impl Options {
             etemp: self.scf.etemp.unwrap_or(ETEMP),
             conventions: self.conventions,
             all_orbitals,
+            hamiltonian: false,
         }
     }
 
@@ -394,7 +395,7 @@ impl Calculator {
         self.move_to(positions)?;
         let start = self.take_start();
         let mut setup = self.setup.take();
-        let opts = self.options.run(want.orbitals);
+        let opts = ScfOptions { hamiltonian: want.hamiltonian, ..self.options.run(want.orbitals) };
         let (mol, version, threads, form) = (&self.mol, self.version, &self.threads, self.info.quadrupole);
         // a state from a distant geometry can hurt; once more from the program's start
         let ladder = RetryLadder::warm_then_fresh(start.is_some());
@@ -564,8 +565,12 @@ impl Method for Calculator {
         &self.info
     }
 
-    /// v1.1 has numerical Hessians only.
-    fn check(&self, _want: &Want, hessian: Option<&HessianOptions>) -> Result<()> {
+    /// The Hessian methods the version offers in these conventions; no Hamiltonian matrix for
+    /// 2.0.1 in the program's conventions (its SCF diagonalizes a DIIS-mixed matrix last).
+    fn check(&self, want: &Want, hessian: Option<&HessianOptions>) -> Result<()> {
+        if want.hamiltonian && self.version == Version::V2_0_1 && self.options.conventions == Conventions::Gxtb {
+            return Err(Error::NotApplicable(crate::options::HAMILTONIAN_201_PROGRAM.into()));
+        }
         if let Some(h) = hessian {
             let m = h.method.unwrap_or(self.info.hessian.default);
             if self.info.hessian.get(m).is_none() {
@@ -829,6 +834,8 @@ fn results(
             electronic_temperature: if r.kt > 0.0 { opts.etemp } else { 0.0 },
             orbitals,
             bond_orders,
+            overlap: (want.overlap || want.hamiltonian).then(|| setup.s.clone()),
+            hamiltonian: r.hamiltonian.take(),
             scf: ScfReport {
                 iterations: r.iterations,
                 start,

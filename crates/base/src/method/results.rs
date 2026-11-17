@@ -101,6 +101,17 @@ pub struct Electronic {
     pub orbitals: Option<Orbitals>,
     /// Mayer–Wiberg bond orders, N x N row-major ([`Want::bond_orders`](super::Want::bond_orders)).
     pub bond_orders: Option<Vec<f64>>,
+    /// The AO overlap matrix S of the generalized eigenproblem the SCF solved, with the
+    /// screening it used (g-xTB: of the SCF basis), n x n row-major in the AO order of
+    /// [`Orbitals`] (atom by atom, shell by shell, m = −l..l; p as y, z, x)
+    /// ([`Want::overlap`](super::Want::overlap), and with the Hamiltonian).
+    pub overlap: Option<Vec<f64>>,
+    /// The Hamiltonian H whose generalized eigenvectors with [`Electronic::overlap`] are the
+    /// orbitals, H C = S C ε: the operator of one build at the last input, n x n row-major, one
+    /// per spin channel of the orbitals (GFN2-xTB: one, open shells included; g-xTB: one for a
+    /// closed shell, alpha and beta for an open shell)
+    /// ([`Want::hamiltonian`](super::Want::hamiltonian)).
+    pub hamiltonian: Option<Vec<Vec<f64>>>,
     pub scf: ScfReport,
 }
 
