@@ -4,9 +4,11 @@
 slowdowns.
 
     scripts/perf_gate.py BASELINE_BIN NEW_BIN [--rounds 5] [--only taxol,...] [--limit 1.02]
+                         [--max-load 1.5]
 
 Each cell runs both binaries alternately (order swapped every round) at a quiet machine
-(1-minute load below 1.5 before each pair); whole-process wall seconds, medians over rounds.
+(1-minute load below --max-load, default 1.5, before each pair; a desktop whose idle load sits
+above it needs a higher one); whole-process wall seconds, medians over rounds.
 A cell fails when median(new) / median(baseline) exceeds --limit both in its first pass and
 in a confirming pass with three times the rounds (identical binaries differ by up to ~4% on
 the shortest cells over 5 rounds on the laptop). Cells whose baseline median is below 20 ms
@@ -89,6 +91,7 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--limit", type=float, default=1.02)
     ap.add_argument("--json", default="")
+    ap.add_argument("--max-load", type=float, default=1.5, help="the 1-minute load to wait for before each pair")
     a = ap.parse_args()
     cs = cells()
     if a.only:
@@ -96,7 +99,7 @@ def main():
     def measure(req, rounds):
         tb, tn = [], []
         for r in range(rounds):
-            while load1() > 1.5:
+            while load1() > a.max_load:
                 time.sleep(3)
             pair = [(a.baseline, tb), (a.new, tn)]
             for binary, out in (pair if r % 2 == 0 else pair[::-1]):
