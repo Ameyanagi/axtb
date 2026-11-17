@@ -538,6 +538,13 @@ with session(inp) as s:                               # qccompute's session prot
     frame = s.compute(positions)
 ```
 
+**A session's threads under qccompute.** qccompute grants a session what its input asks
+for (the plan's threads for the input's calctype: 1 for a small molecule's gradient), unless
+`session(inp, threads=N)` says more. So `compute_many` fans lineages out only when the session
+is opened with `threads`. A NEB step of 12 caffeine images (g-xTB 2.0.1 gradients, warm) took
+130 ms with `session(inp)` and 20 ms with `session(inp, threads=8)` on an 8-core laptop, with
+the same frames bit for bit.
+
 `axtb.program` declares energies, gradients and Hessians of every method, sessions, in-process
 and thread-safe; `python -m qccompute.serve axtb` serves it to workers. `capabilities()`,
 `settings_schema(calctype)`, `record_schema(calctype)`, `plan(inp)`, `compute(inp, ctx)`,
