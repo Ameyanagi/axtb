@@ -99,6 +99,17 @@ pub trait Method: Send + Sync {
         }
     }
 
+    /// Start the next SCF from given density matrices (row-major n x n in the method's AO order;
+    /// one per spin channel, a closed shell's the total density), whatever the restart policy
+    /// says, as [`set_wavefunction`](Method::set_wavefunction) does: e.g. C n C^T of another
+    /// calculation's orbitals in this basis. The method checks the channels, the size and the
+    /// electrons (the density's Mulliken populations to 1e-6) and derives the rest of its start from
+    /// the density at its current positions. Default: refused (a method that does not start from
+    /// a density).
+    fn set_density(&mut self, _densities: Vec<Vec<f64>>) -> Result<()> {
+        Err(Error::Input(format!("{} does not start an SCF from a density", self.info().name)))
+    }
+
     /// The SCF settings of later calls; `None`: no SCF.
     fn scf_settings(&self) -> Option<&ScfSettings> {
         None

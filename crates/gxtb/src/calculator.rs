@@ -637,6 +637,15 @@ impl Method for Calculator {
         Ok(())
     }
 
+    /// Start the next SCF from given densities (`Method::set_density`), whatever the restart
+    /// policy says.
+    fn set_density(&mut self, densities: Vec<Vec<f64>>) -> Result<()> {
+        let start = self.density_start(densities)?;
+        self.state = Some(start);
+        self.given = true;
+        Ok(())
+    }
+
     /// The state of `wf` as this calculator's previous one (the restart policy decides).
     fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
         match wf {
@@ -667,6 +676,47 @@ impl Method for Calculator {
 }
 
 impl Calculator {
+    /// The start of a given density at the current positions: v1.1 starts from the densities
+    /// themselves, 2.0.1 from their Mulliken state (shell charges, atomic moments, magnetizations;
+    /// `Setup::state_of`). Checked: one matrix per spin channel of the molecule, n x n, and the
+    /// electrons of the total density's populations to 1e-6.
+    fn density_start(&mut self, p: Vec<Vec<f64>>) -> Result<Start> {
+        self.check_options()?;
+        let setup = match self.setup.take() {
+            Some(s) => s,
+            None => self.threads.install(|| new_setup(self.version, &self.mol, &self.options.run(false)))?,
+        };
+        let n = setup.nao;
+        let fits = p.len() == setup.nspin && p.iter().all(|m| m.len() == n * n);
+        if !fits {
+            let channels = if setup.nspin == 1 { "one (closed shell: the total density)" } else { "two (alpha, beta)" };
+            self.setup = Some(setup);
+            return Err(Error::Input(format!(
+                "{}: a start density is {channels} {n} x {n} matrices for this molecule, not {} of {} elements",
+                self.version.method(),
+                p.len(),
+                p.first().map_or(0, Vec::len)
+            )));
+        }
+        let total = setup.total_density_ref(&p);
+        let electrons: f64 = setup.shell_populations(&total).iter().sum();
+        drop(total);
+        if (electrons - setup.nel).abs() > 1e-6 {
+            let nel = setup.nel;
+            self.setup = Some(setup);
+            return Err(Error::Input(format!(
+                "{}: the start density holds {electrons:.8} electrons, the molecule {nel}",
+                self.version.method()
+            )));
+        }
+        let start = match self.version {
+            Version::V1_1 => Start::V1_1(p),
+            Version::V2_0_1 => Start::V2_0_1(Box::new(setup.state_of(p))),
+        };
+        self.setup = Some(setup);
+        Ok(start)
+    }
+
     /// The state of `wf` as the next SCF's start (checked against the setup when it starts).
     fn install(&mut self, wf: &Wavefunction) -> Result<()> {
         wf.check(&self.fingerprint)?;

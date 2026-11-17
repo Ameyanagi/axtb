@@ -487,4 +487,9 @@ impl Method for CompositeCalculator {
     fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
         self.inner.set_scf_accuracy(accuracy)
     }
+
+    /// The g-xTB part's SCF from given densities (its wavefunction is the composite's).
+    fn set_density(&mut self, densities: Vec<Vec<f64>>) -> Result<()> {
+        self.inner.set_density(densities)
+    }
 }

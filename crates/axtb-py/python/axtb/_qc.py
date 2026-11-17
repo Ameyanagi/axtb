@@ -122,6 +122,15 @@ def implied(outputs: frozenset[str] | set[str]) -> frozenset[str]:
     return frozenset(out)
 
 
+def given_args(p: Planned) -> dict[str, Any]:
+    """The engine's arguments of a given start (`axtb._keywords.given_start`)."""
+    if p.start is None:
+        return {}
+    if p.start["kind"] == "density":
+        return {"densities": p.start["densities"]}
+    return {"moments": p.start["moments"]}
+
+
 def needs_orbitals(outputs: frozenset[str]) -> bool:
     """Whether the engine must return the structured orbitals (for the coefficients or the basis
     set of an AO matrix)."""
@@ -539,6 +548,7 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
             task(p, calctype, outputs, h),
             accuracy=factor if p.scf else None,
             orbitals=needs_orbitals(outputs),
+            **given_args(p),
         )
     except _axtb.Error as x:
         error, fields = from_driver(x)
@@ -552,6 +562,8 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
         raise out_error from None
     res = results(r, p, calctype, outputs)
     rec = record(r, p)
+    if p.start is not None:
+        rec["scf"]["start"] = "given"
     if acc_record is not None:
         rec["accuracy"] = acc_record
     out = _build(

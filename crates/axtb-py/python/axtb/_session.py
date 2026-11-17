@@ -101,6 +101,9 @@ class Session:
         request = json.dumps({**p.request, "threads": used}, separators=(",", ":"))
         try:
             self._engine = _axtb.Engine(request, p.numbers, p.positions)
+            if p.start is not None:
+                # every request without history starts from the given results
+                self._engine.set_given(**_qc.given_args(p))
         except _axtb.Error as x:
             error, _ = from_driver(x)
             raise ProgramError(error) from None
@@ -387,8 +390,12 @@ class Session:
             warm = history is not None and any(p.restart)
         else:
             warm = scf["guess"] == "previous"
+        if r["given"]:
+            warm = False
         rec: dict[str, Any] = {"warm_start": warm, "from_lineage": from_lineage}
         rec.update(_qc.record(r, p, session=True))
+        if r["given"] and "scf" in rec:
+            rec["scf"]["start"] = "given"
         if scf is not None and not p.composite and history is not None and p.restart[0] and not warm:
             rec["scf"]["restart_fallback"] = True
         contingent = rec.setdefault("contingent", {})

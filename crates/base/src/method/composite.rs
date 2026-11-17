@@ -412,6 +412,13 @@ impl Method for Composite {
         }
     }
 
+    /// The base part's SCF from given densities (`Method::set_density`): the composite's
+    /// wavefunction outputs are its base's; the corrections start as their restart policy says.
+    fn set_density(&mut self, densities: Vec<Vec<f64>>) -> Result<()> {
+        let mut parts = self.parts_mut();
+        parts[0].method.set_density(densities)
+    }
+
     /// Every part's own previous wavefunction from `wf` (a part without one in `wf`: none);
     /// `None`: none for every part.
     fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {

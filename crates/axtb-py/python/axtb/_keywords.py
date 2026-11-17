@@ -894,6 +894,9 @@ class Planned:
     record: dict[str, Any]
     restart: tuple[bool, ...] = ()
     contingent: list[str] = field(default_factory=list)
+    #: The start of a usable `given` (`given_start`): kind ``density`` (g-xTB) or ``moments``
+    #: (GFN2-xTB).
+    start: dict[str, Any] | None = None
 
     @property
     def scf(self) -> bool:
@@ -1172,8 +1175,11 @@ def _plan_input(
     for name in ("files", "cmdline_args", "subprograms", "structures"):
         if getattr(inp, name):
             raise not_applicable(name, f"axtb takes no {name}")
+    start = None
     if inp.given is not None:
-        raise not_applicable("given", "axtb does not start from given results yet")
+        start = given_start(inp, method, conventions, composite)
+        if "scf.guess" in v and v["scf.guess"] != "given":
+            raise refuse("input", "no_effect", "scf.guess: the given wavefunction starts the SCF; leave scf.guess out")
 
     # 5. missing_setting
     def missing(path: str, why: str) -> ProgramError:
@@ -1194,7 +1200,7 @@ def _plan_input(
             raise missing("solvent.name", hint)
         if gxtb and "solvent.correction_conventions" in v and "solvent.correction" not in v:
             raise missing("solvent.correction_conventions", "a setting of the composite: give solvent.correction")
-    if v.get("scf.guess") == "given":
+    if v.get("scf.guess") == "given" and start is None:
         raise missing("scf.guess", "given needs a given wavefunction (ProgramInput.given)")
 
     # 6. the structure
@@ -1263,9 +1269,88 @@ def _plan_input(
     accuracy = None
     if "accuracy" in v:
         accuracy = v["accuracy"]
-    return _resolve(
-        inp, method, conventions, composite, allowed, session, v, accuracy, numbers, positions, charge, mult
+    p = _resolve(inp, method, conventions, composite, allowed, session, v, accuracy, numbers, positions, charge, mult)
+    if start is not None:
+        p.start = start
+        if not composite:
+            p.settings["scf"]["guess"] = "given"
+        p.reasons["scf.guess"] = "given: the input's given " + (
+            "shell populations and atomic multipoles" if start["kind"] == "moments" else "wavefunction"
+        )
+    return p
+
+
+def given_start(inp: ProgramInput, method: str, conventions: str, composite: bool) -> dict[str, Any]:
+    """The SCF start of the input's ``given`` results (decision 19): GFN2-xTB from given shell
+    populations and atomic multipoles (shell charges = reference occupation - population); g-xTB
+    (the composite: its g-xTB part) from a given wavefunction's orbitals with their basis set,
+    P = C n C^T per spin channel. Every other field of ``given`` is left alone. Refused (kind
+    ``input``, code ``not_applicable``) when nothing is usable, or when a used field does not fit:
+    shells of another layout, another basis set (centers, angular momenta, exponents), other spin
+    channels."""
+    from qcdata import AOConvention
+
+    def not_applicable(path: str, why: str) -> ProgramError:
+        return refuse("input", "not_applicable", f"{path}: {why}")
+
+    g = inp.given
+    structure = inp.require_structure()
+    numbers = list(structure.atomic_numbers)
+    if method == "gfnff":
+        raise not_applicable("given", "GFN-FF has no SCF to start from given results")
+    layout = _axtb.shell_layout(method, numbers)
+    if method == "gfn2":
+        if g.shell_populations is None or g.atomic_dipoles is None or g.atomic_quadrupoles is None:
+            raise not_applicable(
+                "given",
+                "GFN2-xTB starts from given shell populations and atomic multipoles (shell_populations with "
+                "shell_atoms and shell_angular_momenta, atomic_dipoles, atomic_quadrupoles), which this given lacks",
+            )
+        if list(g.shell_atoms) != [a for a, *_ in layout] or list(g.shell_angular_momenta) != [
+            ell for _, ell, *_ in layout
+        ]:
+            raise not_applicable("given.shell_populations", "indexed by other shells than GFN2-xTB's for these atoms")
+        q = [ref - pop for (_, _, ref, _), pop in zip(layout, np.asarray(g.shell_populations), strict=True)]
+        qp = np.asarray(g.atomic_quadrupoles, dtype=float)
+        packed = np.stack([qp[:, 0, 0], qp[:, 0, 1], qp[:, 1, 1], qp[:, 0, 2], qp[:, 1, 2], qp[:, 2, 2]], axis=1)
+        return {"kind": "moments", "moments": (q, np.asarray(g.atomic_dipoles, dtype=float), packed)}
+    wf = g.wavefunction
+    if wf is None or wf.basis is None or wf.orbitals.coefficients_a is None:
+        raise not_applicable(
+            "given",
+            f"{method} starts from a given wavefunction's orbitals with their basis set (the output orbitals), "
+            "which this given lacks",
+        )
+    restricted = wf.orbitals.spin.value == "restricted"
+    if restricted != (structure.multiplicity == 1):
+        raise not_applicable(
+            "given.wavefunction",
+            f"{'restricted' if restricted else 'unrestricted'} orbitals cannot start a "
+            f"{'closed' if structure.multiplicity == 1 else 'open'}-shell g-xTB SCF (one channel per spin of the "
+            "molecule)",
+        )
+    ours = AOConvention(spherical_order="increasing_m")
+    if wf.basis.ao_convention != ours:
+        wf = wf.with_convention(ours)
+    shells = wf.basis.shells
+    fits = len(shells) == len(layout) and all(
+        sh.center == a and sh.angular_momentum == ell and sh.pure and np.array_equal(np.asarray(sh.exponents), e)
+        for sh, (a, ell, _, e) in zip(shells, layout, strict=False)
     )
+    if not fits:
+        raise not_applicable(
+            "given.wavefunction.basis",
+            f"not {method}'s basis set (q-vSZP) on these atoms: shells, centers, angular momenta and exponents "
+            "must be its own",
+        )
+    orb = wf.orbitals
+    ca = np.asarray(orb.coefficients_a, dtype=float)
+    if restricted:
+        densities = [(ca * (np.asarray(orb.occupations_a) + np.asarray(orb.occupations_b))) @ ca.T]
+    else:
+        cb = np.asarray(orb.coefficients_b, dtype=float)
+        densities = [(ca * np.asarray(orb.occupations_a)) @ ca.T, (cb * np.asarray(orb.occupations_b)) @ cb.T]
+    return {"kind": "density", "densities": densities}
 
 
 _THERMO = (

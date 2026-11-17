@@ -165,12 +165,46 @@ fn parse_task(task: &str, orbitals: bool) -> Result<Task, Failure> {
     Ok(t)
 }
 
+/// Densities (row-major n x n each) of a list of arrays.
+fn densities(d: &[PyArrayLike2<'_, f64, AllowTypeChange>]) -> Vec<Vec<f64>> {
+    d.iter().map(|m| m.as_array().iter().copied().collect()).collect()
+}
+
+/// GFN2-xTB's start moments: shell charges, atomic dipoles (N x 3), packed quadrupoles (N x 6).
+type Moments = (Vec<f64>, Vec<[f64; 3]>, Vec<[f64; 6]>);
+
+fn moments(
+    m: &(Vec<f64>, PyArrayLike2<'_, f64, AllowTypeChange>, PyArrayLike2<'_, f64, AllowTypeChange>),
+    natoms: usize,
+) -> Result<Moments, Failure> {
+    let dp = rows3(&m.1, natoms, "atomic dipoles")?;
+    let q = m.2.as_array();
+    if q.shape() != [natoms, 6] {
+        return Err(Failure::of("input", "invalid_input", "atomic quadrupoles: N x 6 (packed)"));
+    }
+    let qp = q.rows().into_iter().map(|r| std::array::from_fn(|k| r[k])).collect();
+    Ok((m.0.clone(), dp, qp))
+}
+
+/// Install a given start on a calculator: densities (`Calculator::set_density`) or moments
+/// (`Calculator::set_moments`).
+fn install_given(calc: &mut Calculator, d: Option<Vec<Vec<f64>>>, m: Option<Moments>) -> Result<(), Failure> {
+    if let Some(d) = d {
+        calc.set_density(d)?;
+    }
+    if let Some((q, dp, qp)) = m {
+        calc.set_moments(q, dp, qp)?;
+    }
+    Ok(())
+}
+
 /// One calculation as `axtb_driver::run` runs it: the request's calculator on
 /// `axtb_driver::task_threads` threads, then the task; `accuracy` sets the SCF accuracy of the
 /// calculation after the method is built (`Calculator::set_scf_accuracy`, only when it differs
 /// from the request's). Returns the response as `Engine.compute` does, with `threads` (used).
 #[pyfunction]
-#[pyo3(signature = (request, numbers, positions, task, accuracy=None, orbitals=false))]
+#[pyo3(signature = (request, numbers, positions, task, accuracy=None, orbitals=false, densities=None, moments=None))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn compute_once<'py>(
     py: Python<'py>,
     request: &str,
@@ -179,9 +213,14 @@ pub(crate) fn compute_once<'py>(
     task: &str,
     accuracy: Option<f64>,
     orbitals: bool,
+    densities: Option<Vec<PyArrayLike2<'py, f64, AllowTypeChange>>>,
+    moments: Option<(Vec<f64>, PyArrayLike2<'py, f64, AllowTypeChange>, PyArrayLike2<'py, f64, AllowTypeChange>)>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    let nat = numbers.len();
     let req = parse_request(request, numbers, &positions).map_err(|f| f.into_py(py))?;
     let task = parse_task(task, orbitals).map_err(|f| f.into_py(py))?;
+    let given_d = densities.as_deref().map(self::densities);
+    let given_m = moments.as_ref().map(|m| self::moments(m, nat)).transpose().map_err(|f| f.into_py(py))?;
     let run = py.allow_threads(|| {
         guard(|| {
             let threads = axtb_driver::task_threads(&req, &task);
@@ -193,6 +232,7 @@ pub(crate) fn compute_once<'py>(
             if let Some(a) = accuracy.filter(|&a| a != req.accuracy.unwrap_or(1.0)) {
                 calc.set_scf_accuracy(a)?;
             }
+            install_given(&mut calc, given_d, given_m)?;
             let r = calc.compute(&req.positions, &task)?;
             Ok((r, threads))
         })
@@ -222,6 +262,8 @@ struct State {
     accuracy: f64,
     /// Parsed tasks by their JSON.
     tasks: HashMap<(String, bool), Task>,
+    /// The given start of every request without history (`set_given`), as the method holds it.
+    given: Option<Wavefunction>,
 }
 
 /// A session's calculator (private to `axtb`): the driver calculator of one request, built
@@ -289,6 +331,7 @@ impl Engine {
                 holds: Holds::Nothing,
                 accuracy: req.accuracy.unwrap_or(1.0),
                 tasks: HashMap::new(),
+                given: None,
             }),
         })
     }
@@ -338,7 +381,7 @@ impl Engine {
         orbitals: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let pos = rows3(&positions, self.natoms, "positions").map_err(|f| f.into_py(py))?;
-        let (r, from) = self.with_state(py, move |s| {
+        let (r, from, given) = self.with_state(py, move |s| {
             let calc = s.calc.as_mut().ok_or_else(closed)?;
             let key = (task, orbitals);
             let task = match s.tasks.get(&key) {
@@ -353,7 +396,12 @@ impl Engine {
             let from =
                 std::iter::once(&lineage).chain(seeds.iter()).find(|k| s.history.contains_key(k.as_str())).cloned();
             let want = from.clone().map_or(Holds::Nothing, Holds::Lineage);
-            if want != s.holds {
+            let given = from.is_none() && s.given.is_some();
+            if given {
+                // the given start replaces the method's own one for every request without history
+                calc.set_wavefunction(s.given.as_ref().expect("a given start"))?;
+                s.holds = Holds::Other;
+            } else if want != s.holds {
                 calc.set_history(from.as_ref().map(|k| &s.history[k]))?;
                 s.holds = want;
             }
@@ -374,7 +422,7 @@ impl Engine {
                     } else {
                         s.holds = Holds::Other;
                     }
-                    Ok((r, from))
+                    Ok((r, from, given))
                 }
                 Err(e) => {
                     // the method holds no wavefunction after an error
@@ -385,8 +433,33 @@ impl Engine {
         })?;
         let d = response_dict(py, r)?;
         d.set_item("history", from)?;
+        d.set_item("given", given)?;
         d.set_item("threads", self.threads)?;
         Ok(d)
+    }
+
+    /// Start every request without history from a given start: densities (g-xTB, one n x n per
+    /// spin channel, a closed shell's the total density) or GFN2-xTB's moments (shell charges,
+    /// atomic dipoles N x 3, packed quadrupoles N x 6), derived at the engine's current positions
+    /// (the opening geometry) and checked by the method.
+    #[pyo3(signature = (densities=None, moments=None))]
+    #[allow(clippy::type_complexity)]
+    fn set_given<'py>(
+        &self,
+        py: Python<'py>,
+        densities: Option<Vec<PyArrayLike2<'py, f64, AllowTypeChange>>>,
+        moments: Option<(Vec<f64>, PyArrayLike2<'py, f64, AllowTypeChange>, PyArrayLike2<'py, f64, AllowTypeChange>)>,
+    ) -> PyResult<()> {
+        let d = densities.as_deref().map(self::densities);
+        let m = moments.as_ref().map(|m| self::moments(m, self.natoms)).transpose().map_err(|f| f.into_py(py))?;
+        self.with_state(py, move |s| {
+            let calc = s.calc.as_mut().ok_or_else(closed)?;
+            install_given(calc, d, m)?;
+            s.given = calc.wavefunction();
+            calc.set_history(None)?;
+            s.holds = Holds::Nothing;
+            Ok(())
+        })
     }
 
     /// Forget the history of the lineage `key`, or of every lineage (None).
@@ -636,6 +709,20 @@ pub(crate) fn numerics(py: Python<'_>, method: &str, composite: bool) -> PyResul
 pub(crate) fn valence_electrons(py: Python<'_>, method: &str) -> PyResult<Vec<Option<f64>>> {
     let m = axtb_driver::Method::parse(method).map_err(|e| Failure::from(e).into_py(py))?;
     Ok((1..=118).map(|z| axtb_driver::valence_electrons(m, z)).collect())
+}
+
+/// The shells of `method`'s basis for `numbers` from its tables: a list of (atom, l, reference
+/// occupation, exponents (empty for GFN2-xTB)); `axtb_driver::shell_layout`.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+pub(crate) fn shell_layout(
+    py: Python<'_>,
+    method: &str,
+    numbers: Vec<usize>,
+) -> PyResult<Option<Vec<(usize, usize, f64, Vec<f64>)>>> {
+    let m = axtb_driver::Method::parse(method).map_err(|e| Failure::from(e).into_py(py))?;
+    Ok(axtb_driver::shell_layout(m, &numbers)
+        .map(|v| v.into_iter().map(|s| (s.atom, s.l, s.reference_occupation, s.exponents)).collect()))
 }
 
 /// The largest molecule (atoms) whose single point (`hessian` false) or Hessian of `method`
