@@ -278,7 +278,8 @@ caffeine and 19 ms for taxol on one thread of the i9-11900H, symmetry detection 
 `etemp` for g-xTB v1.1 and 2.0.1 (README, "g-xTB"). Against the 2.0.1 program at
 300/1000/3000/5000 K (57 molecules, Fe4, stretched N2; the solvation composite's g-xTB retry
 ladder runs 1000 and 3000 K): energies ≤ 1.8e-12 Eh ((H2O)100 1.1e-11), same SCF iterations,
-analytic gradients ≤ 5e-11 Eh/bohr; against 1.1.0: energies ≤ 2e-11 Eh, same iterations. A few
+analytic gradients ≤ 5e-11 Eh/bohr; against 1.1.0: energies ≤ 3.7e-11 Eh (Ni(CO)4 at 5000 K,
+moved from 2e-11 by the v1.1 merge onto the 2.0.1 engine, an R step), same iterations. A few
 slowly converging SCFs (Fe4, TmH3 at 3000/5000 K) end where rounding decides the last digits, or
 whether they converge within 250 iterations at all, in either program (spec §4.17.1).
 Finite-temperature Hessians agree with tight references to ≤ 3e-9 Eh/bohr² (spec §11.6);
