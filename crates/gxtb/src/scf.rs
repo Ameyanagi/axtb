@@ -25,8 +25,11 @@
 //!   charges, moments, energy and gradient are the result, as v1.1's programs end their SCFs. Its
 //!   orbitals are then the fresh eigenvectors of one Fock build (the returned Hamiltonian), and the
 //!   result is closer to self-consistency than the last DIIS step's: +1 iteration, +2-4 % time
-//!   on one thread and ~6 % on eight (energy + gradient of taxol and (H2O)200), results moved by up to ~1e-7 Eh and 3.4e-5 Eh/bohr
-//!   toward those of a tightly converged SCF.
+//!   on one thread and ~6 % on eight (energy + gradient of taxol and (H2O)200), results moved by
+//!   up to ~1e-7 Eh and 3.4e-5 Eh/bohr toward those of a tightly converged SCF. That iteration is
+//!   axtb's, not the program's, so it runs even when the test is met in the last iteration the
+//!   limit allows (`ConvergenceRule::final_iteration_past_limit`): the axtb conventions converge
+//!   where the program does.
 
 use crate::basis::Basis;
 use crate::cn::gxtb_cn;

@@ -251,3 +251,43 @@ fn every_orbital_keeps_the_scf_ones() {
         }
     }
 }
+
+/// g-xTB 2.0.1's unmixed final iteration in the axtb conventions is axtb's, not the program's:
+/// an SCF whose test is met in the last iteration the limit allows still converges, one
+/// iteration past the limit, with the result it has without the limit. The program conventions
+/// and v1.1 (whose unmixed iteration is its programs' own) stop at the limit as the programs do.
+#[test]
+fn the_unmixed_iteration_runs_past_the_limit() {
+    use axtb_gxtb::model::Model;
+    use axtb_gxtb::scf::Setup;
+    use axtb_gxtb::{ScfOptions, Version};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/structures/caffeine.xyz");
+    let mol = axtb_gxtb::read_xyz(&std::fs::read_to_string(path).unwrap(), 0.0, None).unwrap();
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    for (version, conventions, past) in [
+        (Version::V2_0_1, Conventions::Axtb, true),
+        (Version::V2_0_1, Conventions::Gxtb, false),
+        (Version::V1_1, Conventions::Axtb, false),
+        (Version::V1_1, Conventions::Gxtb, false),
+    ] {
+        let label = format!("{version:?} {conventions:?}");
+        let setup = Setup::new(&mol, Model::new(version, conventions)).unwrap();
+        let opts = ScfOptions { conventions, ..Default::default() };
+        let free = setup.scf(&opts).unwrap();
+        let n = free.iterations;
+        // the limit at the iteration that meets the test (with an unmixed final iteration, the
+        // last but one)
+        let met = if version == Version::V1_1 || past { n - 1 } else { n };
+        let at = setup.scf(&ScfOptions { max_iter: met, ..opts.clone() });
+        if version == Version::V1_1 {
+            assert!(at.is_err(), "{label}: the programs' own unmixed iteration stops at the limit");
+            continue;
+        }
+        let at = at.unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(at.iterations, n, "{label}: the real iteration count");
+        assert_eq!(at.energies.total.to_bits(), free.energies.total.to_bits(), "{label}");
+        assert_eq!(bits(&at.atom_charges), bits(&free.atom_charges), "{label}");
+        let below = ScfOptions { max_iter: met - 1, ..opts };
+        assert!(setup.scf(&below).is_err(), "{label}: a limit below the test's iteration");
+    }
+}

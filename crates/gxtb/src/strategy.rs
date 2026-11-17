@@ -245,6 +245,13 @@ impl ConvergenceRule for Gxtb201Rule {
             self.econverged && self.pconverged
         }
     }
+
+    /// The unmixed iteration is axtb's, not the program's: it runs even when the test is met in
+    /// the last iteration the limit allows, so that the axtb conventions converge where the
+    /// program does.
+    fn final_iteration_past_limit(&self) -> bool {
+        self.unmixed_last
+    }
 }
 
 #[cfg(test)]
