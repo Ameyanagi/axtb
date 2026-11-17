@@ -173,28 +173,28 @@ fn xyz_units_follow_the_conventions() {
 }
 
 /// `--scf-retry` is the request's `scf_retries`, repeated in order; its warning goes to stderr;
-/// malformed rungs are usage errors.
+/// malformed rungs are usage errors. (Water needs 8 iterations: 5 fail, the rung's 250 converge.)
 #[test]
 fn scf_retry_flags() {
-    let hard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/scf_hard/scan-H2O-3.0.xyz");
-    let hard = hard.to_str().unwrap();
-    let base = ["--grad", "--uhf", "0", "--acc", "1e-4", "--max-iter", "30"];
-    let ladder = ["--scf-retry", "etemp=1000,max_iter=1000", "--scf-retry", "max_iter=1000"];
-    let out = axtb(&[&[hard][..], &base, &ladder].concat(), None);
+    let file = structure("water.xyz");
+    let xyz = file.to_str().unwrap();
+    let base = ["--grad", "--max-iter", "5"];
+    let ladder = ["--scf-retry", "etemp=1000,max_iter=250", "--scf-retry", "max_iter=1000"];
+    let out = axtb(&[&[xyz][..], &base, &ladder].concat(), None);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let r: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         r["scf_retry"],
-        serde_json::json!({"rung": 1, "of": 2, "label": "retry 1 of 2: etemp 1000 K, max_iter 1000"})
+        serde_json::json!({"rung": 1, "of": 2, "label": "retry 1 of 2: etemp 1000 K, max_iter 250"})
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("warning: converged on retry 1 of 2: etemp 1000 K, max_iter 1000"), "{stderr}");
+    assert!(stderr.contains("warning: converged on retry 1 of 2: etemp 1000 K, max_iter 250"), "{stderr}");
     for bad in ["etemp", "temp=3", "etemp=hot", "max_iter=1.5", "etemp=1,etemp=2"] {
-        let out = axtb(&[hard, "--scf-retry", bad], None);
+        let out = axtb(&[xyz, "--scf-retry", bad], None);
         assert_eq!(out.status.code(), Some(2), "{bad}");
     }
     // refused by the driver: below --etemp, or for GFN-FF
-    let out = axtb(&[hard, "--etemp", "1000", "--scf-retry", "etemp=300"], None);
+    let out = axtb(&[xyz, "--etemp", "1000", "--scf-retry", "etemp=300"], None);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("below"));
     let (code, r) = json(with(water(), serde_json::json!({"method": "gfnff", "scf_retries": [{"etemp": 1000.0}]})));

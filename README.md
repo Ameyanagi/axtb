@@ -552,7 +552,8 @@ warning: converged on retry 1 of 2: etemp 1000 K, max_iter 1000
 ```
 
 - A ladder that does not fire changes no number, and a result from a rung is the calculation at
-  the rung's settings, bit for bit. With `etemp` no rung may go below it.
+  the rung's settings, bit for bit (the composite's single point after its Hessian: within the SCF
+  thresholds). With `etemp` no rung may go below it.
 - A Hessian runs whole at one rung (reference, displaced and perturbed SCFs and the single point
   of its response): a try that fails anywhere moves the whole calculation to the next rung.
 - A calculator (a session) commits the rung's state as the next geometry's history; the next

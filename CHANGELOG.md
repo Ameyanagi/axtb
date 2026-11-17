@@ -14,7 +14,8 @@ Rust crates, the CLI and the Python package share one version.
   fresh SCF from the method's own start, in order, until one converges. Default none: nothing
   changes without it. GFN-FF refuses it (`no_effect`).
   - A ladder that does not fire changes no number; a result from a rung is the calculation at the
-    rung's settings, bit for bit.
+    rung's settings, bit for bit (the composite's single point after its Hessian, which starts its
+    GFN2 parts fresh at the rung: within the SCF thresholds).
   - The floor: with `scf.etemp` the ladder starts there, and a rung below it is refused
     (`no_effect`, `scf.retries[i].etemp`).
   - Hessians run whole at one rung: a try that fails anywhere (the reference SCF, a displaced

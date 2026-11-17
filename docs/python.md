@@ -155,7 +155,10 @@ keywords = {"solvent": {"name": "water"},
   fallback in the axtb conventions, and in a session an SCF from history that does not converge
   runs once more fresh (`record.scf.restart_fallback`). The rungs come after that.
 - **A ladder that does not fire changes no number**, and a result from a rung is the calculation
-  at that rung's settings, bit for bit (both are a fresh SCF with the same settings).
+  at that rung's settings, bit for bit (both are a fresh SCF with the same settings). The
+  composite's single point after its Hessian is the exception: it starts its GFN2 parts fresh at
+  the rung, not from their Hessians' references, so it agrees within the SCF thresholds (its
+  Hessian is bit for bit).
 - **The floor.** With `scf.etemp` the ladder starts at that temperature, and a rung below it is
   refused (`no_effect`, path `scf.retries[i].etemp`), so a path never drops below its floor.
 - **Hessians** run whole at one rung. When a try fails anywhere (the reference SCF, a displaced
