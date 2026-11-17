@@ -18,45 +18,41 @@ from pydantic import BaseModel
 
 __all__ = ["build"]
 
-_REQUIRED, _FIXED, _EMPTY, _COPY = range(4)
-# per class: the fields in order, each (name, kind, default), and whether model_post_init runs
-_TEMPLATES: dict[type, tuple[list[tuple[str, int, Any]], bool]] = {}
+_REQUIRED = object()
+# per class: the fields in order with their defaults (_REQUIRED for none), the mutable defaults
+# (name, empty type or None, value), whether model_post_init runs
+_TEMPLATES: dict[type, tuple[dict[str, Any], list[tuple[str, Any, Any]], bool]] = {}
 
 
-def _template(cls: Any) -> tuple[list[tuple[str, int, Any]], bool]:
-    fields = []
+def _template(cls: Any) -> tuple[dict[str, Any], list[tuple[str, Any, Any]], bool]:
+    defaults: dict[str, Any] = {}
+    mutable: list[tuple[str, Any, Any]] = []
     for name, f in cls.model_fields.items():
         if f.is_required():
-            fields.append((name, _REQUIRED, None))
+            defaults[name] = _REQUIRED
             continue
         value = f.get_default(call_default_factory=True, validated_data={})
+        defaults[name] = value
         if isinstance(value, dict | list | set) and not value:
-            fields.append((name, _EMPTY, type(value)))
+            mutable.append((name, type(value), None))
         elif isinstance(value, dict | list | set | BaseModel):
-            fields.append((name, _COPY, value))
-        else:
-            fields.append((name, _FIXED, value))
-    t = (fields, cls.model_post_init is not BaseModel.model_post_init)
+            mutable.append((name, None, value))
+    t = (defaults, mutable, cls.model_post_init is not BaseModel.model_post_init)
     _TEMPLATES[cls] = t
     return t
 
 
 def build(cls: Any, **given: Any) -> Any:
     """A model of `cls` with the fields `given` (trusted: not validated) and the other fields'
-    defaults, as ``cls.model_construct(**given)`` makes it."""
+    defaults, as ``cls.model_construct(**given)`` makes it (the fields in their declared order)."""
     if cls.__private_attributes__:  # pragma: no cover - none of qcdata's models has any
         return cls.model_construct(**given)
-    fields, post_init = _TEMPLATES.get(cls) or _template(cls)
-    values: dict[str, Any] = {}
-    for name, kind, default in fields:
-        if name in given:
-            values[name] = given[name]
-        elif kind == _FIXED:
-            values[name] = default
-        elif kind == _EMPTY:
-            values[name] = default()
-        elif kind == _COPY:
-            values[name] = copy.deepcopy(default)
+    defaults, mutable, post_init = _TEMPLATES.get(cls) or _template(cls)
+    values = defaults.copy()
+    values.update(given)
+    for name, empty, value in mutable:
+        if name not in given:
+            values[name] = empty() if empty is not None else copy.deepcopy(value)
     m = cls.__new__(cls)
     object.__setattr__(m, "__dict__", values)
     object.__setattr__(m, "__pydantic_fields_set__", set(given))

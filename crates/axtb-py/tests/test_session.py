@@ -206,6 +206,7 @@ def test_threads_and_plan():
         assert s.compute().execution.threads == 1  # water runs on one thread, the same bits
 
 
+@pytest.mark.filterwarnings("error")
 def test_frames_validate():
     from qcdata import Frame
 

@@ -19,17 +19,24 @@ from typing import Any
 
 import numpy as np
 from qcdata import (
+    AOConvention,
+    BasisSet,
     ExecutionInfo,
+    OrbitalKind,
+    Orbitals,
+    OrbitalSpin,
     ProgramError,
     ProgramInput,
     ProgramOutput,
     ProgramWarning,
     Provenance,
     Resolved,
+    Shell,
     SinglePointData,
     Thermochemistry,
     ThermoTerm,
     VibrationalAnalysis,
+    Wavefunction,
 )
 
 from . import _axtb
@@ -206,6 +213,71 @@ def static_results(r: Mapping[str, Any], p: Planned) -> dict[str, Any]:
     return d
 
 
+#: axtb's AO order: atom by atom, shell by shell, m = -l..l for every l (p as y, z, x); every shell
+#: spherical, each function normalized as qcdata's default says (the x^l component's norm)
+AO_CONVENTION = AOConvention(spherical_order="increasing_m")
+
+
+def basis(o: Mapping[str, Any]) -> BasisSet:
+    """The basis set of the engine's structured orbitals: one spherical shell per axtb shell, atom
+    by atom, shell by shell. axtb's contraction coefficients multiply unnormalized primitives and
+    normalize the x^l component, which is qcdata's `Shell` convention."""
+    shells = [
+        build(Shell, center=atom, angular_momentum=int(ell), pure=True, exponents=a, coefficients=c)
+        for atom, per_atom in enumerate(o["shells"])
+        for ell, a, c in per_atom
+    ]
+    return build(BasisSet, shells=shells, ao_convention=AO_CONVENTION)
+
+
+def wavefunction(r: Mapping[str, Any], p: Planned, outputs: frozenset[str]) -> Wavefunction | None:
+    """The `Wavefunction` of an SCF response: the orbital levels always (energies, occupations per
+    spin in 0..1, the electronic temperature and Fermi levels, the core electrons each atom keeps
+    outside the valence-only orbitals); the coefficients (``orbitals``), the overlap and the
+    Hamiltonian on request, with the basis set they share. GFN2-xTB is restricted (one set of
+    orbitals occupied per spin, open shells included), g-xTB restricted for a closed shell and
+    unrestricted for an open one; the composite's are its g-xTB part's.
+
+    None where qcdata cannot hold the levels: smeared occupations of a spin without electrons have
+    no Fermi level (a warning says so)."""
+    scf = r["scf"]
+    restricted = p.method == "gfn2" or p.multiplicity == 1
+    temperature = float(scf["electronic_temperature"])
+    levels = scf["fermi_levels"]
+    if temperature > 0 and None in levels:
+        return None
+    orb: dict[str, Any] = {
+        "spin": OrbitalSpin.restricted if restricted else OrbitalSpin.unrestricted,
+        "kind": OrbitalKind.canonical,
+        "energies_a": scf["orbital_energies_alpha"],
+        "occupations_a": scf["occupations_alpha"],
+        "occupations_b": scf["occupations_beta"],
+        "electronic_temperature": temperature,
+        "fermi_level_a": levels[0] if temperature > 0 else None,
+        "fermi_level_b": levels[1] if temperature > 0 else None,
+        "core_electrons": scf["core_electrons"],
+    }
+    if not restricted:
+        orb["energies_b"] = scf["orbital_energies_beta"]
+    wf: dict[str, Any] = {}
+    if needs_orbitals(outputs):
+        o = r["orbitals"]
+        wf["basis"] = basis(o)
+        if "orbitals" in outputs:
+            sets = o["sets"]
+            orb["coefficients_a"] = sets[0]["coefficients"].T
+            if not restricted:
+                orb["coefficients_b"] = sets[1]["coefficients"].T
+    if "overlap" in outputs:
+        wf["overlap"] = scf["overlap"]
+    if "hamiltonian" in outputs:
+        h = scf["hamiltonian"]
+        wf["hamiltonian_a"] = h[0]
+        if not restricted:
+            wf["hamiltonian_b"] = h[1]
+    return build(Wavefunction, orbitals=build(Orbitals, **orb), **wf)
+
+
 def results(
     r: Mapping[str, Any],
     p: Planned,
@@ -231,6 +303,14 @@ def results(
         if "bond_orders" in scf and "bond_orders" in outputs:
             d["bond_orders"] = scf["bond_orders"]
             d["bond_orders_kind"] = "mayer"
+        d["shell_populations"] = scf["shell_populations"]
+        d["shell_atoms"] = scf["shell_atoms"]
+        d["shell_angular_momenta"] = scf["shell_angular_momenta"]
+        d["atomic_dipoles"] = scf["atomic_dipoles"]
+        d["atomic_quadrupoles"] = scf["atomic_quadrupole_tensors"]
+        wf = wavefunction(r, p, outputs)
+        if wf is not None:
+            d["wavefunction"] = wf
     h = r.get("hessian")
     if h is not None:
         d["hessian"] = h["hessian"]
@@ -321,11 +401,22 @@ def timings(r: Mapping[str, Any], total: float) -> dict[str, float]:
     return t
 
 
-def warnings_of(r: Mapping[str, Any]) -> list[ProgramWarning]:
-    """The warnings of a response: a run-time LAPACK that was not used."""
+def warnings_of(r: Mapping[str, Any], res: SinglePointData | None = None) -> list[ProgramWarning]:
+    """The warnings of a response: a run-time LAPACK that was not used; orbital levels qcdata
+    cannot hold (smeared occupations of a spin without electrons have no Fermi level)."""
+    out = []
     if r.get("eigensolver_warning"):
-        return [ProgramWarning(code="eigensolver_fallback", message=r["eigensolver_warning"])]
-    return []
+        out.append(build(ProgramWarning, code="eigensolver_fallback", message=r["eigensolver_warning"]))
+    if res is not None and r.get("scf") is not None and res.wavefunction is None:
+        out.append(
+            build(
+                ProgramWarning,
+                code="orbitals_omitted",
+                message="smeared occupations of a spin without electrons have no Fermi level, which qcdata's "
+                "Orbitals need: the wavefunction is left out",
+            )
+        )
+    return out
 
 
 def failed_output(
@@ -399,7 +490,7 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
         success=True,
         results=res,
         resolved=resolved,
-        warnings=warnings + warnings_of(r),
+        warnings=warnings + warnings_of(r, res),
         record=rec,
         execution=_build(
             ExecutionInfo, devices=[], threads=r["threads"], timings=timings(r, time.perf_counter() - start)

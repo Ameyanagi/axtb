@@ -403,7 +403,7 @@ class Session:
             structure=self._structure_at(x),
             results=res,
             success=True,
-            warnings=_qc.warnings_of(r),
+            warnings=_qc.warnings_of(r, res),
             record=rec,
             execution=build(ExecutionInfo, threads=r["threads"], timings=_qc.timings(r, time.perf_counter() - start)),
         )

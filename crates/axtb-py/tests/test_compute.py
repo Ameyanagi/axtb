@@ -90,6 +90,7 @@ def test_every_method_and_calctype(method, calctype, structure):
     ("gxtb-v1.1", "energy", {"scf": {"etemp": 300}}),
     ("gfnff", "hessian", {}),
 ])
+@pytest.mark.filterwarnings("error")
 def test_outputs_validate(method, calctype, keywords):
     """Outputs are built without validation (axtb._models.build): they validate as they are."""
     from qcdata import ProgramOutput
