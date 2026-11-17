@@ -158,8 +158,10 @@ version = "0.1.1"
 dependencies = [
  "axtb",
  "axtb-driver",
+ "axtb-solvation",
  "numpy",
  "pyo3",
+ "serde",
  "serde_json",
 ]
 

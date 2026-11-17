@@ -8,6 +8,8 @@
 //! `energy_change` and `residual`), `RuntimeError` for numerical failures and panics; each has
 //! `kind`, the driver's error kind.
 
+mod engine;
+
 use axtb_driver::{Method, Request, Response, Task, Temperatures};
 use numpy::{AllowTypeChange, PyArray1, PyArray2, PyArrayLike2, PyArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyRuntimeWarning, PyValueError};
@@ -707,5 +709,17 @@ fn _axtb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gxtb_solvent_hint, m)?)?;
     m.add_class::<Calculator>()?;
     m.add_class::<ScfState>()?;
+    // the private engine of axtb.compute and axtb.Session
+    m.add("Error", py.get_type::<engine::Error>())?;
+    m.add("ANALYSIS_NUMERICS", axtb_driver::ANALYSIS_NUMERICS)?;
+    m.add_class::<engine::Engine>()?;
+    m.add_function(wrap_pyfunction!(engine::compute_once, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::canonical, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::supported_elements, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::numerics, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::single_thread_atoms, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::solvents, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::canonical_solvent, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::lapack_warning, m)?)?;
     Ok(())
 }

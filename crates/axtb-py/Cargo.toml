@@ -21,7 +21,11 @@ axtb = { workspace = true }
 axtb-driver = { workspace = true }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 numpy = "0.23"
-serde_json = "1"
+# exact decimal-to-double parsing of the driver requests (the default parser can be 1 ulp off)
+serde_json = { version = "1", features = ["float_roundtrip"] }
+serde = "1"
+# the solvent names of the implicit-solvent models (planning in Python)
+axtb-solvation = { workspace = true }
 
 [lints]
 workspace = true
