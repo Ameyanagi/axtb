@@ -102,12 +102,14 @@ from ._axtb import (  # noqa: E402  (after the CPU check)
 from ._program import program  # noqa: E402
 from ._qc import VERSION as __version__  # noqa: E402
 from ._qc import compute  # noqa: E402
+from ._session import Session  # noqa: E402
 
 __all__ = [
     "Calculator",
     "InputError",
     "ScfNotConvergedError",
     "ScfState",
+    "Session",
     "__version__",
     "canonical_method",
     "compute",

@@ -31,9 +31,9 @@ pyo3::create_exception!(
     Error,
     PyException,
     "A failed engine call: `kind` (the driver's: input, unsupported_element, topology, \
-     scf_not_converged, numerical, not_applicable; panic, closed), `code` (invalid_input, \
+     scf_not_converged, numerical, not_applicable; structure, panic, closed), `code` (invalid_input, \
      unsupported_element, topology_failed, scf_not_converged, numerical_failure, not_applicable; \
-     panic, session_closed), `message` and `fields` (a dict: `z`; `iterations`, `energy_change`, \
+     invalid_structure, panic, session_closed), `message` and `fields` (a dict: `z`; `iterations`, `energy_change`, \
      `residual`)."
 );
 
@@ -112,12 +112,27 @@ fn rows3(a: &PyArrayLike2<'_, f64, AllowTypeChange>, rows: usize, what: &str) ->
     let v = a.as_array();
     if v.shape() != [rows, 3] {
         return Err(Failure::of(
-            "input",
-            "invalid_input",
-            format!("{what} must have shape ({rows}, 3), not {:?}", v.shape()),
+            "structure",
+            "invalid_structure",
+            format!("{what}: {rows} atoms x 3, not shape {:?}", v.shape()),
         ));
     }
+    if v.iter().any(|x| !x.is_finite()) {
+        return Err(Failure::of("structure", "invalid_structure", format!("{what}: must be finite numbers")));
+    }
     Ok(v.rows().into_iter().map(|r| [r[0], r[1], r[2]]).collect())
+}
+
+/// The 3 x 3 tensor of a packed one (xx, xy, yy, xz, yz, zz), values copied.
+fn tensor(q: &[f64; 6]) -> [[f64; 3]; 3] {
+    let [xx, xy, yy, xz, yz, zz] = *q;
+    [[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]]
+}
+
+/// An (n, 3, 3) array of packed tensors.
+fn tensors<'py>(py: Python<'py>, packed: &[[f64; 6]]) -> PyResult<Bound<'py, PyAny>> {
+    let flat: Vec<f64> = packed.iter().flat_map(|q| tensor(q).into_iter().flatten()).collect();
+    Ok(PyArray1::from_vec(py, flat).reshape([packed.len(), 3, 3])?.into_any())
 }
 
 /// The driver request of `request` (JSON of the driver's request without `numbers` and
@@ -445,7 +460,9 @@ fn json<'py, T: serde::Serialize>(py: Python<'py>, v: &T) -> PyResult<Bound<'py,
 /// The response as the Python layer reads it: the response's fields under their CLI names,
 /// `scf`, `gfnff`, `hessian`, `vibrations`, `composite` and `orbitals` as nested dicts, arrays
 /// as numpy arrays (`gradient` N x 3, `hessian` 3N x 3N, `atomic_quadrupoles` N x 6 as packed,
-/// `normal_modes` modes x N x 3), the binding-only fields included (`subtotals`;
+/// `normal_modes` modes x N x 3; the traceless molecular quadrupole and the atomic quadrupoles
+/// also unpacked: `quadrupole_tensor` 3 x 3, `atomic_quadrupole_tensors` N x 3 x 3), the
+/// binding-only fields included (`subtotals`;
 /// `core_electrons`, `shell_populations`, `shell_atoms`, `shell_angular_momenta`,
 /// `reference_shell_occupations`, `quadrupole_traceless`; the thermochemistry's
 /// `inverted_frequencies`, `dropped_frequencies`, `average_moment`).
@@ -485,9 +502,11 @@ fn response_dict(py: Python<'_>, r: Response) -> PyResult<Bound<'_, PyDict>> {
         x.set_item("electronic_temperature", s.electronic_temperature)?;
         x.set_item("quadrupole", array1(py, &s.quadrupole))?;
         x.set_item("quadrupole_traceless", array1(py, &s.quadrupole_traceless))?;
+        x.set_item("quadrupole_tensor", rows(py, &tensor(&s.quadrupole_traceless))?)?;
         x.set_item("shell_charges", array1(py, &s.shell_charges))?;
         x.set_item("atomic_dipoles", rows(py, &s.atomic_dipoles)?)?;
         x.set_item("atomic_quadrupoles", rows(py, &s.atomic_quadrupoles)?)?;
+        x.set_item("atomic_quadrupole_tensors", tensors(py, &s.atomic_quadrupoles)?)?;
         x.set_item("orbital_energies_alpha", array1(py, &s.orbital_energies_alpha))?;
         x.set_item("orbital_energies_beta", array1(py, &s.orbital_energies_beta))?;
         x.set_item("occupations_alpha", array1(py, &s.occupations_alpha))?;

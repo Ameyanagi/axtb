@@ -42,6 +42,7 @@ _DRIVER = {
     "scf_not_converged": ("convergence", "scf_not_converged"),
     "numerical": ("numerical", "numerical_failure"),
     "not_applicable": ("unsupported", "not_applicable"),
+    "structure": ("input", "invalid_structure"),
     "panic": ("internal", "panic"),
     "closed": ("input", "session_closed"),
 }

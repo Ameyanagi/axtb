@@ -37,7 +37,7 @@ from ._errors import from_driver
 from ._models import build
 from ._keywords import Planned, plan_input, plan_threads
 
-__all__ = ["compute", "provenance", "results", "record", "threads", "task", "VERSION", "COMMIT"]
+__all__ = ["COMMIT", "VERSION", "compute", "provenance", "record", "results", "static_results", "task", "threads"]
 
 
 def _version() -> str:
@@ -105,6 +105,21 @@ def threads(p: Planned, largest: str, ctx: Any) -> tuple[int, list[ProgramWarnin
     return planned, [], f"a direct call: the plan's {planned}"
 
 
+def implied(outputs: frozenset[str] | set[str]) -> frozenset[str]:
+    """The outputs with what they imply (decision 25a): ``hamiltonian`` brings ``overlap`` and
+    ``orbitals``; ``overlap`` alone brings the basis set and no coefficients."""
+    out = set(outputs)
+    if "hamiltonian" in out:
+        out |= {"overlap", "orbitals"}
+    return frozenset(out)
+
+
+def needs_orbitals(outputs: frozenset[str]) -> bool:
+    """Whether the engine must return the structured orbitals (for the coefficients or the basis
+    set of an AO matrix)."""
+    return bool(outputs & {"orbitals", "overlap", "hamiltonian"})
+
+
 def task(p: Planned, calctype: str, outputs: frozenset[str]) -> str:
     """The driver task (JSON) of a calctype with outputs."""
     t: dict[str, Any] = {"numbers": [], "positions": []}
@@ -120,12 +135,6 @@ def task(p: Planned, calctype: str, outputs: frozenset[str]) -> str:
     if "hamiltonian" in outputs:
         t["hamiltonian"] = True
     return json.dumps(t, separators=(",", ":"))
-
-
-def _quadrupole(q: np.ndarray) -> np.ndarray:
-    """The 3 x 3 tensor of a packed one (xx, xy, yy, xz, yz, zz)."""
-    xx, xy, yy, xz, yz, zz = q
-    return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
 
 
 def _thermo(r: Mapping[str, Any], p: Planned) -> tuple[dict[str, Any], list[Thermochemistry]]:
@@ -177,17 +186,40 @@ def _thermo(r: Mapping[str, Any], p: Planned) -> tuple[dict[str, Any], list[Ther
     return fields, entries
 
 
-def results(r: Mapping[str, Any], p: Planned, calctype: str, outputs: frozenset[str]) -> SinglePointData:
-    """The `SinglePointData` of a response."""
-    nat = len(p.numbers)
+def static_results(r: Mapping[str, Any], p: Planned) -> dict[str, Any]:
+    """The fields of `results` that one molecule and method keep at every geometry (a session
+    computes them once): provenance, the atom, basis, orbital and electron counts, the charges'
+    kind."""
     d: dict[str, Any] = {
         "provenance": provenance(),
-        "energy": r["energy"],
-        "calcinfo_natoms": nat,
-        "dipole_moment": [float(x) for x in r["dipole"]],
-        "atomic_charges": r["charges"],
+        "calcinfo_natoms": len(p.numbers),
         "atomic_charges_kind": "mulliken" if p.scf else "eeq",
     }
+    scf = r.get("scf")
+    if scf is not None:
+        d["calcinfo_nmo"] = len(scf["orbital_energies_alpha"])
+        d["calcinfo_nbasis"] = sum(2 * ell + 1 for ell in scf["shell_angular_momenta"])
+        for spin, name in (("alpha", "calcinfo_nalpha"), ("beta", "calcinfo_nbeta")):
+            n = float(np.sum(scf[f"occupations_{spin}"]))
+            if abs(n - round(n)) <= 1e-6:
+                d[name] = int(round(n))
+    return d
+
+
+def results(
+    r: Mapping[str, Any],
+    p: Planned,
+    calctype: str,
+    outputs: frozenset[str],
+    static: Mapping[str, Any] | None = None,
+) -> SinglePointData:
+    """The `SinglePointData` of a response (`static`: its `static_results`, if known)."""
+    nat = len(p.numbers)
+    d: dict[str, Any] = dict(static if static is not None else static_results(r, p))
+    d["provenance"] = provenance()  # one per result (models are mutable)
+    d["energy"] = r["energy"]
+    d["dipole_moment"] = r["dipole"].tolist()
+    d["atomic_charges"] = r["charges"]
     subtotals = set(r["subtotals"])
     d["energy_components"] = {k: x for k, x in r["terms"].items() if k not in subtotals}
     if calctype != "energy":
@@ -195,13 +227,7 @@ def results(r: Mapping[str, Any], p: Planned, calctype: str, outputs: frozenset[
     scf = r.get("scf")
     if scf is not None:
         d["scf_iterations"] = scf["iterations"]
-        d["quadrupole_moment"] = _quadrupole(scf["quadrupole_traceless"])
-        d["calcinfo_nmo"] = len(scf["orbital_energies_alpha"])
-        d["calcinfo_nbasis"] = sum(2 * ell + 1 for ell in scf["shell_angular_momenta"])
-        for spin, name in (("alpha", "calcinfo_nalpha"), ("beta", "calcinfo_nbeta")):
-            n = float(np.sum(scf[f"occupations_{spin}"]))
-            if abs(n - round(n)) <= 1e-6:
-                d[name] = int(round(n))
+        d["quadrupole_moment"] = scf["quadrupole_tensor"]
         if "bond_orders" in scf and "bond_orders" in outputs:
             d["bond_orders"] = scf["bond_orders"]
             d["bond_orders_kind"] = "mayer"
@@ -351,7 +377,10 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
     resolved = _build(Resolved, settings={**p.settings, "threads": n}, reasons={**p.reasons, "threads": why})
     request = json.dumps({**p.request, "threads": n}, separators=(",", ":"))
     try:
-        r = _axtb.compute_once(request, p.numbers, p.positions, task(p, calctype, p.outputs))
+        outputs = implied(p.outputs)
+        r = _axtb.compute_once(
+            request, p.numbers, p.positions, task(p, calctype, outputs), orbitals=needs_orbitals(outputs)
+        )
     except _axtb.Error as x:
         error, fields = from_driver(x)
         rec = record(None, p)
@@ -362,7 +391,7 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
             inp, out_error, p=p, resolved=resolved, warnings=warnings, rec=rec, execution=execution
         )
         raise out_error from None
-    res = results(r, p, calctype, p.outputs)
+    res = results(r, p, calctype, outputs)
     rec = record(r, p)
     out = _build(
         _OUTPUT,
