@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
-"""g-xTB 2.0.1 through the Python package and the qccodec codec.
+"""g-xTB 2.0.1 through the Python package (axtb 0.1's calls through tests/flat.py).
 
 Run with the extension built from this tree (a wheel built from ``crates/axtb-py``) and the CLI
 at ``target/release/axtb`` (or ``$AXTB_BIN``)::
@@ -21,7 +21,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import axtb
+import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
+
 
 ROOT = Path(__file__).resolve().parents[3]
 REF = ROOT / "crates/gxtb/tests/reference_v2"
@@ -65,18 +66,18 @@ def cli(numbers, pos, charge, uhf, gradient=False, conventions="gxtb", etemp=Non
 @pytest.mark.parametrize("rel,charge,uhf", CASES)
 def test_python_equals_cli_and_program(rel, charge, uhf):
     numbers, pos, program, d = read(rel)
-    r = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, conventions="gxtb")
+    r = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, conventions="gxtb")
     assert abs(r["energy"] - program) < 1e-11
     assert abs(sum(r["charges"]) - charge) < 1e-9
-    calc = axtb.Calculator(METHOD, numbers, pos, charge=charge, uhf=uhf, threads=2, conventions="gxtb")
+    calc = flat.Calculator(METHOD, numbers, pos, charge=charge, uhf=uhf, threads=2, conventions="gxtb")
     rc = calc.singlepoint(pos, gradient=False)
     assert rc["energy"] == r["energy"]
     assert np.array_equal(rc["charges"], r["charges"])
     # tight analytic gradient against the program's
-    t = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True, conventions="gxtb",
+    t = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True, conventions="gxtb",
                          accuracy=1e-4)
     assert np.abs(np.asarray(t["gradient"]) - program_gradient(d)).max() < 1e-10
-    g = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True, conventions="gxtb")
+    g = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True, conventions="gxtb")
     assert np.array_equal(calc.singlepoint(pos, gradient=True)["gradient"], g["gradient"])
     if AXTB_BIN.exists():
         c = cli(numbers, pos, charge, uhf, gradient=True)
@@ -86,7 +87,7 @@ def test_python_equals_cli_and_program(rel, charge, uhf):
     # default conventions: CODATA 2022 units, integer electron count, smooth cutoffs, and one
     # unmixed iteration after the program's convergence test (up to 1.4e-7 Eh from the program,
     # tests/gxtb2_reproduction.py)
-    dflt = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True)
+    dflt = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True)
     assert abs(dflt["energy"] - program) < 2e-7
     assert abs(sum(dflt["charges"]) - charge) < 1e-8
     if AXTB_BIN.exists():
@@ -97,14 +98,14 @@ def test_python_equals_cli_and_program(rel, charge, uhf):
 
 def test_hessian():
     numbers, pos, _, _ = read("reference/water")
-    calc = axtb.Calculator(METHOD, numbers, pos, threads=2)
+    calc = flat.Calculator(METHOD, numbers, pos, threads=2)
     h = calc.hessian(pos)
     hess = np.asarray(h["hessian"])
     assert hess.shape == (9, 9)
     assert np.array_equal(hess, hess.T)
     assert h["hessian_max_asymmetry"] < 2e-5
     assert np.abs(hess.reshape(9, 3, 3).sum(axis=1)).max() < 1e-5
-    serial = axtb.Calculator(METHOD, numbers, pos).hessian(pos)
+    serial = flat.Calculator(METHOD, numbers, pos).hessian(pos)
     assert np.allclose(serial["hessian"], hess, atol=1e-12)
     # the default is analytic; the numerical Hessian (central differences) agrees
     num = np.asarray(calc.hessian(pos, method="numerical")["hessian"])
@@ -113,49 +114,14 @@ def test_hessian():
 
 def test_errors():
     numbers, pos, _, _ = read("reference/water")
-    with pytest.raises(ValueError, match="gxtb-v2.0.1 has no implicit-solvent parameters.*solvation_correction"):
-        axtb.singlepoint(numbers, pos, method=METHOD, alpb="water")
-    with pytest.raises(ValueError, match="unknown g-xTB conventions"):
-        axtb.singlepoint(numbers, pos, method=METHOD, conventions="tblite")
+    with pytest.raises(ValueError, match="gxtb-v2.0.1 has no implicit-solvent parameters.*solvent.correction"):
+        flat.singlepoint(numbers, pos, method=METHOD, alpb="water")
+    with pytest.raises(ValueError, match="conventions: unknown value"):
+        flat.singlepoint(numbers, pos, method=METHOD, conventions="tblite")
     # v1.1 keeps working next to 2.0.1
-    v1 = axtb.singlepoint(numbers, pos, method="gxtb-v1.1")
-    v2 = axtb.singlepoint(numbers, pos, method="g-xTB 2.0.1")
+    v1 = flat.singlepoint(numbers, pos, method="gxtb-v1.1")
+    v2 = flat.singlepoint(numbers, pos, method="g-xTB 2.0.1")
     assert v1["energy"] != v2["energy"]
-
-
-def test_qccodec():
-    qccompute = pytest.importorskip("qccompute")
-    from qcdata import CalcType, Model, ProgramInput, Structure
-
-    numbers, pos, program, d = read("reference/tetrachlorocuprate")
-    names = {v: k for k, v in SYMBOLS.items()}
-    structure = Structure(symbols=[names[z] for z in numbers], geometry=pos, charge=-2, multiplicity=2)
-    out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.energy, structure=structure,
-                                         model=Model(method="gxtb-v2.0.1"), keywords={"conventions": "gxtb"}))
-    assert out.success, out.logs
-    assert abs(out.results.energy - program) < 1e-11
-    assert out.results.extras["conventions"] == "gxtb"
-    assert "dispersion_three_body" in out.results.extras["energy_terms"]
-    out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.gradient, structure=structure,
-                                         model=Model(method="gxtb-v2.0.1")))
-    assert out.success, out.logs
-    direct = axtb.singlepoint(numbers, pos, charge=-2, uhf=1, method=METHOD, gradient=True)
-    assert np.array_equal(np.asarray(out.results.gradient), np.asarray(direct["gradient"]))
-    out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.hessian, structure=structure,
-                                         model=Model(method="gxtb-v2.0.1"), keywords={"threads": 2}))
-    assert out.success, out.logs
-    assert np.asarray(out.results.hessian).shape == (15, 15)
-    # Fermi smearing (the program's --etemp) through the codec
-    out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.energy, structure=structure,
-                                         model=Model(method="gxtb-v2.0.1"),
-                                         keywords={"conventions": "gxtb", "etemp": 1000.0}))
-    assert out.success, out.logs
-    assert abs(out.results.energy - etemp_reference("tetrachlorocuprate", 1000.0)["total_energy"]) < 1e-11
-    # implicit solvent alone is refused with a pointer to the composite (solvation_correction)
-    with pytest.raises(Exception, match="solvation_correction"):
-        qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.energy, structure=structure,
-                                       model=Model(method="gxtb-v2.0.1"), keywords={"alpb": "water"}),
-                          raise_exc=True)
 
 
 def etemp_reference(name, etemp):
@@ -170,7 +136,7 @@ def test_etemp_matches_program(rel, charge, uhf):
     Python result bit for bit."""
     numbers, pos, _, _ = read(rel)
     ref = etemp_reference(rel.split("/")[1], 1000.0)
-    r = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True, conventions="gxtb",
+    r = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True, conventions="gxtb",
                          etemp=1000.0, max_iter=1000)
     assert abs(r["energy"] - ref["total_energy"]) < 1e-11
     assert r["iterations"] == ref["scf_iterations"]
@@ -189,12 +155,12 @@ def test_etemp_hessian():
     lines = (d / "mol.xyz").read_text().splitlines()
     numbers = [7, 7]
     pos = np.array([[float(x) * MCTC_AATOAU for x in l.split()[1:4]] for l in lines[2:4]])
-    one = axtb.Calculator(METHOD, numbers, pos, etemp=5000.0)
+    one = flat.Calculator(METHOD, numbers, pos, etemp=5000.0)
     h1 = np.asarray(one.hessian(pos)["hessian"])
-    two = axtb.Calculator(METHOD, numbers, pos, etemp=5000.0, threads=2)
+    two = flat.Calculator(METHOD, numbers, pos, etemp=5000.0, threads=2)
     assert np.array_equal(np.asarray(two.hessian(pos)["hessian"]), h1)
     num = np.asarray(one.hessian(pos, method="numerical")["hessian"])
     assert np.abs(num - h1).max() < 1e-5
     # smearing changes the curvature of this stretched bond (5e-5 Eh/bohr^2)
-    cold = np.asarray(axtb.Calculator(METHOD, numbers, pos).hessian(pos)["hessian"])
+    cold = np.asarray(flat.Calculator(METHOD, numbers, pos).hessian(pos)["hessian"])
     assert np.abs(cold - h1).max() > 2e-5

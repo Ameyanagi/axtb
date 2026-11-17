@@ -89,7 +89,7 @@ def main() -> int:
     # projects its `hessian` file
     try:
         os.environ["AXTB_MATRIX_XTB"] = a.xtb
-        import axtb
+        import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
         import runners as P
         import run as R
         lines = xyz.read_text().splitlines()
@@ -98,7 +98,7 @@ def main() -> int:
         nums = np.array([R.S.SYMBOLS.index(s.capitalize()) + 1 for s in sym])
         pos = np.array([[float(x) for x in ln.split()[1:4]] for ln in lines[2:2 + nat]]) / 0.52917721090380
         pos = R.rotmol(pos)
-        calc = axtb.Calculator("gfn2", nums, pos, conventions=P.XTB_CONVENTIONS)
+        calc = flat.Calculator("gfn2", nums, pos, conventions=P.XTB_CONVENTIONS)
         ha = R.xtb_projected(np.asarray(calc.hessian(pos, method="analytic", accuracy=1e-6)["hessian"]), nums, pos,
                              R.xtb_masses()).ravel()
         for r, h in zip([{"setting": "--acc 1.0"}] + rows, (h1, h2, h3, h4)):

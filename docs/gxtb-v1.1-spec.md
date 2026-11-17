@@ -737,7 +737,7 @@ rotation covariant. The default conventions (exact Fock matrix) are invariant to
 
 ### 4.18 Conventions and analytic gradients [C]
 
-**Conventions** (`scf::Conventions`, `conventions` in the CLI, Python and qccodec):
+**Conventions** (`scf::Conventions`, `conventions` in the CLI and Python):
 
 - `axtb` (default): the SCF diagonalizes F = ∂E/∂P exactly (AES potentials of all five
   parts; OFX population part ½(y_κ + y_λ)S_κλ off the diagonal). Same energy expression,
@@ -949,7 +949,7 @@ run through the 1.1.0 program (`gxtb -c`, `-grad -symthr 0`) and axtb in program
 | `scf` | setup, energy/Fock evaluation, start density, the program's mixing and convergence, `singlepoint()` | total energies 4.6e-13 Eh, terms 4e-12 Eh, charges 1.7e-11, orbital energies 1.5e-14 Eh, same iteration counts; 5 more molecules 7e-12 Eh |
 | `read_xyz` | the program's Å→bohr convention | ≤ 1.1e-16 bohr |
 | `gradient`, `response` | analytic gradients: explicit derivatives and chain rules; Z-vector response of the program's Fock matrix | finite differences ≤ 5.2e-10 Eh/bohr; program central differences ≤ 3e-11 (§4.18) |
-| `calculator` | `Calculator` (method `"gxtb-v1.1"` in the axtb CLI, Python package and qccodec; `Calculator::new(Version::V1_1, …)`), conventions, semi-numerical Hessian | bit-identical to `Setup::scf`/`gradient`; threads tests |
+| `calculator` | `Calculator` (method `"gxtb-v1.1"` in the axtb CLI and Python package; `Calculator::new(Version::V1_1, …)`), conventions, semi-numerical Hessian | bit-identical to `Setup::scf`/`gradient`; threads tests |
 
 `crates/d4` hooks used by `disp` (backwards compatible, tested in `crates/d4/src/tests.rs`):
 `D4Model::with_reference_data` (replace the reference systems of every element and recompute

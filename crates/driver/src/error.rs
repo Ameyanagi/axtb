@@ -55,8 +55,7 @@ impl Error {
         }
     }
 
-    /// Whether the request is at fault (input, unsupported element, topology, not applicable):
-    /// Python raises `axtb.InputError`, a `ValueError`.
+    /// Whether the request is at fault (input, unsupported element, topology, not applicable).
     pub fn is_input(&self) -> bool {
         matches!(
             self,

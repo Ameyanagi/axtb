@@ -6,7 +6,7 @@ A case is a dict:
     numbers, positions            atomic numbers, positions in bohr (generated, structures.py)
     charge, uhf                   total charge (int), unpaired electrons (None = default)
     accuracy, etemp, max_iter, dispersion, threads, alpb, gbsa, solvation_state
-                                  options as accepted by axtb.singlepoint (defaults otherwise)
+                                  the CLI's request keys (defaults otherwise; tests/flat.py)
     checks                        which comparisons to run (see run.py `CHECKS`)
     tags                          free-form labels (open-shell, small-gap, ...)
     expect                        failure cases: what a correct program does ("error" or "ok")

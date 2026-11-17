@@ -313,6 +313,15 @@ impl Calculator {
         Ok(self.method.set_wavefunction(&Wavefunction::new(fingerprint, WavefunctionData::Scf(data)))?)
     }
 
+    /// Start the next SCF from given density matrices (g-xTB and the composite's g-xTB part:
+    /// row-major n x n in axtb's AO order, one per spin channel, a closed shell's the total
+    /// density), whatever the restart policy says: e.g. C n C^T of a given wavefunction's
+    /// orbitals. Checked against the molecule (channels, size, electrons to 1e-6); GFN2-xTB starts
+    /// from moments ([`Calculator::set_moments`]), GFN-FF from nothing.
+    pub fn set_density(&mut self, densities: Vec<Vec<f64>>) -> Result<()> {
+        Ok(self.method.set_density(densities)?)
+    }
+
     /// Install `wf` as the method's own previous wavefunction (`None`: none): unlike
     /// [`Calculator::set_wavefunction`], the restart policy decides whether the next SCF starts
     /// from it. A session that keeps one wavefunction per lineage installs it before each call of

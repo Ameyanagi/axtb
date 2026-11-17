@@ -26,8 +26,8 @@ research project), and the evaluation (the default) runs the axtb CLI on them:
 
     python tests/gxtb_energy_differences.py [--optimize] [--out bench/results/gxtb_energy_differences.json]
 
-`--optimize` needs qccompute, qccodec[geometric,sella] and the axtb Python package (with its
-qccodec codec) in the interpreter. The script fails (exit status 1) when the default conventions
+`--optimize` needs qccompute, qccodec[geometric,sella] and the axtb Python package (a qccompute
+program) in the interpreter. The script fails (exit status 1) when the default conventions
 change an energy difference by more than `LIMITS` allows (tests/gate.py).
 """
 
@@ -171,8 +171,8 @@ def optimize_all(version: str):
 
     method = VERSIONS[version]
     model = Model(method=method)
-    grad = ProgramSpec(program="axtb", calctype=CalcType.gradient, model=model, keywords={"accuracy": 0.01})
-    hess = ProgramSpec(program="axtb", calctype=CalcType.hessian, model=model, keywords={"accuracy": 0.01})
+    grad = ProgramSpec(program="axtb", calctype=CalcType.gradient, model=model, keywords={"accuracy_scale": 0.01})
+    hess = ProgramSpec(program="axtb", calctype=CalcType.hessian, model=model, keywords={"accuracy_scale": 0.01})
     out_dir = GEOM / version
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -190,12 +190,13 @@ def optimize_all(version: str):
 
     def frequencies(st):
         out = compute(ProgramInput(program="axtb", calctype=CalcType.hessian, structure=st, model=model,
-                                   keywords={"accuracy": 0.01}), raise_exc=True)
-        return np.array(out.results.freqs_wavenumber), np.array(out.results.normal_modes_cartesian), out.results.energy
+                                   keywords={"accuracy_scale": 0.01}), raise_exc=True)
+        va = out.results.vibrational_analysis
+        return np.array(va.frequencies), np.array(va.normal_modes_cartesian), out.results.energy
 
     def energy(st):
         return compute(ProgramInput(program="axtb", calctype=CalcType.energy, structure=st, model=model,
-                                    keywords={"accuracy": 1e-4}), raise_exc=True).results.energy
+                                    keywords={"accuracy_scale": 1e-4}), raise_exc=True).results.energy
 
     log = {}
     for name, (build, charge, uhf, kind) in OPTIMIZED.items():

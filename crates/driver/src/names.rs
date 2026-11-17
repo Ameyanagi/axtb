@@ -230,6 +230,80 @@ pub fn canonical(kind: &str, name: &str, method: Option<&str>) -> Result<&'stati
     }
 }
 
+/// The electrons a neutral atom of atomic number `z` brings to the orbitals of `method`: the sum
+/// of its reference shell occupations (the shells of its basis), so Z less them are its core
+/// electrons (`Electronic::core_electrons`); GFN-FF, which has no orbitals, all Z. `None` where the
+/// method's tables end (GFN2-xTB above Rn, g-xTB above Lr; [`supported_elements`] says which
+/// elements a method has parameters for). For the Python binding's check of the spin parity
+/// before any calculation runs.
+pub fn valence_electrons(method: Method, z: usize) -> Option<f64> {
+    if z == 0 {
+        return None;
+    }
+    let i = z - 1;
+    match method {
+        Method::Gfnff => Some(z as f64),
+        Method::Gfn2 => {
+            use axtb::param::gfn2_data::{ANG_SHELL, NSHELL, REFERENCE_OCC};
+            let n = *NSHELL.get(i)?;
+            Some((0..n).map(|ish| REFERENCE_OCC[i][ANG_SHELL[i][ish]]).sum())
+        }
+        Method::GxtbV2_0_1 => axtb_gxtb::data::v2_0_1::REF_OCC.get(i).map(|occ| occ.iter().sum()),
+        Method::GxtbV1_1 => axtb_gxtb::data::runtime::REF_SHELL_OCC.get(i).map(|occ| occ.iter().sum()),
+    }
+}
+
+/// One shell of a method's basis for an element ([`shell_layout`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShellLayout {
+    /// The atom (index into the atomic numbers).
+    pub atom: usize,
+    /// Angular momentum.
+    pub l: usize,
+    /// The reference occupation the shell's Mulliken charge is relative to.
+    pub reference_occupation: f64,
+    /// The primitive exponents where they do not depend on the geometry (g-xTB's q-vSZP); empty
+    /// for GFN2-xTB.
+    pub exponents: Vec<f64>,
+}
+
+/// The shells of `method`'s basis for the atomic numbers `numbers`, atom by atom in the basis'
+/// order, from the parameter tables (no calculation): for the Python binding's check of a given
+/// wavefunction or given moments against the method. GFN-FF has none; `None` beyond the tables.
+pub fn shell_layout(method: Method, numbers: &[usize]) -> Option<Vec<ShellLayout>> {
+    let mut out = Vec::new();
+    for (atom, &z) in numbers.iter().enumerate() {
+        let i = z.checked_sub(1)?;
+        match method {
+            Method::Gfnff => return Some(Vec::new()),
+            Method::Gfn2 => {
+                use axtb::param::gfn2_data::{ANG_SHELL, NSHELL, REFERENCE_OCC};
+                for ish in 0..*NSHELL.get(i)? {
+                    let l = ANG_SHELL[i][ish];
+                    out.push(ShellLayout { atom, l, reference_occupation: REFERENCE_OCC[i][l], exponents: Vec::new() });
+                }
+            }
+            Method::GxtbV1_1 | Method::GxtbV2_0_1 => {
+                let element = axtb_gxtb::data::qvszp::ELEMENTS.get(z)?.as_ref()?;
+                let reference: &[f64; 4] = if method == Method::GxtbV2_0_1 {
+                    axtb_gxtb::data::v2_0_1::REF_OCC.get(i)?
+                } else {
+                    axtb_gxtb::data::runtime::REF_SHELL_OCC.get(i)?
+                };
+                for (ish, sh) in element.shells.iter().enumerate() {
+                    out.push(ShellLayout {
+                        atom,
+                        l: sh.l,
+                        reference_occupation: reference[ish],
+                        exponents: sh.alpha.to_vec(),
+                    });
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 /// The atomic numbers `method` has parameters for (every element a one-atom calculation of the
 /// method can be set up for; computed once per process).
 pub fn supported_elements(method: Method) -> Vec<usize> {

@@ -2,7 +2,7 @@
 
 GFN-FF (S. Spicher, S. Grimme, Angew. Chem. Int. Ed. 59, 15665 (2020),
 doi:10.1002/anie.202004239) as implemented in `crates/gfnff` (crate `axtb-gfnff`,
-LGPL-3.0-or-later), method `"gfnff"` in the CLI, Python and qccodec. It is a port of xtb's
+LGPL-3.0-or-later), method `"gfnff"` in the CLI and Python. It is a port of xtb's
 implementation, term by term and operation by operation, and reproduces the xtb 6.8.0 program
 (`xtb --gfnff`; conventions `axtb`, the default, and `xtb`) and the xtb 6.7.1 program (the
 g-xTB 2.0.1 build; conventions `xtb-6.7.1`): topology identical, EEQ charges to 5e-12 e,
@@ -245,7 +245,7 @@ the 24 reference structures (up to 113 atoms) gave identical bits.
 
 Fixed topology: a `Calculator` keeps the topology of its first structure (or of
 `topology_positions`) for every later geometry, as xtb does within an optimization
-(`gfnff_topo`); the CLI, Python and qccodec expose it, and results carry the topology (bonds,
+(`gfnff_topo`); the CLI and Python expose it, and results carry the topology (bonds,
 pi bond orders, hybridization, fragments, fragment and topology charges).
 
 Input and errors (`Error`): positions must be finite and no two atoms closer than 0.1 bohr

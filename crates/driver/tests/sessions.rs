@@ -245,3 +245,110 @@ fn codes_names_and_elements() {
     let want: Vec<usize> = (1..=58).chain(70..=89).chain([92]).collect();
     assert_eq!(v11, want);
 }
+
+/// The valence electrons of every element of a method's tables are the electrons its
+/// calculations' orbitals hold: Z less the core electrons the response reports.
+#[test]
+fn valence_electrons_are_the_responses() {
+    use axtb_driver::valence_electrons;
+    let hard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/scf_hard/random-mbheavy-112.xyz");
+    let (numbers, positions) =
+        axtb_driver::read_xyz(&std::fs::read_to_string(hard).unwrap(), Method::Gfn2, None).unwrap();
+    // La, Gd, Pt, Sb, Se, B: an odd valence count in GFN2-xTB (47), an even one in g-xTB 2.0.1 (54)
+    let heavy = Request::new(numbers, positions);
+    let zncl4 = Request { charge: -2.0, ..structure("zncl4.xyz") };
+    let cu = Request { charge: 2.0, uhf: Some(1), ..structure("cu-nh3-4.xyz") };
+    for (method, molecules) in [
+        ("gfn2", vec![structure("caffeine.xyz"), zncl4.clone(), cu.clone(), heavy.clone()]),
+        ("gxtb-v2.0.1", vec![structure("caffeine.xyz"), zncl4.clone(), cu.clone(), heavy]),
+        ("gxtb-v1.1", vec![structure("caffeine.xyz"), zncl4, cu]),
+    ] {
+        let m = Method::parse(method).unwrap();
+        for req in molecules {
+            let req = Request { method: Some(method.into()), accuracy: Some(10.0), ..req };
+            let r = run(&req).unwrap();
+            let scf = r.scf.as_ref().unwrap();
+            for (&z, &core) in req.numbers.iter().zip(&scf.core_electrons) {
+                let v = valence_electrons(m, z).unwrap();
+                assert!((z as f64 - v - core as f64).abs() < 1e-6, "{method} Z = {z}: {v} valence, {core} core");
+            }
+        }
+    }
+    assert_eq!(valence_electrons(Method::Gfnff, 30), Some(30.0));
+    assert_eq!(valence_electrons(Method::Gfn2, 87), None);
+    assert_eq!(valence_electrons(Method::GxtbV2_0_1, 104), None);
+}
+
+/// The densities C n C^T of a response's orbitals, per set (a closed shell's set: occupations up to
+/// 2, the total density).
+fn densities(r: &Response) -> Vec<Vec<f64>> {
+    let o = r.orbitals.as_ref().unwrap();
+    let n = o.nao();
+    o.sets
+        .iter()
+        .map(|set| {
+            let mut p = vec![0.0; n * n];
+            for (k, &occ) in set.occupations.iter().enumerate() {
+                let c = &set.coefficients[k * n..(k + 1) * n];
+                for mu in 0..n {
+                    for nu in 0..n {
+                        p[mu * n + nu] += occ * c[mu] * c[nu];
+                    }
+                }
+            }
+            p
+        })
+        .collect()
+}
+
+/// A density start (R7): the converged orbitals' density given back starts g-xTB (2.0.1 from its
+/// Mulliken state, v1.1 from the densities, the composite's g-xTB part) at the same result in a few
+/// iterations; densities of the wrong channels or electrons are refused; GFN2-xTB and GFN-FF start
+/// from no density.
+#[test]
+fn a_density_start() {
+    let caffeine = structure("caffeine.xyz");
+    let cu = Request { charge: 2.0, uhf: Some(1), ..structure("cu-nh3-4.xyz") };
+    let water = structure("water.xyz");
+    let composite = Request {
+        method: Some("gxtb-v2.0.1".into()),
+        alpb: Some("water".into()),
+        solvation_correction: Some("gfn2".into()),
+        ..water
+    };
+    let task = Task { gradient: true, orbitals: true, ..Task::default() };
+    for (label, req) in [
+        ("2.0.1", Request { method: Some("gxtb-v2.0.1".into()), ..caffeine.clone() }),
+        (
+            "2.0.1 program",
+            Request { method: Some("gxtb-v2.0.1".into()), conventions: Some("gxtb".into()), ..caffeine.clone() },
+        ),
+        ("2.0.1 doublet", Request { method: Some("gxtb-v2.0.1".into()), ..cu.clone() }),
+        ("v1.1", Request { method: Some("gxtb-v1.1".into()), ..caffeine.clone() }),
+        ("composite", composite),
+    ] {
+        let first = Calculator::new(&req).unwrap().compute(&req.positions, &task).unwrap();
+        let mut calc = Calculator::new(&req).unwrap();
+        calc.set_density(densities(&first)).unwrap();
+        let again = calc.compute(&req.positions, &task).unwrap();
+        let (s0, s1) = (first.scf.as_ref().unwrap(), again.scf.as_ref().unwrap());
+        assert!(s1.iterations <= 3, "{label}: {} iterations", s1.iterations);
+        assert_eq!(s1.guess, "previous", "{label}");
+        assert!((again.energy.unwrap() - first.energy.unwrap()).abs() < 1e-7, "{label}");
+        assert!(s0.iterations > s1.iterations, "{label}");
+    }
+    // the wrong channels and the wrong electrons
+    let req = Request { method: Some("gxtb-v2.0.1".into()), ..caffeine.clone() };
+    let first = Calculator::new(&req).unwrap().compute(&req.positions, &task).unwrap();
+    let p = densities(&first);
+    let mut calc = Calculator::new(&req).unwrap();
+    let two = vec![p[0].clone(), p[0].clone()];
+    assert!(matches!(calc.set_density(two), Err(Error::Input(m)) if m.contains("matrices")));
+    let dication = Request { charge: 2.0, ..req.clone() };
+    let mut calc = Calculator::new(&dication).unwrap();
+    assert!(matches!(calc.set_density(p.clone()), Err(Error::Input(m)) if m.contains("electrons")));
+    for method in ["gfn2", "gfnff"] {
+        let mut calc = Calculator::new(&Request { method: Some(method.into()), ..caffeine.clone() }).unwrap();
+        assert!(calc.set_density(p.clone()).is_err(), "{method}");
+    }
+}

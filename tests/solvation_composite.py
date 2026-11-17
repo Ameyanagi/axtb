@@ -8,7 +8,7 @@ g-xTB has no implicit solvent of its own; the composite adds GFN2-xTB's solvatio
 Run with programs, that is three xtb calls per gradient (`xtb --gxtb`, `xtb --alpb water`,
 `xtb`; here the g-xTB 2.0.1 build of xtb 6.7.1, `$AXTB_GXTB2`, see tests/programs.py). axtb runs
 the same composite in one process
-(`axtb.Calculator(method, ..., alpb="water", solvation_correction="gfn2")`). For each system:
+(`flat.Calculator(method, ..., alpb="water", solvation_correction="gfn2")`). For each system:
 
 1. **programs**: the three xtb runs (`structure.xyz --silent --chrg C --grad [--uhf N]` plus
    `--gxtb` or `--alpb water`, one fresh directory each,
@@ -57,6 +57,7 @@ import axtb
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
+import flat  # noqa: E402  tests/flat.py: axtb 0.1's calls through axtb.compute and Session
 import gate  # noqa: E402
 import programs as reference_programs  # noqa: E402  (this script has its own programs())
 
@@ -249,7 +250,7 @@ def timed(nums, pos, charge, uhf, conventions, repeat):
 
 
 def composite(nums, pos, charge, uhf, conventions, **kw):
-    return axtb.Calculator(METHOD, nums, pos, charge=charge, uhf=uhf or None, alpb=SOLVENT, solvation_correction="gfn2",
+    return flat.Calculator(METHOD, nums, pos, charge=charge, uhf=uhf or None, alpb=SOLVENT, solvation_correction="gfn2",
                            conventions=conventions, **kw)
 
 

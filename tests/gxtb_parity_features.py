@@ -3,9 +3,9 @@
 bond orders, the HOMO-LUMO gap and the molecular quadrupole, measured against the programs.
 
     python tests/gxtb_parity_features.py [--out bench/results/gxtb_parity_features.json]
-                                         [--only properties,restart,sequences,codec,solutions,threads]
+                                         [--only properties,restart,sequences,solutions,threads]
 
-Needs the axtb Python package (with qccompute, geomeTRIC and Sella for `codec`) and the
+Needs the axtb Python package and the
 programs of tests/programs.py: the xtb 6.7.1 release (`$AXTB_XTB671`), xtb 6.8.0
 (`$AXTB_XTB680`), the g-xTB 2.0.1 build of xtb (`$AXTB_GXTB2`) and the g-xtb 1.1.0 program
 (`$AXTB_GXTB11_DIR`); the cases of a program that is not there are skipped. Every program runs
@@ -29,9 +29,10 @@ Sections:
   MD-like random walks (caffeine, taxol) for g-xTB 2.0.1, v1.1 and GFN2-xTB, energies and
   gradients against fresh starts, and both against a tightly converged fresh sequence (accuracy
   1e-4).
-- **codec**: a geomeTRIC minimization and a Sella transition-state search plus IRC (the SN2
-  system of bench/ts_example.py) through qccompute and the axtb codec, `propagate_wfn` on and
-  off: SCF iterations, wall time, final energies.
+- (**codec**, until axtb 0.1: geomeTRIC and Sella through qccompute 0.21 and axtb's qccodec
+  codec with `propagate_wfn` on and off. Both are gone in 0.2: qccompute runs axtb's sessions,
+  whose warm starts tests/flat.py's Calculator and the sequences section measure. The recorded
+  rows stay in bench/results/gxtb_parity_features.json.)
 - **solutions**: whether reuse lands on another SCF solution: bond-stretch scans in both
   directions (N2, F2, HF, H2O, C2H6) and random walks of metal clusters and complexes, reuse vs
   fresh at every point, at 0 K (the g-xTB default) and 3000 K.
@@ -69,6 +70,7 @@ HARD = ROOT / "tests/scf_hard"
 REF = ROOT / "crates/gxtb/tests"
 AATOAU = 1.0 / 0.529177210903
 sys.path.insert(0, str(ROOT / "tests"))
+import flat  # noqa: E402  tests/flat.py: axtb 0.1's calls through axtb.compute and Session
 import gate  # noqa: E402
 import programs  # noqa: E402
 
@@ -305,9 +307,13 @@ QUAD_DECIMALS = {"xtb671": 3, "xtb680": 3, "tblite671": 4, "tblite680": 4, "gxtb
 
 
 def axtb_point(mol: dict, method: str, conventions: str) -> dict:
-    return axtb.singlepoint(mol["numbers"], mol["positions"], charge=float(mol["charge"]), uhf=mol["uhf"],
-                            method=method, conventions=conventions, bond_orders=True,
-                            accuracy=mol.get("accuracy", 1.0))
+    kw = {"charge": float(mol["charge"]), "uhf": mol["uhf"], "method": method, "conventions": conventions,
+          "accuracy": mol.get("accuracy", 1.0)}
+    r = flat.singlepoint(mol["numbers"], mol["positions"], bond_orders=True, **kw)
+    # the conventions' own quadrupole (tblite's and the 2.0.1 program's are no traceless tensor):
+    # the CLI's; Python gives the traceless (Buckingham) tensor in every conventions
+    r["quadrupole"] = flat.cli_singlepoint(mol["numbers"], mol["positions"], **kw)["quadrupole"]
+    return r
 
 
 def compare_properties(kind: str, mol: dict, tmp: Path, extra_conventions: list[str]) -> dict:
@@ -423,7 +429,7 @@ def section_restart(tmp: Path) -> list[dict]:
         method = AXTB_FOR[kind][0]
         steps = [("fresh", mol), ("same geometry, restart", mol)]
         steps += [(f"displaced {s} bohr (rms per coordinate), restart", displaced(mol, s, 7)) for s in (0.02, 0.1, 0.3)]
-        calc = axtb.Calculator(method, mol["numbers"], mol["positions"], charge=float(mol["charge"]), uhf=mol["uhf"],
+        calc = flat.Calculator(method, mol["numbers"], mol["positions"], charge=float(mol["charge"]), uhf=mol["uhf"],
                                conventions="gxtb", guess="previous")
         for label, m in steps:
             text = run_program(kind, m, wd)
@@ -459,7 +465,7 @@ def scf_seconds(timings) -> float:
 
 def run_sequence(mol: dict, method: str, geoms: list[np.ndarray], guess: str, threads: int = 1,
                  gradient: bool = True, accuracy: float = 1.0, etemp: float | None = None) -> list[dict]:
-    calc = axtb.Calculator(method, mol["numbers"], geoms[0], charge=float(mol["charge"]), uhf=mol["uhf"],
+    calc = flat.Calculator(method, mol["numbers"], geoms[0], charge=float(mol["charge"]), uhf=mol["uhf"],
                            guess=guess, threads=threads, accuracy=accuracy, etemp=etemp)
     out = []
     for g in geoms:
@@ -479,7 +485,7 @@ def run_sequence(mol: dict, method: str, geoms: list[np.ndarray], guess: str, th
 def run_interleaved(mol: dict, method: str, geoms: list[np.ndarray]) -> tuple[list[dict], list[dict]]:
     """The restart and the fresh sequence, point by point in turn (so that both see the same load
     on a shared machine)."""
-    calcs = {g: axtb.Calculator(method, mol["numbers"], geoms[0], charge=float(mol["charge"]), uhf=mol["uhf"], guess=g)
+    calcs = {g: flat.Calculator(method, mol["numbers"], geoms[0], charge=float(mol["charge"]), uhf=mol["uhf"], guess=g)
              for g in ("previous", "fresh")}
     out: dict[str, list[dict]] = {"previous": [], "fresh": []}
     for k, g in enumerate(geoms):
@@ -542,92 +548,6 @@ def section_sequences() -> list[dict]:
                        "load": [l0, l1], **compare_sequences(reuse, fresh, tight)}
                 rows.append(row)
                 print("sequence", row, flush=True)
-    return rows
-
-
-# ---------------------------------------------------------------------------------------------
-# codec: optimizers through qccompute
-
-
-SN2_GUESS = [(6, [0.0, 0.0, 0.0]), (17, [0.0, 0.0, 2.25]), (17, [0.05, 0.0, -2.45]), (1, [1.07, 0.0, 0.08]),
-             (1, [-0.535, 0.927, 0.08]), (1, [-0.535, -0.927, 0.08])]
-
-
-def _trajectory_stats(out) -> dict:
-    frames = list(out.results.frames)
-    its = [f.results.extras.get("scf_iterations") for f in frames if f.results.extras.get("scf_iterations") is not None]
-    starts = sorted({f.results.extras.get("scf_guess") for f in frames if f.results.extras.get("scf_guess")})
-    energies = [f.results.energy for f in frames if f.results.energy is not None]
-    return {"frames": len(frames), "scf_iterations": int(sum(its)), "scf_iterations_per_frame": sum(its) / max(len(its), 1),
-            "starts": starts, "final_energy": energies[-1] if energies else None,
-            "seconds": out.execution.elapsed if getattr(out, "execution", None) and hasattr(out.execution, "elapsed")
-            else None}
-
-
-def section_codec() -> list[dict]:
-    from qccompute import compute
-    from qcdata import CalcType, Model, ProgramInput, ProgramSpec, Structure
-
-    rows = []
-    caffeine = read_xyz(STRUCT / "caffeine.xyz", name="caffeine")
-    start = displaced(caffeine, 0.1, 3)
-
-    def structure(mol: dict, charge: int = 0) -> Structure:
-        return Structure(symbols=[SYMBOLS[z - 1] for z in mol["numbers"]], geometry=mol["positions"], charge=charge,
-                         multiplicity=1)
-
-    # warm-up (imports, first-call costs), not recorded: water through both drivers
-    water = displaced(read_xyz(STRUCT / "water.xyz"), 0.05, 1)
-    for prog, ct in (("geometric", CalcType.optimization), ("sella", CalcType.optimization)):
-        child = ProgramSpec(program="axtb", calctype=CalcType.gradient, model=Model(method="gxtb-v2.0.1"))
-        compute(ProgramInput(program=prog, calctype=ct, structure=structure(water), subprograms=[child],
-                             keywords={"steps": 20} if prog == "sella" else {}), propagate_wfn=True, raise_exc=False)
-
-    for method in ("gxtb-v2.0.1", "gxtb-v1.1", "gfn2"):
-        for propagate in (False, True):
-            child = ProgramSpec(program="axtb", calctype=CalcType.gradient, model=Model(method=method), keywords={})
-            inp = ProgramInput(program="geometric", calctype=CalcType.optimization, structure=structure(start),
-                               subprograms=[child], keywords={"maxiter": 200})
-            l0, t0 = load(), time.perf_counter()
-            out = compute(inp, propagate_wfn=propagate, raise_exc=False)
-            stats = _trajectory_stats(out)
-            stats["wall_seconds"] = time.perf_counter() - t0
-            rows.append({"driver": "geomeTRIC minimization", "molecule": "caffeine (displaced 0.1 bohr)", "method": method,
-                         "propagate_wfn": propagate, "success": bool(out.success), "load": [l0, load()], **stats})
-            print("codec", rows[-1], flush=True)
-    # SN2 saddle point (Sella, exact axtb Hessians) and IRC, g-xTB 2.0.1
-    sn2 = {"numbers": [z for z, _ in SN2_GUESS], "positions": np.array([p for _, p in SN2_GUESS]) * AATOAU,
-           "charge": -1, "uhf": 0}
-    for method in ("gxtb-v2.0.1",):
-        ts_structure = None
-        for propagate in (False, True):
-            grad = ProgramSpec(program="axtb", calctype=CalcType.gradient, model=Model(method=method), keywords={})
-            hess = ProgramSpec(program="axtb", calctype=CalcType.hessian, model=Model(method=method), keywords={})
-            inp = ProgramInput(program="sella", calctype=CalcType.transition_state, structure=structure(sn2, -1),
-                               subprograms=[grad, hess], keywords={"fmax": 0.005, "steps": 200})
-            l0, t0 = load(), time.perf_counter()
-            out = compute(inp, propagate_wfn=propagate, raise_exc=False)
-            stats = _trajectory_stats(out)
-            stats["wall_seconds"] = time.perf_counter() - t0
-            rows.append({"driver": "Sella transition state", "molecule": "SN2 Cl- + CH3Cl", "method": method,
-                         "propagate_wfn": propagate, "success": bool(out.success), "load": [l0, load()], **stats})
-            print("codec", rows[-1], flush=True)
-            if out.success and ts_structure is None:
-                ts_structure = out.results.final_structure
-        if ts_structure is None:
-            continue
-        for propagate in (False, True):
-            grad = ProgramSpec(program="axtb", calctype=CalcType.gradient, model=Model(method=method), keywords={})
-            hess = ProgramSpec(program="axtb", calctype=CalcType.hessian, model=Model(method=method), keywords={})
-            inp = ProgramInput(program="sella", calctype=CalcType.irc, structure=ts_structure, subprograms=[grad, hess],
-                               keywords={"fmax": 0.01, "steps": 60, "dx": 0.1})
-            l0, t0 = load(), time.perf_counter()
-            out = compute(inp, propagate_wfn=propagate, raise_exc=False)
-            stats = _trajectory_stats(out)
-            stats["wall_seconds"] = time.perf_counter() - t0
-            rows.append({"driver": "Sella IRC", "molecule": "SN2 Cl- + CH3Cl", "method": method,
-                         "propagate_wfn": propagate, "success": bool(out.success), "load": [l0, load()], **stats})
-            print("codec", rows[-1], flush=True)
     return rows
 
 
@@ -787,7 +707,7 @@ def clean(x):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, default=ROOT / "bench/results/gxtb_parity_features.json")
-    ap.add_argument("--only", default="properties,restart,sequences,codec,solutions,threads,overhead")
+    ap.add_argument("--only", default="properties,restart,sequences,solutions,threads,overhead")
     ap.add_argument("--xtb-conventions", default="xtb,xtb-6.7.1",
                     help="GFN2-xTB conventions compared with xtb 6.7.1 and 6.8.0 (those axtb accepts)")
     ap.add_argument("--merge", action="store_true", help="keep the other sections of an existing --out")
@@ -807,8 +727,6 @@ def main() -> int:
             data["restart"] = section_restart(tmp)
     if "sequences" in sections:
         data["sequences"] = section_sequences()
-    if "codec" in sections:
-        data["codec"] = section_codec()
     if "solutions" in sections:
         data["solutions"] = section_solutions()
     if "threads" in sections:

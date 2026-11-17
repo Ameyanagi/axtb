@@ -339,12 +339,18 @@ print(json.dumps({"inner": time.perf_counter() - t, "energy": float(r.get("energ
 AXTB_PY = r"""
 import json, sys, time, numpy as np
 import axtb
+from qcdata import ProgramInput, Structure
 d = json.load(sys.stdin)
-kw = {"conventions": d["conventions"]} if d.get("conventions") else {}
+SYMBOLS = ("X H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br Kr").split()
+kw = {"threads": d["threads"]}
+if d.get("conventions"):
+    kw["conventions"] = d["conventions"]
+s = Structure(symbols=[SYMBOLS[z] for z in d["numbers"]], geometry=np.array(d["positions"]))
 t = time.perf_counter()
-r = axtb.singlepoint(np.array(d["numbers"]), np.array(d["positions"]), charge=0.0, uhf=None, method=d["method"],
-                     gradient=True, threads=d["threads"], **kw)
-print(json.dumps({"inner": time.perf_counter() - t, "energy": float(r["energy"]), "iterations": int(r["iterations"])}))
+out = axtb.compute(ProgramInput(program="axtb", calctype="gradient", structure=s, model={"method": d["method"]},
+                                keywords=kw))
+print(json.dumps({"inner": time.perf_counter() - t, "energy": out.results.energy,
+                  "iterations": out.results.scf_iterations}))
 """
 
 
