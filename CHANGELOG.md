@@ -57,6 +57,9 @@ Rust crates, the CLI and the Python package share one version.
   method and conventions (none where `scf.restart` is off, the default for g-xTB in its programs'
   conventions), that sessions work in forked children, and how results differ across CPU types
   (round-off; measured Intel against AMD).
+- docs/python.md: `results.hessian` is the full Cartesian second derivative (3N x 3N,
+  symmetrized), never projected; translations and rotations are projected out only in
+  `vibrational_analysis` (checked at non-stationary geometries for every Hessian method).
 - `crates/axtb-py/tests/test_fork.py`: a forked child computes, whether or not its parent did.
 
 ## 0.2.0-alpha.1 (2026-11-17)

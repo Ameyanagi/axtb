@@ -277,7 +277,7 @@ raises (kind `input`):
 
 | field | axtb |
 |---|---|
-| `energy`, `gradient`, `hessian` | Eh, Eh/bohr (n_atoms x 3), Eh/bohr² (3N x 3N), as the calctype asks |
+| `energy`, `gradient`, `hessian` | Eh, Eh/bohr (n_atoms x 3), Eh/bohr² (3N x 3N), as the calctype asks; the Hessian is the full Cartesian second derivative, symmetrized and never projected: translations and rotations are projected out only in `vibrational_analysis` |
 | `energy_components` | the energy's pieces, which add up to the energy (GFN2-xTB: `repulsion`, `dispersion`, `isotropic_es`, `third_order`, `anisotropic`, `entropy`, `solvation`, `band`; g-xTB's and GFN-FF's own terms; the composite's `solvation_correction`); the subtotal `electronic`, which overlaps them, is in `record.energy_subtotals` |
 | `dipole_moment`, `quadrupole_moment` | e·bohr; e·bohr², the traceless (Buckingham) tensor about the origin of the input's coordinates, in every conventions |
 | `atomic_charges`, `atomic_charges_kind` | Mulliken charges (`mulliken`); GFN-FF's EEQ charges (`eeq`) |
