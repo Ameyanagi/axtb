@@ -118,6 +118,7 @@ class Session:
         self._static: dict[str, Any] | None = None
         self._geometry = np.asarray(self._structure.geometry, dtype=float).reshape(-1, 3)
         self._default_outputs = _qc.implied(p.outputs)
+        self._scale = float(p.settings.get("accuracy_scale", 1.0))
         self._closed = False
 
     # ------------------------------------------------------------------ the protocol
@@ -323,22 +324,24 @@ class Session:
                 )
             wanted = self._outputs(outputs, calctype)
             target = Accuracy.of(accuracy, calctype) if accuracy is not None else p.accuracy
-            factor = None
-            if target is not None and p.scf:
-                # decision 22: convergence settings that take no targets yet refuse them
-                raise refuse(
-                    "unsupported",
-                    "unsupported_setting",
-                    "accuracy: axtb does not map accuracy targets onto its SCF thresholds yet; use accuracy_scale",
-                )
+            if target is None:
+                factor, h, acc_record, acc_warnings = self._scale, None, None, []
+            else:
+                factor, h, acc_record, acc_warnings = _qc.accuracy(p, target, calctype)
             seeds = list(seed)
             key = _key(lineage)
-            task = self._tasks.get((calctype, wanted))
+            task = self._tasks.get((calctype, wanted, h))
             if task is None:
-                task = self._tasks[(calctype, wanted)] = _qc.task(p, calctype, wanted)
+                task = self._tasks[(calctype, wanted, h)] = _qc.task(p, calctype, wanted, h)
             try:
                 r = self._engine.compute(
-                    x, task, key, [_key(s) for s in seeds], commit, factor, _qc.needs_orbitals(wanted)
+                    x,
+                    task,
+                    key,
+                    [_key(s) for s in seeds],
+                    commit,
+                    factor if p.scf else None,
+                    _qc.needs_orbitals(wanted),
                 )
             except _axtb.Error as e:
                 error, fields = from_driver(e)
@@ -351,7 +354,7 @@ class Session:
             if e.frame is None:
                 e.frame = self._failed(positions, e, x if x is not None and x.shape == (self._natoms, 3) else None)
             raise
-        return self._frame(start, r, x, calctype, wanted, lineage, key, seeds, target)
+        return self._frame(start, r, x, calctype, wanted, lineage, key, seeds, acc_record, acc_warnings)
 
     def _frame(
         self,
@@ -363,7 +366,8 @@ class Session:
         lineage: Any,
         key: str,
         seeds: list[Any],
-        target: Accuracy | None,
+        acc_record: dict[str, Any] | None,
+        acc_warnings: list[Any],
     ) -> Frame:
         p = self._p
         if self._static is None:
@@ -395,15 +399,14 @@ class Session:
                 contingent[path] = {"fired": calctype == "hessian"}
         if not contingent:
             del rec["contingent"]
-        if target is not None:
-            q = target.model_dump(mode="json", exclude_none=True, exclude={"qcdata_version"})
-            rec["accuracy"] = {"target": q, "thresholds": {}, "estimate": {k: 0.0 for k in q}}
+        if acc_record is not None:
+            rec["accuracy"] = acc_record
         return build(
             Frame,
             structure=self._structure_at(x),
             results=res,
             success=True,
-            warnings=_qc.warnings_of(r, res),
+            warnings=acc_warnings + _qc.warnings_of(r, res),
             record=rec,
             execution=build(ExecutionInfo, threads=r["threads"], timings=_qc.timings(r, time.perf_counter() - start)),
         )

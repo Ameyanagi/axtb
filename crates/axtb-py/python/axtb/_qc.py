@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 from qcdata import (
+    Accuracy,
     AOConvention,
     BasisSet,
     ExecutionInfo,
@@ -39,7 +40,7 @@ from qcdata import (
     Wavefunction,
 )
 
-from . import _axtb
+from . import _accuracy, _axtb
 from ._errors import from_driver
 from ._models import build
 from ._keywords import Planned, plan_input, plan_threads
@@ -127,14 +128,17 @@ def needs_orbitals(outputs: frozenset[str]) -> bool:
     return bool(outputs & {"orbitals", "overlap", "hamiltonian"})
 
 
-def task(p: Planned, calctype: str, outputs: frozenset[str]) -> str:
-    """The driver task (JSON) of a calctype with outputs."""
+def task(p: Planned, calctype: str, outputs: frozenset[str], hessian_accuracy: float | None = None) -> str:
+    """The driver task (JSON) of a calctype with outputs (and a Hessian target's
+    ``hessian.accuracy_scale``)."""
     t: dict[str, Any] = {"numbers": [], "positions": []}
     if calctype == "gradient":
         t["gradient"] = True
     elif calctype == "hessian":
         t["hessian"] = True
         t.update(p.task)
+        if hessian_accuracy is not None:
+            t["hessian_accuracy"] = hessian_accuracy
     if "bond_orders" in outputs:
         t["bond_orders"] = True
     if "overlap" in outputs:
@@ -142,6 +146,63 @@ def task(p: Planned, calctype: str, outputs: frozenset[str]) -> str:
     if "hamiltonian" in outputs:
         t["hamiltonian"] = True
     return json.dumps(t, separators=(",", ":"))
+
+
+# the default hessian.accuracy_scale of each method and Hessian method (the driver's MethodInfo)
+_HESSIAN_DEFAULT = {"numerical": 0.01, "analytic": {"gfn2": 1e-3}, "response": {"gfn2": 1e-3}}
+
+
+def accuracy(
+    p: Planned, target: Accuracy | None, calctype: str
+) -> tuple[float, float | None, dict[str, Any] | None, list[ProgramWarning]]:
+    """A target's SCF accuracy factor (``accuracy_scale`` without one), its
+    ``hessian.accuracy_scale`` (None: the settings'), the record's ``accuracy`` and the warnings
+    (`axtb._accuracy`)."""
+    scale = float(p.settings.get("accuracy_scale", 1.0))
+    if target is None:
+        return scale, None, None, []
+    if not p.scf:
+        return scale, None, _accuracy.met(target), []
+    q = target.model_dump(mode="json", exclude_none=True, exclude={"qcdata_version"})
+    factor, parts, limited = scale, {"thresholds": {"accuracy_scale": scale}, "estimate": {}}, False
+    if target.energy is not None or target.gradient is not None:
+        gfn2_conventions = p.settings.get("solvent", {}).get("correction_conventions") if p.composite else None
+        factor, parts, limited = _accuracy.scf_factor(
+            p.method,
+            p.conventions,
+            p.composite,
+            gfn2_conventions,
+            p.multiplicity > 1,
+            target,
+            scale,
+            "accuracy_scale" in p.given,
+        )
+    h = None
+    if target.hessian is not None and calctype == "hessian":
+        hm = p.settings.get("hessian", {}).get("method") or ("numerical" if p.method == "gxtb-v1.1" else "analytic")
+        default = p.settings.get("hessian", {}).get("accuracy_scale")
+        if default is None:
+            d = _HESSIAN_DEFAULT[hm]
+            default = d if isinstance(d, float) else d.get(p.method, 1e-5)
+        h, estimate, hlimited = _accuracy.hessian_factor(
+            p.method, hm, target.hessian, default, p.given.get("hessian.accuracy_scale")
+        )
+        parts["thresholds"]["hessian.accuracy_scale"] = h
+        if estimate is not None:
+            parts["estimate"]["hessian"] = estimate
+        limited = limited or hlimited
+    warnings = []
+    if limited:
+        warnings.append(
+            build(
+                ProgramWarning,
+                code="accuracy_limited",
+                message=f"the accuracy target {q} needs SCF thresholds tighter than axtb's floor (accuracy factor "
+                f"{_accuracy.ACC_FLOOR:g}); ran at the floor, estimate {parts['estimate']}",
+                path="accuracy",
+            )
+        )
+    return factor, h, {"target": q, **parts}, warnings
 
 
 def _thermo(r: Mapping[str, Any], p: Planned) -> tuple[dict[str, Any], list[Thermochemistry]]:
@@ -467,10 +528,17 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
     n, warnings, why = threads(p, calctype, ctx)
     resolved = _build(Resolved, settings={**p.settings, "threads": n}, reasons={**p.reasons, "threads": why})
     request = json.dumps({**p.request, "threads": n}, separators=(",", ":"))
+    factor, h, acc_record, acc_warnings = accuracy(p, p.accuracy, calctype)
+    warnings = warnings + acc_warnings
     try:
         outputs = implied(p.outputs)
         r = _axtb.compute_once(
-            request, p.numbers, p.positions, task(p, calctype, outputs), orbitals=needs_orbitals(outputs)
+            request,
+            p.numbers,
+            p.positions,
+            task(p, calctype, outputs, h),
+            accuracy=factor if p.scf else None,
+            orbitals=needs_orbitals(outputs),
         )
     except _axtb.Error as x:
         error, fields = from_driver(x)
@@ -484,6 +552,8 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
         raise out_error from None
     res = results(r, p, calctype, outputs)
     rec = record(r, p)
+    if acc_record is not None:
+        rec["accuracy"] = acc_record
     out = _build(
         _OUTPUT,
         input_data=inp,

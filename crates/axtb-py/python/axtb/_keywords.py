@@ -1263,13 +1263,6 @@ def _plan_input(
     accuracy = None
     if "accuracy" in v:
         accuracy = v["accuracy"]
-        if method != "gfnff":
-            # decision 22: convergence settings that take no targets yet refuse them
-            raise refuse(
-                "unsupported",
-                "unsupported_setting",
-                "accuracy: axtb does not map accuracy targets onto its SCF thresholds yet; use accuracy_scale",
-            )
     return _resolve(
         inp, method, conventions, composite, allowed, session, v, accuracy, numbers, positions, charge, mult
     )
