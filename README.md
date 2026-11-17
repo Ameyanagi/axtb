@@ -201,8 +201,10 @@ XYZ files are converted with the Ångström-to-bohr factor of the reproduced pro
 (CODATA 2018) for GFN2-xTB in the `xtb`, `xtb-6.7.1` and `tblite` conventions, GFN-FF in `xtb`
 and `xtb-6.7.1` and g-xTB 2.0.1 in `gxtb`, the 1.1.0 program's for g-xTB v1.1, CODATA 2022 in
 axtb's conventions. Errors: in `--json` mode `{"error": {"kind": ..., "message": ..., ...}}` on
-stdout (`kind`: `input`, `unsupported_element` with `z`, `topology`, `scf_not_converged` with
-`iterations`, `energy_change` and `residual`, `numerical`), otherwise `error: <message>` on
+stdout (`kind`: `input`, `unsupported_element` with `z`, `topology`, `not_applicable` (an
+output the method does not have: GFN-FF's orbitals, Molden file, bond orders and AO matrices,
+g-xTB 2.0.1's AO matrices in the `gxtb` conventions), `scf_not_converged` with `iterations`,
+`energy_change` and `residual`, `numerical`), otherwise `error: <message>` on
 stderr; exit code 1. Invalid arguments and unreadable files are usage errors: `error: ...` on
 stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF single point (see
 [Threads](#threads)), and a run-time LAPACK (`AXTB_LAPACK`) that was not used.

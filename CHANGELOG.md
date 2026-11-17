@@ -59,6 +59,8 @@ Rust crates, the CLI and the Python package share one version.
   g-xTB 2.0.1 in the program's conventions refuses the Hamiltonian (its SCF diagonalizes a
   DIIS-mixed matrix last) and GFN-FF both, before anything runs, with the new error kind
   `not_applicable` (`axtb_base::Error::NotApplicable`; Python: `axtb.InputError` with that kind).
+  GFN-FF's refusals of orbitals (a Molden file) and bond orders take the same kind (they were
+  `input`).
 - Every SCF result reports the Fermi levels of the alpha and beta electrons (`fermi_levels`, Eh;
   `null` where the occupations are the Aufbau filling, the same level twice for a closed shell)
   and the electronic temperature the occupations used (`electronic_temperature`, K; 0 for the

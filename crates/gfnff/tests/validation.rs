@@ -131,8 +131,10 @@ fn linear_carbonyl_hydrogen_bond() {
     assert!((r.pieces() - r.energy).abs() < 1e-13, "{} vs {}", r.pieces(), r.energy);
     // no SCF: no wavefunction, no SCF settings, no orbitals
     assert!(calc.wavefunction().is_none() && calc.scf_settings().is_none());
-    let orbitals = Want { orbitals: true, ..Want::ENERGY };
-    assert!(input_error(calc.singlepoint(&pos, &orbitals), "orbitals").contains("no orbitals"));
+    for want in [Want { orbitals: true, ..Want::ENERGY }, Want { bond_orders: true, ..Want::ENERGY }] {
+        let r = calc.singlepoint(&pos, &want);
+        assert!(matches!(&r, Err(Error::NotApplicable(m)) if m.contains("no orbitals")), "{:?}", r.err());
+    }
 }
 
 /// Central differences of the analytic gradient with step `step` (bohr).

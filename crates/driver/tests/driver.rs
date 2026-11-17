@@ -40,7 +40,6 @@ fn settings_that_do_not_apply_are_errors() {
         Request { solvation_state: Some("gsolv".into()), ..water() },
         Request { solvation_correction: Some("gfn2".into()), alpb: Some("water".into()), ..water() },
         Request { accuracy: Some(1.0), ..with("gfnff") },
-        Request { bond_orders: true, ..with("gfnff") },
         Request { pressure: Some(1e5), ..water() },
         Request { hessian: true, hessian_step: Some(0.01), ..water() },
         Request { hessian: true, hessian_method: Some("response".into()), ..with("gfnff") },
@@ -48,6 +47,11 @@ fn settings_that_do_not_apply_are_errors() {
         Request { analyze_hessian: Some(vec![vec![0.0; 9]; 9]), conventions: Some("xtb".into()), ..water() },
     ] {
         input(req);
+    }
+    // GFN-FF has no orbitals: Molden files and bond orders do not apply
+    for req in [Request { bond_orders: true, ..with("gfnff") }, Request { molden: true, ..with("gfnff") }] {
+        let e = run(&req).unwrap_err();
+        assert!(e.kind() == "not_applicable" && e.is_input() && e.to_string().contains("no orbitals"), "{e:?}");
     }
     let msg = input(Request { alpb: Some("water".into()), ..with("g-xTB 2.0") });
     assert!(msg.contains("no implicit-solvent parameters") && msg.contains("solvation_correction"), "{msg}");

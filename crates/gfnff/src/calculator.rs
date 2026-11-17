@@ -153,7 +153,9 @@ impl Method for Calculator {
             return Err(Error::NotApplicable("gfnff has no orbitals: no overlap or Hamiltonian matrix".into()));
         }
         if want.orbitals || want.bond_orders {
-            return Err(Error::Input("gfnff has no orbitals (no Molden file, no bond orders; see topology)".into()));
+            return Err(Error::NotApplicable(
+                "gfnff has no orbitals (no Molden file, no bond orders; see topology)".into(),
+            ));
         }
         Ok(())
     }
