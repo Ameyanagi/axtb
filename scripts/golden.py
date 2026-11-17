@@ -9,8 +9,10 @@ and feature, a few thread counts and the run-time LAPACK path) and compare outpu
                                                   the same, and for every case that differs the
                                                   largest change of each quantity
     scripts/golden.py compare DIR --added KEYS    the same, with the response fields KEYS (comma-
-                                                  separated) new: ignored where the golden output
-                                                  lacks them (a commit that adds fields)
+                                                  separated; `group.field` for a field inside an
+                                                  object, e.g. terms.band) new: ignored where the
+                                                  golden output lacks them (a commit that adds
+                                                  fields)
     scripts/golden.py list                        the cases
 
 Outputs are compared exactly (every float, every field) except the timing fields. Golden files
@@ -650,17 +652,20 @@ def report(gold, new, ladder=False):
 
 
 def drop_added(gold, new, keys):
-    """`new` without the response fields `keys` where the golden output lacks them (in each step of a
-    trajectory), and the names of the fields dropped."""
+    """`new` without the response fields `keys` (`field`, or `group.field` inside an object) where the
+    golden output lacks them (in each step of a trajectory), and the names of the fields dropped."""
     dropped = set()
 
-    def strip(g, n):
+    def strip(g, n, prefix=""):
         if not (isinstance(g, dict) and isinstance(n, dict)):
             return n
         out = {}
         for k, v in n.items():
-            if k in keys and k not in g:
-                dropped.add(k)
+            path = prefix + k
+            if path in keys and k not in g:
+                dropped.add(path)
+            elif any(x.startswith(path + ".") for x in keys):
+                out[k] = strip(g.get(k), v, path + ".")
             else:
                 out[k] = v
         return out
@@ -697,7 +702,8 @@ def main():
     ap.add_argument("--only", default="", help="comma-separated case-name substrings")
     ap.add_argument("--report", action="store_true", help="summarize the changes of the --allow cases")
     ap.add_argument("--allow", default="gxtb11", help="comma-separated substrings of the cases that may change")
-    ap.add_argument("--added", default="", help="comma-separated response fields that are new (absent from DIR)")
+    ap.add_argument("--added", default="", help="comma-separated response fields that are new (absent from DIR); "
+                    "group.field for a field inside an object")
     a = ap.parse_args()
     cases = corpus()
     if a.only:

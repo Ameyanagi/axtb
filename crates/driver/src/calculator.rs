@@ -11,7 +11,7 @@ use crate::response::{
 };
 use crate::task::Task;
 use axtb::method::{
-    Fingerprint, HessianOptions, Method as MethodTrait, Restart, ScfData, ScfSettings, SinglePoint, Want,
+    Fingerprint, HessianOptions, Method as MethodTrait, Restart, ScfData, ScfSettings, SinglePoint, TermKind, Want,
     WavefunctionData,
 };
 use axtb::ToMolden;
@@ -441,6 +441,7 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
     out.gradient = sp.gradient;
     out.dipole = Some(sp.dipole);
     out.terms = Some(Named::new(sp.terms.iter().map(|t| (t.name, t.value)).collect()));
+    out.subtotals = sp.terms.iter().filter(|t| t.kind == TermKind::Subtotal).map(|t| t.name).collect();
     out.timings = Some(Named::new(sp.timings));
     out.charges = Some(sp.charges);
     let e = sp.electronic?;

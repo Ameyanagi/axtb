@@ -215,3 +215,65 @@ fn ao_matrices_not_applicable() {
     };
     assert_eq!(run(&analysis).unwrap_err().kind(), "input");
 }
+
+/// Every method's terms partition its energy: the pieces (every term but the subtotals the
+/// response names) add up to it to 1e-12 relative. GFN2-xTB in each of its conventions, with
+/// ALPB, GBSA, an open shell, 3000 K and without dispersion; g-xTB 2.0.1 and v1.1 in both
+/// conventions, closed and open shells; the solvation composite; GFN-FF in each of its
+/// conventions. The SCF methods have one subtotal, `electronic`; GFN-FF none.
+#[test]
+fn terms_partition_the_energy() {
+    let caffeine = structure("caffeine.xyz");
+    let water = structure("water.xyz");
+    let o2 = Request {
+        uhf: Some(2),
+        ..structure("../../crates/gxtb/tests/reference_v2/reference/dioxygen_triplet/mol.xyz")
+    };
+    let cu = Request { charge: 2.0, uhf: Some(1), ..structure("cu-nh3-4.xyz") };
+    let check = |label: &str, req: Request, subtotals: &[&str]| {
+        let r = run(&Request { gradient: true, ..req }).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(r.subtotals, subtotals, "{label}");
+        let e = r.energy.unwrap();
+        let pieces: f64 = r.terms.unwrap().0.iter().filter(|(n, _)| !r.subtotals.contains(n)).map(|(_, v)| v).sum();
+        assert!((e - pieces).abs() <= 1e-12 * e.abs(), "{label}: energy - pieces {:e}", e - pieces);
+    };
+    let elec = &["electronic"][..];
+    for conv in ["axtb", "xtb", "xtb-6.7.1", "tblite"] {
+        for (name, mol) in [("water", &water), ("caffeine", &caffeine), ("O2 triplet", &o2), ("Cu doublet", &cu)] {
+            check(&format!("gfn2 {conv} {name}"), with(mol, "gfn2", conv), elec);
+        }
+        let solvent = |model: &str| Request {
+            alpb: (model == "alpb").then(|| "water".into()),
+            gbsa: (model == "gbsa").then(|| "water".into()),
+            ..with(&caffeine, "gfn2", conv)
+        };
+        check(&format!("gfn2 {conv} caffeine ALPB"), solvent("alpb"), elec);
+        check(&format!("gfn2 {conv} caffeine GBSA"), solvent("gbsa"), elec);
+        check(
+            &format!("gfn2 {conv} caffeine 3000 K"),
+            Request { etemp: Some(3000.0), ..with(&caffeine, "gfn2", conv) },
+            elec,
+        );
+        check(
+            &format!("gfn2 {conv} caffeine no D4"),
+            Request { dispersion: Some(false), ..with(&caffeine, "gfn2", conv) },
+            elec,
+        );
+    }
+    for method in ["gxtb-v2.0.1", "gxtb-v1.1"] {
+        for conv in ["axtb", "gxtb"] {
+            for (name, mol) in [("caffeine", &caffeine), ("Cu doublet", &cu)] {
+                check(&format!("{method} {conv} {name}"), with(mol, method, conv), elec);
+            }
+            let composite = Request {
+                alpb: Some("water".into()),
+                solvation_correction: Some("gfn2".into()),
+                ..with(&caffeine, method, conv)
+            };
+            check(&format!("{method} {conv} composite"), composite, elec);
+        }
+    }
+    for conv in ["axtb", "xtb", "xtb-6.7.1"] {
+        check(&format!("gfnff {conv} caffeine"), with(&caffeine, "gfnff", conv), &[]);
+    }
+}

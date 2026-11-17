@@ -439,9 +439,15 @@ pub struct Response {
     /// Dipole moment about the origin (e bohr).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dipole: Option<[f64; 3]>,
-    /// Energy terms (Eh), named as the method's program reports them.
+    /// Energy terms (Eh), named as the method's program reports them: pieces, which add up to
+    /// the energy, and the subtotals named in `subtotals`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terms: Option<Named>,
+    /// The names of the terms that are subtotals of other terms (GFN2-xTB's and g-xTB's
+    /// `electronic`); every other term is a piece of the partition of the energy. For the Python
+    /// binding (not in the CLI's JSON).
+    #[serde(skip)]
+    pub subtotals: Vec<&'static str>,
     #[serde(flatten)]
     pub scf: Option<Scf>,
     #[serde(flatten)]

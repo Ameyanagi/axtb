@@ -8,8 +8,7 @@ use crate::orbitals::{OrbitalLevels, Orbitals};
 /// Whether an energy term is a piece of the partition of the energy or a subtotal of pieces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TermKind {
-    /// A piece: the pieces of a single point sum to its energy (to rounding), unless the method
-    /// documents a part that is only inside a subtotal.
+    /// A piece: the pieces of a single point sum to its energy (to rounding), in every method.
     Piece,
     /// A sum of other contributions (e.g. the electronic energy).
     Subtotal,

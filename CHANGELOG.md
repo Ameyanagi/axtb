@@ -5,6 +5,13 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- GFN2-xTB's energy terms partition the energy: a new piece `band`, the band energy Tr(H0 P),
+  which xtb reports only inside the electronic energy, so that the pieces (every term but the
+  subtotal `electronic`) add up to the energy, as g-xTB's and GFN-FF's do. `dispersion` and
+  `solvation` stay whole pieces (their charge-independent and self-consistent parts; the latter
+  are also inside `electronic`, a subtotal). The CLI's `terms` gain the key `band`; no number
+  changes. The driver's response names the subtotals for the Python binding
+  (`Response::subtotals`, not in the CLI's JSON).
 - Numerics epochs (afh-stack decision 29): every response names the identity of the code that
   produced it, `numerics`, and `axtb_driver::numerics(method, composite)` gives it before a run.
   The rule: each method has an epoch, `"<method>:<epoch>"` (`"gfn2:1"`, `"gxtb-v1.1:1"`,

@@ -95,8 +95,10 @@ fn field_energy_and_decomposition() {
     assert!((odd + dot(FIELD, e0.dipole)).abs() < 1e-6, "odd part {odd} vs -F.mu0 {}", -dot(FIELD, e0.dipole));
     // and the even part is the polarization energy, negative
     assert!(sp.energy + minus.energy - 2.0 * e0.energy < 0.0);
-    // GFN2-xTB's eight terms, then the added term's piece
-    assert!(sp.terms.len() == 9 && e0.terms.len() == 8 && sp.terms[8].name == "field");
+    // GFN2-xTB's nine terms (the eight xtb prints and the band energy), then the added term's
+    // piece; the pieces still add up to the energy
+    assert!(sp.terms.len() == 10 && e0.terms.len() == 9 && sp.terms[9].name == "field");
+    assert!((sp.energy - sp.pieces()).abs() < 1e-12 * sp.energy.abs(), "{}", sp.energy - sp.pieces());
 }
 
 #[test]

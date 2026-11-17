@@ -116,6 +116,8 @@ pub(crate) struct EnergyTerms {
     pub third_order: f64,
     pub anisotropic: f64,
     pub entropy: f64,
+    /// The band energy Tr(H0 P) of the output density (a part of `electronic`).
+    pub band: f64,
     /// The energies of the terms added with [`Calculator::push_term`](crate::Calculator::push_term),
     /// by the names of their pieces, in the order the pieces first appear (their
     /// moment-independent and moment-dependent parts summed per name).
@@ -1117,6 +1119,7 @@ impl ScfModel for Gfn2Scf<'_> {
         let (h0, density) = (&self.ints.h0, &self.density);
         let eh0 = |nu: usize| dot(h0.col_as_slice(nu), density.col_as_slice(nu));
         let eh0 = threads::map_with_min_len(nao, parallel, 16, eh0);
+        self.terms.band = eh0.iter().sum();
         for (nu, e) in eh0.into_iter().enumerate() {
             eelec[bas.ao2at[nu]] += e;
         }

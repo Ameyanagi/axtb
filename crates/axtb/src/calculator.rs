@@ -292,20 +292,24 @@ impl Calculator {
         Ok(finish(reference, nh.hessian, nh.max_asymmetry, dipd, HessianMethod::Numerical, timings))
     }
 
-    /// The single point as the trait reports it: GFN2-xTB's terms (the eight xtb prints, then
-    /// those of added terms), the molecular quadrupole in the conventions' form.
+    /// The single point as the trait reports it: GFN2-xTB's terms (the eight xtb prints, the band
+    /// energy, then those of added terms; every one but `electronic` a piece, so that the pieces
+    /// add up to the energy), the molecular quadrupole in the conventions' form.
     fn report(&self, sp: Gfn2Result) -> crate::method::SinglePoint {
         let t = &sp.terms;
         let mut terms = vec![
             Term::piece("repulsion", t.repulsion),
             Term::piece("dispersion", t.dispersion),
-            // the band energy Tr(H0 P) is only inside the electronic energy
+            // the self-consistent part: the band energy and the second- and third-order, multipole and
+            // entropy terms, with the self-consistent parts of dispersion and solvation (whose
+            // pieces are whole, their charge-independent parts included)
             Term::subtotal("electronic", t.electronic),
             Term::piece("isotropic_es", t.isotropic_es),
             Term::piece("third_order", t.third_order),
             Term::piece("anisotropic", t.anisotropic),
             Term::piece("entropy", t.entropy),
             Term::piece("solvation", t.solvation),
+            Term::piece("band", t.band),
         ];
         terms.extend(t.other.iter().map(|&(n, v)| Term::piece(n, v)));
         let form = self.info.quadrupole.unwrap_or_default();
@@ -474,10 +478,10 @@ mod tests {
     use crate::method::TermKind;
 
     /// GFN2-xTB's pieces (repulsion, dispersion, the electrostatic and entropy terms,
-    /// solvation) sum to the energy minus the band energy Tr(H0 P), which xtb reports only
-    /// inside the electronic energy (a subtotal); with D4 and ALPB, at 300 K.
+    /// solvation and the band energy Tr(H0 P), which xtb reports only inside the electronic
+    /// energy, a subtotal) sum to the energy; with D4 and ALPB, at 300 K.
     #[test]
-    fn pieces_sum_to_the_energy_less_the_band_energy() {
+    fn pieces_sum_to_the_energy() {
         let numbers = [8, 1, 1, 7, 1, 1, 1];
         let positions = [
             [0.0, 0.0, 0.22],
@@ -505,9 +509,11 @@ mod tests {
         let (h0, p) = (&st.ints.h0, &st.density);
         let n = h0.nrows();
         let band: f64 = (0..n).map(|i| (0..n).map(|j| h0[(i, j)] * p[(j, i)]).sum::<f64>()).sum();
-        let gap = sp.energy - sp.pieces();
-        assert!((gap - band).abs() < 1e-10, "energy - pieces {gap} vs Tr(H0 P) {band}");
+        let piece = sp.term("band").unwrap();
+        assert!((piece - band).abs() < 1e-10, "band piece {piece} vs Tr(H0 P) {band}");
         assert!(band.abs() > 1.0, "the band energy is a large part of the energy");
+        let gap = sp.energy - sp.pieces();
+        assert!(gap.abs() < 1e-12 * sp.energy.abs(), "energy - pieces {gap}");
     }
 
     /// The state a Hessian keeps (every orbital) changes no number of the single point, in each
