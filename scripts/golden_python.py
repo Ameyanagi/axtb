@@ -29,8 +29,9 @@ Compared exactly (numpy's array_equal on float64; JSON floats read back exactly)
   an ``scf.retries`` ladder that failed.
 
 ``--quick`` runs the water and caffeine cases (CI). ``--interleave`` also runs every trajectory
-pair as two lineages alternating in one session, which must equal the sequential frames. Exit
-status 1 on any difference.
+pair as two lineages alternating in one session, and as one ``compute_many`` of both (the
+lineages side by side), each of which must equal the sequential frames. Exit status 1 on any
+difference.
 """
 
 import argparse
@@ -209,7 +210,7 @@ def run_trajectory(req, gold, interleave):
     """A trajectory case through a session on the default lineage (and interleaved with its
     reverse in two lineages)."""
     import axtb
-    from qcdata import ProgramError
+    from qcdata import ProgramError, Request
 
     if not hasattr(axtb, "Session"):
         raise flat.NoQcdataForm("a trajectory: needs axtb.Session")
@@ -249,17 +250,25 @@ def run_trajectory(req, gold, interleave):
             for a, b in zip(*rev, strict=True):
                 inter[0].append(s.compute(np.asarray(a), inp.calctype, lineage="a"))
                 inter[1].append(s.compute(np.asarray(b), inp.calctype, lineage=["b", 1]))
-        for k in range(2):
-            for i, (f, g) in enumerate(zip(seq[k], inter[k], strict=True)):
-                try:
-                    same("energy", f.results.energy, g.results.energy)
-                    same("gradient", f.results.gradient, g.results.gradient)
-                    same("charges", f.results.atomic_charges, g.results.atomic_charges)
-                    if f.results.scf_iterations != g.results.scf_iterations:
-                        raise Diff("iterations")
-                except Diff as d:
-                    raise Diff(f"interleaved lineage {k} step {i}: {d}") from None
-        return "interleaved too"
+        # the same requests in one compute_many: the two lineages side by side
+        reqs = []
+        for a, b in zip(*rev, strict=True):
+            reqs.append(Request(positions=np.asarray(a), calctype=inp.calctype, lineage="a"))
+            reqs.append(Request(positions=np.asarray(b), calctype=inp.calctype, lineage=["b", 1]))
+        with axtb.Session(inp) as s:
+            many = s.compute_many(reqs)
+        for name, frames in (("interleaved", inter), ("compute_many", [many[0::2], many[1::2]])):
+            for k in range(2):
+                for i, (f, g) in enumerate(zip(seq[k], frames[k], strict=True)):
+                    try:
+                        same("energy", f.results.energy, g.results.energy)
+                        same("gradient", f.results.gradient, g.results.gradient)
+                        same("charges", f.results.atomic_charges, g.results.atomic_charges)
+                        if f.results.scf_iterations != g.results.scf_iterations:
+                            raise Diff("iterations")
+                    except Diff as d:
+                        raise Diff(f"{name} lineage {k} step {i}: {d}") from None
+        return "interleaved and side by side too"
     return ""
 
 

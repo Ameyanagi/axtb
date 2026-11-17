@@ -203,8 +203,128 @@ def test_threads_and_plan():
         assert plan["resolved"]["settings"]["threads"] == 2 and plan["resources"]["threads"] == 2
         assert [w["code"] for w in plan["warnings"]] == ["resource_capped"]
         assert s.compute().execution.threads == 2
+        assert plan["record"]["lineages_at_once"] == 1
     with axtb.Session(inp(structure=WATER, keywords={"threads": 4})) as s:
         assert s.compute().execution.threads == 1  # water runs on one thread, the same bits
+    # without the keyword: each request on the plan's threads for its calctype and size, at most
+    # the grant; the grant filled with the lineages compute_many runs side by side
+    caffeine = inp("gxtb-v2.0.1", keywords={})
+    with axtb.Session(caffeine, ctx=RunContext(threads=16)) as s:  # a caffeine Hessian plans 8
+        plan = s.plan()
+        assert plan["resolved"]["settings"]["threads"] == 1 and plan["resources"]["threads"] == 8
+        assert plan["record"]["threads_by_calctype"] == {"energy": 1, "gradient": 1, "hessian": 8}
+        assert plan["record"]["lineages_at_once"] == 16 and not plan["warnings"]
+        assert s.compute().execution.threads == 1
+        assert s.compute(calctype="energy").execution.threads == 1
+        assert s._engine.calculators == [1]
+    with axtb.Session(caffeine, ctx=RunContext(threads=4)) as s:
+        plan = s.plan()
+        assert plan["resources"]["threads"] == 4 and plan["record"]["lineages_at_once"] == 4
+        assert plan["record"]["threads_by_calctype"]["hessian"] == 4 and not plan["warnings"]
+    with axtb.Session(inp("gxtb-v2.0.1", calctype="hessian", keywords={}), ctx=RunContext(threads=8)) as s:
+        plan = s.plan()
+        assert plan["record"]["threads_used"] == 8 and plan["record"]["lineages_at_once"] == 1
+        assert s.compute(calctype="gradient").execution.threads == 1
+        assert s._engine.calculators == [8, 1]
+    # a direct call: the session's threads are this process's CPUs
+    with axtb.Session(caffeine) as s:
+        assert s.plan()["record"]["lineages_at_once"] == len(os.sched_getaffinity(0))
+
+
+def requests(structure, bad):
+    """Interleaved and seeded lineages: lineages without history seeded from ones with and
+    without, a seed whose later requests come after the seeded one, uncommitted requests, a
+    failed request in a seed lineage, a refused one, and lineages that are JSON values."""
+    x = np.asarray(structure.geometry, dtype=float)
+    n = len(x)
+    rng = np.random.default_rng(7)
+
+    def at(scale=0.01):
+        return x + rng.normal(scale=scale, size=(n, 3))
+
+    nan = np.full_like(x, np.nan)
+    out = [
+        Request(positions=at(), lineage="b"),
+        Request(positions=at(), lineage="a", seed=["nothing", "b"]),
+        Request(positions=at(), lineage="b"),
+        Request(positions=at(), lineage=("c", 1), seed=["a"], commit=False),
+        Request(positions=nan if bad else at(), lineage="b"),
+        Request(positions=at(), lineage=("c", 1), seed=["b", "a"]),
+        Request(positions=at(), lineage="d", seed=["c"]),
+        Request(positions=at(), lineage="a"),
+        Request(positions=at(), lineage="b", seed=["a"]),
+        Request(positions=at(), lineage="e", seed=["b"]),
+    ]
+    if bad:
+        out.append(Request(positions=at(), lineage="a", calctype="optimization"))
+    for k in range(3):
+        for img in range(6):
+            out.append(Request(positions=at(), lineage=["neb", img], seed=[["neb", img - 1]] if img else [],
+                               commit=k != 1 or img % 2 == 0))
+    return out
+
+
+def frames_of(f):
+    try:
+        return f()
+    except ProgramErrors as e:
+        return e.results
+
+
+def frame_bits(f):
+    if not f.success:
+        return ("failed", f.error.code)
+    return (*bits(f), f.record["warm_start"], json.dumps(f.record["from_lineage"]), f.execution.threads)
+
+
+@pytest.mark.parametrize(
+    "method,keywords",
+    [
+        ("gfn2", {}),
+        ("gfn2", {"threads": 2}),
+        ("gxtb-v2.0.1", {}),
+        ("gxtb-v2.0.1", {"threads": 2, "conventions": "gxtb"}),
+        ("gxtb-v1.1", {}),
+        ("gfnff", {}),
+        ("gxtb-v2.0.1", {"solvent": {"name": "water", "correction": "gfn2"}}),
+    ],
+)
+def test_compute_many_side_by_side_equals_one_at_a_time(method, keywords):
+    """compute_many runs different lineages side by side on forks of the engine and gives what
+    one-at-a-time compute calls give, each on its calctype's threads, bit for bit: interleaved
+    and seeded lineages, uncommitted requests, failures in place, the lineages' histories
+    afterwards; the forks are kept for the next call."""
+    from qccompute.program import RunContext
+
+    structure = WATER if "solvent" in keywords else CAFFEINE
+    for bad in (True, False):
+        reqs = requests(structure, bad)
+        opened = [
+            axtb.Session(inp(method, keywords=keywords, structure=structure), ctx=RunContext(threads=8))
+            for _ in range(2)
+        ]
+        with opened[0] as many, opened[1] as one:
+            at_once = many.plan()["record"]["lineages_at_once"]
+            assert at_once == 8 // many.plan()["record"]["threads_used"] and at_once > 1
+            got = frames_of(lambda: many.compute_many(reqs))
+            want = []
+            for r in reqs:
+                try:
+                    want.append(one.compute(r.positions, r.calctype, lineage=r.lineage, seed=r.seed, commit=r.commit))
+                except ProgramError as e:
+                    want.append(e.frame)
+            assert [frame_bits(f) for f in got] == [frame_bits(f) for f in want]
+            assert [f.success for f in got].count(False) == (2 if bad else 0)
+            assert sorted(map(json.dumps, many.lineages())) == sorted(map(json.dumps, one.lineages()))
+            calculators = many._engine.calculators
+            assert 1 < len(calculators) <= at_once
+            # the next steps from the histories, on the kept forks
+            more = [Request(positions=r.positions, lineage=r.lineage) for r in reqs[-6:]]
+            again = many.compute_many(more)
+            assert [frame_bits(f) for f in again] == [
+                frame_bits(one.compute(r.positions, lineage=r.lineage)) for r in more
+            ]
+            assert many._engine.calculators == calculators
 
 
 @pytest.mark.filterwarnings("error")
@@ -254,3 +374,31 @@ def test_overhead_per_step():
         # 1.6x slower than the laptop the targets were set on, so they get room for that too
         room = 3.0 if os.environ.get("CI") else 1.5
         assert step < 30e-6 * room and once < 100e-6 * room, (method, step, once)
+
+
+@pytest.mark.parametrize("method", ["gxtb-v2.0.1", "gfn2"])
+def test_compute_many_mixed_calctypes(method):
+    """Gradients and Hessians in one compute_many: each request on its calctype's threads (water
+    with g-xTB 2.0.1: gradients on 1, Hessians on 2; GFN2-xTB: 1 and 1), the same bits as
+    one-at-a-time compute calls, lineages moving between the forks of each thread count."""
+    from qccompute.program import RunContext
+
+    x = np.asarray(WATER.geometry, dtype=float)
+    rng = np.random.default_rng(11)
+    reqs = []
+    for step in range(3):
+        for k in range(4):
+            calctype = "hessian" if (k + step) % 3 == 0 else "gradient"
+            reqs.append(Request(positions=x + rng.normal(scale=0.01, size=x.shape), calctype=calctype, lineage=k,
+                                seed=[k - 1] if k else []))
+    sessions = [axtb.Session(inp(method, keywords={}, structure=WATER), ctx=RunContext(threads=4)) for _ in range(2)]
+    with sessions[0] as many, sessions[1] as one:
+        got = many.compute_many(reqs)
+        want = [one.compute(r.positions, r.calctype, lineage=r.lineage, seed=r.seed) for r in reqs]
+        assert [frame_bits(f) for f in got] == [frame_bits(f) for f in want]
+        hessians = [f for f, r in zip(got, reqs, strict=True) if r.calctype == "hessian"]
+        for f, g in zip(hessians, [f for f, r in zip(want, reqs, strict=True) if r.calctype == "hessian"], strict=True):
+            assert f.results.hessian.tobytes() == g.results.hessian.tobytes()
+        threads = many.plan()["record"]["threads_by_calctype"]
+        assert [f.execution.threads for f in got] == [threads[r.calctype] for r in reqs]
+        assert set(many._engine.calculators) == {threads["gradient"], threads["hessian"]}

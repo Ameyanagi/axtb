@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -117,6 +117,29 @@ def threads(p: Planned, calctype: str, ctx: Any) -> tuple[int, list[ProgramWarni
         return grant, [], "the runner's grant"
     planned = plan_threads(p, calctype)
     return planned, [], f"a direct call: the plan's {planned}"
+
+
+def session_threads(
+    p: Planned, calctypes: Iterable[str], ctx: Any
+) -> tuple[dict[str, tuple[int, str]], int, list[ProgramWarning]]:
+    """A session's threads per calculation of each calctype (with the reason), its threads in all,
+    and the warnings. Per calculation: the ``threads`` keyword, at most the grant
+    (``resource_capped`` above it), else the plan's threads for the calctype and size, at most
+    the grant. In all (what ``compute_many`` fills with the lineages it runs side by side): the
+    grant, and without one (a direct call) this process's CPUs."""
+    grant = getattr(ctx, "threads", None) if ctx is not None else None
+    total = grant if grant is not None else _cpus()
+    if p.threads is not None:
+        n, warnings, why = _keyword_threads(p, grant)
+        return {c: (n, why) for c in calctypes}, total, warnings
+    out = {}
+    for c in calctypes:
+        planned = plan_threads(p, c)
+        if grant is not None and planned > grant:
+            out[c] = (grant, f"the plan's {planned} for a {c}, capped to the {grant} granted")
+        else:
+            out[c] = (planned, f"the plan's {planned} for a {c}")
+    return out, total, []
 
 
 def implied(outputs: frozenset[str] | set[str]) -> frozenset[str]:

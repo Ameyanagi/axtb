@@ -29,8 +29,9 @@ class Error(Exception):
     """The tries of an ``scf_retries`` ladder that did not converge, else None."""
 
 class Engine:
-    """A session's calculator: the driver calculator of one request and one committed
-    wavefunction per lineage."""
+    """A session's calculator: the driver calculator of one request, forks of it on other
+    threads and for lineages side by side (``compute_many``), and one committed wavefunction per
+    lineage."""
 
     def __init__(self, request: str, numbers: Sequence[int], positions: ArrayLike2) -> None: ...
     @property
@@ -43,6 +44,8 @@ class Engine:
     def threads(self) -> int: ...
     @property
     def closed(self) -> bool: ...
+    @property
+    def calculators(self) -> list[int]: ...
     def compute(
         self,
         positions: ArrayLike2,
@@ -52,7 +55,13 @@ class Engine:
         commit: bool = True,
         accuracy: float | None = None,
         orbitals: bool = False,
+        threads: int | None = None,
     ) -> Result: ...
+    def compute_many(
+        self,
+        requests: Sequence[tuple[ArrayLike2, str, str, Sequence[str], bool, float | None, bool, int | None]],
+        threads: int,
+    ) -> list[Result | Error]: ...
     def set_given(
         self,
         densities: Sequence[ArrayLike2] | None = None,

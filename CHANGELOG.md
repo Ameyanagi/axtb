@@ -5,6 +5,30 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+### Sessions run lineages side by side
+
+- `axtb.Session.compute_many` runs different lineages side by side on forks of the session's
+  calculator, as long as their threads fit into the session's threads in all (the grant; a direct
+  call: this process's CPUs), taken in request order; `plan()["record"]` gives
+  `lineages_at_once` for the input's calctype. Each lineage's requests run in request order; a
+  request whose lineage has no history waits for its seeds' earlier requests in the batch. The
+  frames are what one-at-a-time `compute` calls in request order give, bit for bit, failures in
+  place. The forks share the method's immutable setup, run on one thread count each, have their
+  own SCF state and work buffers, and are kept until the session closes (one calculation's working memory each: 1.9 MiB for a caffeine g-xTB 2.0.1
+  gradient, 24 MiB for taxol's). Measured on the laptop, 12 caffeine g-xTB 2.0.1 gradient
+  lineages per call in a session of 8 threads: 31 ms per call, against 160 ms one request at a
+  time on 1 thread (5.1x) and 93 ms one at a time on 8 threads, as 0.2.0a1 ran them.
+- A session's requests, single `compute` calls included, run on their own threads (the
+  `threads` keyword, else the plan's for the request's calctype and the molecule's size, at most
+  the grant), no longer on the whole grant: a gradient on the gradient's threads, a Hessian on
+  the Hessian's, each on a fork on those threads. `plan()` gives the input calctype's threads,
+  the most a calculation takes as `resources.threads`, and `record.threads_by_calctype`. A single
+  `compute` stays serialized by the session's lock.
+- Rust: `Method::fork` (axtb-base; GFN2-xTB, both g-xTB versions, the composite and GFN-FF
+  implement it), `Composite::forked`, `Part::fork`, axtb-driver `Calculator::fork`. Breaking:
+  `method::Guard` is an `Arc<dyn Fn>` (was a `Box<dyn FnMut>`), so that forks share it.
+- Numerics epochs unchanged: no result changes (golden set 188 of 188).
+
 ### Plan threads from measurements
 
 - The plan states a thread count for every calculation by method, calctype and size, never the
