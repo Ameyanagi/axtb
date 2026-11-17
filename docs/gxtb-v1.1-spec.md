@@ -680,11 +680,17 @@ program iteration by iteration (energies agree to ~1e-14 Eh in every iteration).
     energy is the sum of the terms plus −TS), so it is in the printed SCF energies, the
     convergence test and the total. Nothing about it is printed besides "Tel(K)".
 
-  Reproduction: total energies (`energy` file, 14 decimals) ≤ 3.7e-11 Eh (Ni(CO)4 at 5000 K;
-  2e-11 before the v1.1 merge onto the 2.0.1 engine, an R step) with identical SCF iterations
-  for all 60 runs of the 14 reference molecules and stretched N2; Fe4 (45–941 iterations, or
-  none) is rounding-sensitive. Program-mode analytic gradients: the program's numerical
-  gradients (tight SCF) are our central differences with its step (≤ 7e-11 Eh/bohr,
+  Reproduction: total energies (`energy` file, 14 decimals) ≤ 2e-11 Eh with identical SCF
+  iterations for all 60 runs of the 14 reference molecules and stretched N2. Two are
+  rounding-sensitive:
+  - Fe4: 45–941 iterations, or none.
+  - Ni(CO)4 at 5000 K: exactly tetrahedral. Its SCF path follows the eigensolver's vectors
+    within degenerate levels, so iterations and the last ~1e-10 Eh depend on the CPU (14 and
+    3.7e-11, or 13 and 2.2e-10). Converged tightly, it agrees with a structure shifted by
+    1e-13 Å to 5e-13 Eh.
+
+  Program-mode analytic gradients: the program's numerical gradients (tight SCF) are our
+  central differences with its step (≤ 7e-11 Eh/bohr,
   [CuCl4]²⁻ 2e-9), the analytic gradient their Richardson extrapolation (≤ 2e-8); against
   5-point differences of the free energy at 5000 K ≤ 2.2e-9 (the program's 1e-9 electron
   threshold roughens its energy at that level). The response (`response.rs`, `fermi_gradient`)
