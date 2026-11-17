@@ -425,10 +425,14 @@ THRESHOLDS = {
 # RMS density change 2e-5, energy change 1e-8 Eh): charges 2e-5, atomic and molecular dipoles 1e-4
 # (x 5 bohr), quadrupoles 2e-4 (x 10 bohr^2), terms, orbital energies and the gap 1e-5 Eh (x 0.5 Eh);
 # the iteration counts may differ and are always printed; the numbers in an error's message (energy change,
-# residual) within the SCF test's scale, 1e-8. (The gfn2 stretch-retry cases can join once their numbers
-# may move.)
+# residual) within the SCF test's scale, 1e-8. The gfn2 stretch-retry cases joined at alpha 1 (the commit
+# that computes GFN2's orbitals without occupation after the SCF, whose SCFs keeping every orbital moved
+# from the full eigensolver to the occupied orbitals' path): at 3 Å the warm start fails within max_iter 60,
+# and round-off decides where the slowly converging fresh rung stops (charges 1.1e-9, dipole 3.7e-9 apart);
+# with max_iter 200 the two builds agree to 6e-13.
 LADDER_CASES = ("traj-gxtb11-water-stretch-retry", "traj-gxtb2-water-stretch-retry",
-                "traj-gxtb2-water-stretch-retry-hessian")
+                "traj-gxtb2-water-stretch-retry-hessian", "traj-gfn2-water-stretch-retry",
+                "traj-gfn2-water-stretch-retry-hessian")
 LADDER_THRESHOLDS = {
     "energy": 1e-10, "gradient": 1e-7, "charges": 2e-5, "shell_charges": 2e-5, "atomic_dipoles": 1e-4,
     "dipole": 1e-4, "atomic_quadrupoles": 2e-4, "quadrupole": 2e-4, "terms": 1e-5, "orbital_energies_alpha": 1e-5,

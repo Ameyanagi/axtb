@@ -505,4 +505,60 @@ mod tests {
         assert!((gap - band).abs() < 1e-10, "energy - pieces {gap} vs Tr(H0 P) {band}");
         assert!(band.abs() > 1.0, "the band energy is a large part of the energy");
     }
+
+    /// The state a Hessian keeps (every orbital) changes no number of the single point, in each
+    /// conventions: closed and open shells, 0 and 3000 K, and (H2O)100 (600 rows, faer's
+    /// parallel tridiagonalization) on four threads. The kept orbitals are S-orthonormal.
+    #[test]
+    fn keeping_the_state_changes_no_number() {
+        let read = |name: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/structures").join(name);
+            crate::io::read_xyz(&std::fs::read_to_string(path).unwrap(), crate::units::AATOAU).unwrap()
+        };
+        let (caffeine, water100) = (read("caffeine.xyz"), read("large/water100.xyz"));
+        let o2 = (vec![8, 8], vec![[0.0, 0.0, -1.14], [0.0, 0.0, 1.14]]);
+        let cases = [
+            (&caffeine, Some(0), 300.0, 1),
+            (&caffeine, Some(0), 3000.0, 1),
+            (&caffeine, Some(0), 0.0, 1),
+            (&o2, Some(2), 300.0, 1),
+            (&o2, Some(0), 0.0, 1),
+            (&water100, Some(0), 300.0, 4),
+        ];
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for conventions in [crate::Conventions::Axtb, crate::Conventions::Xtb, crate::Conventions::Tblite] {
+            for &((numbers, positions), uhf, etemp, threads) in &cases {
+                let mut o = Options { conventions, threads, ..Default::default() };
+                o.scf.etemp = Some(etemp);
+                let calc = Calculator::new(Hamiltonian::Gfn2, numbers, positions, 0.0, uhf, o).unwrap();
+                let scf = calc.scf_options(&Want::GRADIENT);
+                let (m, x) = (&calc.mol, &calc.extra);
+                let a = calc.threads.install(|| calc.model.singlepoint(m, x, &scf, None, true)).unwrap();
+                let (b, st) =
+                    calc.threads.install(|| calc.model.singlepoint_state(m, x, &scf, None, true, true)).unwrap();
+                let label = format!("{conventions:?} {} atoms uhf {uhf:?} {etemp} K", numbers.len());
+                assert_eq!(a.energy.to_bits(), b.energy.to_bits(), "{label}: energy");
+                let g = |r: &Gfn2Result| bits(&r.gradient.as_ref().unwrap().concat());
+                assert_eq!(g(&a), g(&b), "{label}: gradient");
+                assert_eq!(bits(&a.qsh), bits(&b.qsh), "{label}: charges");
+                assert_eq!(bits(&a.dpat.concat()), bits(&b.dpat.concat()), "{label}: dipoles");
+                assert_eq!(bits(&a.qpat.concat()), bits(&b.qpat.concat()), "{label}: quadrupoles");
+                for (la, lb) in a.levels.iter().zip(&b.levels) {
+                    assert_eq!(bits(&la.energies), bits(&lb.energies), "{label}: levels");
+                    assert_eq!(bits(&la.occupations), bits(&lb.occupations), "{label}: occupations");
+                }
+                // every kept orbital, the SCF's and those computed after it, S-orthonormal (O2 at
+                // 0 K: the occupied and the empty orbital of the degenerate pi* pair)
+                let (c, s) = (&st.as_ref().unwrap().coeff, &st.as_ref().unwrap().ints.overlap);
+                let ctsc = c.transpose() * s * c;
+                let n = c.ncols();
+                for j in 0..n {
+                    for i in 0..n {
+                        let want = if i == j { 1.0 } else { 0.0 };
+                        assert!((ctsc[(i, j)] - want).abs() < 1e-11, "{label}: C^T S C ({i}, {j}) {}", ctsc[(i, j)]);
+                    }
+                }
+            }
+        }
+    }
 }

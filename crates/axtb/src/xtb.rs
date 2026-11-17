@@ -84,7 +84,8 @@ pub(crate) struct ScfOptions {
     /// Starting point when no previous wavefunction is given.
     pub guess: InitialGuess,
     /// Keep the converged orbitals and their basis in [`Gfn2Result::orbitals`] (e.g. for a
-    /// Molden file); every eigenvector is computed.
+    /// Molden file). The SCF is the same either way: where it computes the occupied orbitals
+    /// alone, the others are computed once after it.
     pub keep_orbitals: bool,
     /// Compute the Mayer–Wiberg bond orders ([`Gfn2Result::bond_orders`]).
     pub bond_orders: bool,
@@ -528,9 +529,10 @@ impl XtbModel {
             }
             _ => "sad",
         };
-        // eigenvectors of the occupied orbitals only, where nothing needs all of them
-        let all_orbitals = keep_state || opts.keep_orbitals || (opts.bond_orders && nalpha != nbeta);
-        let lowest = self.params.occupied_orbitals_only && !all_orbitals;
+        // the eigenvectors of the occupied orbitals only in the conventions that ask for it,
+        // whatever is requested (the orbitals without occupation, where needed, once after the
+        // SCF): a request changes no other number
+        let lowest = self.params.occupied_orbitals_only;
         let mut scf = Gfn2Scf {
             xtb: self,
             mol,
@@ -628,8 +630,9 @@ impl XtbModel {
         let Gfn2Scf {
             geo,
             ints,
-            solver,
-            coeff,
+            mut solver,
+            fock,
+            mut coeff,
             kocc,
             density,
             emo,
@@ -644,6 +647,12 @@ impl XtbModel {
             ..
         } = scf;
         terms.repulsion = e_repulsion[0];
+        // the orbitals without occupation, for the orbitals kept and the response of a Hessian:
+        // once, from the last Fock matrix, the occupied ones staying those of the SCF
+        if (opts.keep_orbitals || keep_state) && kocc < nao {
+            solver.solve_rest(fock.as_ref(), &emo, &mut coeff, kocc)?;
+            timer.lap("virtual orbitals");
+        }
         let mp_cache = &geo.mp_cache;
         for i in 0..nat {
             energies[i] += eelec[i];
@@ -766,7 +775,9 @@ impl XtbModel {
             if nalpha == nbeta {
                 crate::properties::mayer_bond_orders(nat, &bas.ao2at, s, &[density.as_ref()], par)
             } else {
-                let [pa, pb] = crate::properties::spin_densities(coeff.as_ref(), &occ_a, &occ_b, par);
+                // the spin densities of the orbitals of the SCF's density
+                let c = coeff.as_ref().subcols(0, kocc);
+                let [pa, pb] = crate::properties::spin_densities(c, &occ_a[..kocc], &occ_b[..kocc], par);
                 crate::properties::mayer_bond_orders(nat, &bas.ao2at, s, &[pa.as_ref(), pb.as_ref()], par)
             }
         });
@@ -835,7 +846,8 @@ impl Moments {
 }
 
 /// One GFN2-xTB SCF of [`XtbModel::singlepoint_state`] as the core's SCF model: the Fock
-/// matrix of the mixed input moments, all or only the occupied eigenpairs, tblite's Fermi
+/// matrix of the mixed input moments, all or (by the conventions) only the occupied
+/// eigenpairs, tblite's Fermi
 /// filling, the density, its Mulliken moments and their energy; the moments are mixed as the
 /// vector of [`ScfVariables`].
 struct Gfn2Scf<'a> {

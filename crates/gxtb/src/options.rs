@@ -92,9 +92,11 @@ pub struct ScfOptions {
     /// v1.1: the Fock matrix of the SCF, the exact derivative of the energy or the program's;
     /// 2.0.1: units, electron count and cutoffs (the program's or the default ones).
     pub conventions: Conventions,
-    /// Every orbital's coefficients in the SCF result (2.0.1's Hessians and the orbitals of a
-    /// Molden file need them; without, only the occupied orbitals are computed). v1.1 in the
-    /// program's conventions computes every orbital anyway (the program does).
+    /// Every orbital's coefficients in the SCF result (the Hessians' response and the orbitals
+    /// of a Molden file need them; without, only the occupied orbitals are computed). The SCF
+    /// is the same either way: the orbitals without occupation are computed once after it.
+    /// v1.1 in the program's conventions computes every orbital in every iteration (the
+    /// program does).
     pub all_orbitals: bool,
 }
 

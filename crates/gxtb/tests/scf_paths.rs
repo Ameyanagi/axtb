@@ -184,3 +184,70 @@ fn gd_aqua_v2_program_gradient_axis() {
         assert!((prog - fd).abs() > 2e-5, "the program's gradient no longer differs");
     }
 }
+
+/// Every orbital (`all_orbitals`) changes no number of the SCF: its energy, levels, occupations
+/// and gradient, and the coefficients of the orbitals it computed are the same bits; the other
+/// orbitals, computed after it, complete an S-orthonormal set. Both versions and conventions,
+/// closed and open shells, singlet O2 at 0 K (a degenerate pi* pair split between occupied and
+/// empty) and at 3000 K.
+#[test]
+fn every_orbital_keeps_the_scf_ones() {
+    use axtb_gxtb::model::Model;
+    use axtb_gxtb::scf::Setup;
+    use axtb_gxtb::{ScfOptions, Version};
+    let structures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/structures");
+    let read = |path: &Path, charge: f64, uhf: usize| {
+        axtb_gxtb::read_xyz(&std::fs::read_to_string(path).unwrap(), charge, Some(uhf)).unwrap()
+    };
+    let o2 = tests().join("reference_v2/reference/dioxygen_triplet/mol.xyz");
+    let mols = [
+        ("caffeine", read(&structures.join("caffeine.xyz"), 0.0, 0), 0.0),
+        ("cu", read(&structures.join("cu-nh3-4.xyz"), 2.0, 1), 0.0),
+        ("o2 singlet", read(&o2, 0.0, 0), 0.0),
+        ("o2 singlet", read(&o2, 0.0, 0), 3000.0),
+    ];
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    for version in [Version::V2_0_1, Version::V1_1] {
+        for conventions in [Conventions::Axtb, Conventions::Gxtb] {
+            for (name, mol, etemp) in &mols {
+                let label = format!("{version:?} {conventions:?} {name} {etemp} K");
+                let setup = Setup::new(mol, Model::new(version, conventions)).unwrap();
+                let opts = ScfOptions { conventions, etemp: *etemp, ..Default::default() };
+                let r0 = setup.scf(&opts).unwrap();
+                let r1 = setup.scf(&ScfOptions { all_orbitals: true, ..opts }).unwrap();
+                assert!(r1.all_orbitals, "{label}");
+                assert_eq!(r0.energies.total.to_bits(), r1.energies.total.to_bits(), "{label}: energy");
+                assert_eq!(r0.iterations, r1.iterations, "{label}: iterations");
+                assert_eq!(bits(&r0.atom_charges), bits(&r1.atom_charges), "{label}: charges");
+                let (g0, g1) = (setup.gradient(&r0).unwrap(), setup.gradient(&r1).unwrap());
+                assert_eq!(bits(&g0.concat()), bits(&g1.concat()), "{label}: gradient");
+                let n = setup.nao;
+                let s = MatRef::from_row_major_slice(&setup.s, n, n);
+                for ch in 0..r0.coefficients.len() {
+                    assert_eq!(bits(&r0.orbital_energies[ch]), bits(&r1.orbital_energies[ch]), "{label}: levels");
+                    assert_eq!(bits(&r0.occupations[ch]), bits(&r1.occupations[ch]), "{label}: occupations");
+                    let (c0, c1) = (&r0.coefficients[ch], &r1.coefficients[ch]);
+                    // the columns the SCF computed (the others are zero without all_orbitals)
+                    let computed = (0..n).filter(|&k| (0..n).any(|mu| c0[mu * n + k] != 0.0));
+                    for k in computed {
+                        for mu in 0..n {
+                            assert_eq!(c0[mu * n + k].to_bits(), c1[mu * n + k].to_bits(), "{label}: orbital {k}");
+                        }
+                    }
+                    let c = MatRef::from_row_major_slice(c1, n, n);
+                    let ctsc: Mat<f64> = c.transpose() * s * c;
+                    for j in 0..n {
+                        for i in 0..n {
+                            let want = if i == j { 1.0 } else { 0.0 };
+                            assert!(
+                                (ctsc[(i, j)] - want).abs() < 1e-10,
+                                "{label}: C^T S C ({i}, {j}) {}",
+                                ctsc[(i, j)]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

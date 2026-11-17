@@ -5,6 +5,19 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- Asking for an output changes no other number. In the axtb conventions GFN2-xTB's SCF
+  computed every eigenvector in every iteration when the orbitals (a Molden file), a Hessian's
+  response or open-shell bond orders were asked for, and the occupied ones alone otherwise; g-xTB
+  computed every orbital again after its SCF. So energies, gradients and charges with and without
+  a Molden file differed by round-off (GFN2-xTB), and g-xTB's gradients did. Now every SCF takes
+  the same path whatever is asked for, and the orbitals without occupation are computed once
+  after it, from its last Fock matrix (`GenEigSolver::solve_rest`, which replaces
+  `solve_all_with`); the occupied orbitals returned are those of the SCF, bit for bit. GFN2-xTB's
+  open-shell bond orders use the orbitals of the SCF's density. The program conventions, which use
+  the full eigensolver throughout, are unchanged. Results that kept every orbital move by
+  round-off: GFN2-xTB Hessians in the axtb conventions (energies ≤ 3e-14 Eh, gradients ≤ 2e-15
+  Eh/bohr, Hessians ≤ 3e-13 Eh/bohr², frequencies ≤ 1.5e-8 cm⁻¹) and g-xTB 2.0.1 Hessians
+  (≤ 5.7e-13 Eh/bohr², ≤ 4.7e-8 cm⁻¹).
 - License: every crate is LGPL-3.0-or-later, `axtb-gxtb` (g-xTB v1.1 and 2.0.1 with their
   parameters) included, and so are `axtb-driver`, the `axtb` program and the Python package and
   its wheels; in 0.1.x they were GPL-3.0-only as built by default. g-xTB itself stays GPL-3.0:

@@ -735,7 +735,9 @@ pub struct ScfResult {
     pub efermi: [Option<f64>; 2],
     /// MO coefficients per channel (row-major n x n, column k = orbital k): every orbital's with
     /// `all_orbitals`, otherwise only those of the orbitals with nonzero occupation (the other
-    /// columns zero).
+    /// columns zero). The SCF computes the orbitals with nonzero occupation (v1.1 in the
+    /// program's conventions every one); the others are computed once after it from the last
+    /// diagonalized matrices, so that these columns are the SCF's either way.
     pub coefficients: Vec<Vec<f64>>,
     /// Whether `coefficients` hold every orbital ([`crate::ScfOptions::all_orbitals`]; the
     /// Hessians need them).
@@ -837,13 +839,14 @@ impl Setup {
             c: Mat::zeros(n, n),
             eps: vec![vec![0.0; n]; ns],
             coef: vec![vec![0.0; n * n]; ns],
-            full: vec![false; ns],
+            kocc: vec![n; ns],
             pnew: Vec::new(),
             input: None,
             energies: Energies::default(),
             history: Vec::new(),
             every,
-            last: (version == Version::V1_1 && opts.all_orbitals && !every).then(Vec::new),
+            keep_last: opts.all_orbitals && !every,
+            last: None,
             dp: (version == Version::V1_1).then_some(f64::NAN),
         };
         let mut v2_mixer: Option<Gxtb201FockDiis> = None;
@@ -885,18 +888,25 @@ impl Setup {
             };
             return Err(Error::ScfNotConverged { iterations: max_iter, energy_change: de, residual: res });
         }
-        let Scf201 { mut solver, occ, efermi, mut c, mut eps, mut coef, full, input, energies, history, last, .. } =
-            scf;
+        let Scf201 { mut solver, occ, efermi, mut c, eps, mut coef, kocc, input, energies, history, last, .. } = scf;
         if opts.all_orbitals && !every {
-            // every orbital, the occupied ones as in the iteration (same bits)
+            // the orbitals without occupation, once, from the matrices of the last
+            // diagonalization; the occupied ones and every level stay the SCF's
             for s in 0..ns {
+                let k = kocc[s];
+                if k == n {
+                    continue;
+                }
                 let f = match &last {
                     Some(last) => &last[s],
                     None => v2_mixer.as_ref().expect("2.0.1 diagonalizes the mixed Fock matrices").mixed(s),
                 };
-                solver.solve_all_with(MatRef::from_row_major_slice(f, n, n), &mut eps[s], &mut c, full[s])?;
-                MatMut::from_row_major_slice_mut(&mut coef[s], n, n).copy_from(&c);
+                solver.solve_rest(MatRef::from_row_major_slice(f, n, n), &eps[s], &mut c, k)?;
+                MatMut::from_row_major_slice_mut(&mut coef[s], n, n)
+                    .subcols_mut(k, n - k)
+                    .copy_from(c.as_ref().subcols(k, n - k));
             }
+            t.lap("scf: virtual orbitals");
         }
         let st = out.state;
         Ok(ScfResult {
@@ -938,8 +948,8 @@ struct Scf201<'a> {
     /// without occupation zero) of the last iteration.
     eps: Vec<Vec<f64>>,
     coef: Vec<Vec<f64>>,
-    /// Whether the last diagonalization of each channel used the full solver.
-    full: Vec<bool>,
+    /// The columns of `coef` the last diagonalization of each channel computed (n: all).
+    kocc: Vec<usize>,
     /// The densities of the last iteration, until its state takes them.
     pnew: Vec<Vec<f64>>,
     /// The state the last Fock matrices were built from (the program's gradient evaluates
@@ -950,8 +960,11 @@ struct Scf201<'a> {
     history: Vec<(f64, f64)>,
     /// Every eigenpair in every iteration (v1.1 in the program's conventions).
     every: bool,
-    /// The Fock matrices of the last diagonalization (v1.1 with every orbital: its last
-    /// iteration diagonalizes the unmixed matrix, which the mixer does not hold).
+    /// Keep the matrices of an unmixed iteration in `last` (the orbitals without occupation
+    /// are computed from them after the SCF).
+    keep_last: bool,
+    /// The Fock matrices of the last unmixed iteration (v1.1's last iteration diagonalizes the
+    /// matrices as built, which the mixer does not hold); `None` without one.
     last: Option<Vec<Vec<f64>>>,
     /// The RMS change of the packed spin densities in the last iteration (v1.1's convergence
     /// test; 2.0.1 measures the Fock residual instead).
@@ -964,17 +977,17 @@ impl ScfModel for Scf201<'_> {
     fn diagonalize(&mut self, fock: FockSource<'_>) -> Result<ControlFlow<Error>> {
         let setup = self.setup;
         let (n, ns, kt) = (setup.nao, setup.nspin, self.kt);
+        if let (true, FockSource::Unmixed(f)) = (self.keep_last, fock) {
+            self.last = Some(f.to_vec());
+        }
         if self.every {
             for s in 0..ns {
                 let f = fock.matrix(s).expect("the v1.1 SCF diagonalizes row-major Fock matrices");
                 self.solver.solve(MatRef::from_row_major_slice(f, n, n), &mut self.eps[s], &mut self.c)?;
-                self.full[s] = true;
+                self.kocc[s] = n;
                 MatMut::from_row_major_slice_mut(&mut self.coef[s], n, n).copy_from(&self.c);
             }
             return Ok(ControlFlow::Continue(()));
-        }
-        if let Some(last) = &mut self.last {
-            *last = (0..ns).map(|s| fock.matrix(s).expect("row-major Fock matrices").to_vec()).collect();
         }
         let occ = &self.occ;
         // the eigenvectors of the orbitals with nonzero occupation (their occupations at a
@@ -998,7 +1011,7 @@ impl ScfModel for Scf201<'_> {
             };
             let k =
                 self.solver.solve_lowest(MatRef::from_row_major_slice(f, n, n), &mut self.eps[s], &mut self.c, need)?;
-            self.full[s] = self.solver.used_full();
+            self.kocc[s] = k;
             let mut cm = MatMut::from_row_major_slice_mut(&mut self.coef[s], n, n);
             cm.as_mut().subcols_mut(0, k).copy_from(self.c.as_ref().subcols(0, k));
             cm.subcols_mut(k, n - k).fill(0.0);

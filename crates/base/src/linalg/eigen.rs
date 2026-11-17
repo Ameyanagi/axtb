@@ -310,7 +310,7 @@ impl GenEigSolver {
     }
 
     /// Every eigenpair by the full solver, the full-solver path of
-    /// [`solve_lowest`](Self::solve_lowest) and [`solve_all_with`](Self::solve_all_with): below
+    /// [`solve_lowest`](Self::solve_lowest) and [`solve_rest`](Self::solve_rest): below
     /// [`LARGE`] rows [`solve`](Self::solve), from [`LARGE`] rows on faer's on the reduction by
     /// [`sygst`].
     fn solve_full_reduced(&mut self, f: MatRef<'_, f64>, eps: &mut [f64], c: &mut Mat<f64>) -> Result<()> {
@@ -346,21 +346,87 @@ impl GenEigSolver {
         self.last_full
     }
 
-    /// Every eigenpair, by the full solver (`full`) or by the path of `solve_lowest`: with the
-    /// method of an earlier [`solve_lowest`](Self::solve_lowest) call ([`used_full`](Self::used_full))
-    /// and the same `f`, the eigenvectors that call computed are reproduced (the orbitals of a
-    /// converged SCF with its virtual ones): bit for bit with faer; with a run-time library to
-    /// round-off (~1e-16), since `dormtr` blocks the back-transformation of n columns
-    /// differently from that of k (OpenBLAS, and MKL 2025 at 240 rows on one thread, as before
-    /// `dsygst`). Leaves the choice of the next `solve_lowest` call as it was.
-    pub fn solve_all_with(&mut self, f: MatRef<'_, f64>, eps: &mut [f64], c: &mut Mat<f64>, full: bool) -> Result<()> {
-        if full {
-            return self.solve_full_reduced(f, eps, c);
+    /// The eigenvectors k..n of `f` into columns k..n of `c`, after a
+    /// [`solve_lowest`](Self::solve_lowest) call on the same `f` that returned k < n with the
+    /// eigenvalues `eps`: the virtual orbitals of a converged SCF, computed once after it.
+    /// Columns 0..k of `c` and `eps` are not touched: they stay what that call gave (the SCF's
+    /// orbitals and levels). The path is that call's. On faer's: the same reduction and
+    /// tridiagonal form, and inverse iteration from the first member of the cluster of
+    /// eigenvalue k on (`tridiag::eigenvectors_from`), so that a cluster of both occupied and
+    /// virtual levels is orthogonalized in one sequence (its tridiagonal vectors below k are the
+    /// call's bit for bit), then the back-transformation of columns k..n alone. With a run-time
+    /// library: every eigenvector by the library, its columns k..n (its first k equal the
+    /// call's to round-off, ~1e-16). Should inverse iteration not converge, or the library
+    /// fail, columns k..n come from the full solver: orthogonal to columns 0..k to round-off,
+    /// except inside a set of degenerate levels that k splits. Leaves the choice of the next
+    /// `solve_lowest` call as it was.
+    pub fn solve_rest(&mut self, f: MatRef<'_, f64>, eps: &[f64], c: &mut Mat<f64>, k: usize) -> Result<()> {
+        use faer::linalg::evd::tridiag::tridiag_in_place;
+        use faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj;
+        let n = f.nrows();
+        if k >= n {
+            return Ok(());
         }
-        let (full_next, last_full) = (std::mem::replace(&mut self.full_next, false), self.last_full);
-        let r = self.solve_lowest(f, eps, c, |e| e.len());
-        (self.full_next, self.last_full) = (full_next, last_full);
-        r.map(|_| ())
+        let par = self.par;
+        if let Some((lib, eig)) = self.lapack.as_mut() {
+            let name = lib.name;
+            let mut w = vec![0.0; n];
+            match eig.solve_generalized(lib, threads_of(par), f, self.l.as_ref(), &mut w, |e| e.len()) {
+                Ok(_) => {
+                    let v = MatRef::from_column_major_slice(eig.vectors(n), n, n);
+                    c.as_mut().subcols_mut(k, n - k).copy_from(v.subcols(k, n - k));
+                    return Ok(());
+                }
+                // faer's path below
+                Err(e) => {
+                    self.lapack = None;
+                    self.lapack_not_used = Some(format!("after {name} failed: {e}"));
+                }
+            }
+        }
+        // every eigenpair by the full solver, columns k..n of them
+        let full = |solver: &mut Self, c: &mut Mat<f64>| -> Result<()> {
+            let (mut w, mut all) = (vec![0.0; n], Mat::zeros(n, n));
+            solver.solve_full_reduced(f, &mut w, &mut all)?;
+            c.as_mut().subcols_mut(k, n - k).copy_from(all.as_ref().subcols(k, n - k));
+            Ok(())
+        };
+        if n < 2 {
+            return full(self, c);
+        }
+        // A = L⁻¹ F L⁻ᵀ and its tridiagonal form, as in `solve_lowest` (below LARGE rows the
+        // reduction needs an n x n scratch matrix besides `work`: not `c`, whose first k columns
+        // stay)
+        let mut scratch = if n < LARGE { Mat::zeros(n, n) } else { Mat::new() };
+        let lw = Self::lowest_work(&mut self.lowest, n, par);
+        reduce(&mut lw.trid, f, self.l.as_ref(), &mut self.work, &mut scratch, par);
+        tridiag_in_place(
+            lw.trid.as_mut(),
+            lw.householder.as_mut(),
+            par,
+            MemStack::new(&mut lw.mem),
+            Default::default(),
+        );
+        let d: Vec<f64> = (0..n).map(|i| lw.trid[(i, i)]).collect();
+        let e: Vec<f64> = (0..n - 1).map(|i| lw.trid[(i + 1, i)]).collect();
+        let Ok((c0, mut z)) = tridiag::eigenvectors_from(&d, &e, &eps[..n], k, !matches!(par, Par::Seq)) else {
+            // inverse iteration did not converge
+            return full(self, c);
+        };
+        let m = n - k;
+        let mut zm = faer::MatMut::from_column_major_slice_mut(&mut z[(k - c0) * n..], n, m);
+        apply_block_householder_sequence_on_the_left_in_place_with_conj(
+            lw.trid.as_ref().submatrix(1, 0, n - 1, n - 1),
+            lw.householder.as_ref(),
+            faer::Conj::No,
+            zm.as_mut().subrows_mut(1, n - 1),
+            par,
+            MemStack::new(&mut lw.mem),
+        );
+        // C = L⁻ᵀ U for the columns k..n
+        solve_upper_triangular_in_place(self.l.transpose(), zm.as_mut(), par);
+        c.as_mut().subcols_mut(k, m).copy_from(zm.as_ref());
+        Ok(())
     }
 }
 
@@ -588,10 +654,75 @@ mod tests {
                     assert!((dot - if l == j { 1.0 } else { 0.0 }).abs() < 1e-11);
                 }
             }
-            let mut c3 = Mat::<f64>::zeros(n, n);
-            let full = solver.used_full();
-            solver.solve_all_with(f.as_ref(), &mut e2, &mut c3, full).unwrap();
+            // the rest: columns k..n, the first k untouched, every eigenpair S-orthonormal
+            let mut c3 = c2.clone();
+            solver.solve_rest(f.as_ref(), &e2, &mut c3, k).unwrap();
             assert_eq!(c2.as_ref().subcols(0, k), c3.as_ref().subcols(0, k));
+            check_eigenpairs(&f, &s, &e2, &c3, 1e-11);
+        }
+    }
+
+    /// Residuals |F c − ε S c| and the S-orthonormality of every column of `c`, below `tol`.
+    fn check_eigenpairs(f: &Mat<f64>, s: &Mat<f64>, eps: &[f64], c: &Mat<f64>, tol: f64) {
+        let n = c.ncols();
+        let (fc, sc) = (f * c, s * c);
+        for j in 0..n {
+            for i in 0..n {
+                assert!((fc[(i, j)] - eps[j] * sc[(i, j)]).abs() < tol, "residual of {j}");
+            }
+            for l in 0..n {
+                let dot: f64 = (0..n).map(|i| c[(i, l)] * sc[(i, j)]).sum();
+                assert!((dot - if l == j { 1.0 } else { 0.0 }).abs() < tol, "C^T S C ({l}, {j}): {dot}");
+            }
+        }
+    }
+
+    /// A degenerate pair of levels split by k (one occupied, one virtual; an open shell or a
+    /// half-filled level at 0 K): the vectors of `solve_rest` are orthogonal to `solve_lowest`'s,
+    /// on faer's reduction by triangular solves (40 rows) and by `sygst` (260), with and without
+    /// a cluster around the pair.
+    #[test]
+    fn the_rest_completes_a_degenerate_pair() {
+        let mut seed = 23u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
+        };
+        for &n in &[40usize, 260] {
+            for cluster in [false, true] {
+                // S = L Lᵀ and F = L Q diag(λ) Qᵀ Lᵀ: the generalized levels are λ, with
+                // λ_{k-1} = λ_k (and, with `cluster`, four more levels within 1e-6 of them)
+                let mut s = Mat::<f64>::zeros(n, n);
+                for i in 0..n {
+                    for j in 0..i {
+                        let w = 0.1 * rnd() / (1.0 + (i as f64 - j as f64).abs());
+                        s[(i, j)] = w;
+                        s[(j, i)] = w;
+                    }
+                    s[(i, i)] = 1.0;
+                }
+                let l = s.as_ref().llt(faer::Side::Lower).unwrap().L().to_owned();
+                let q = Mat::<f64>::from_fn(n, n, |_, _| rnd()).qr().compute_Q();
+                let k = n / 2;
+                let lambda: Vec<f64> = (0..n)
+                    .map(|i| match i {
+                        _ if i == k - 1 || i == k => 0.0,
+                        _ if cluster && (k - 3..k + 3).contains(&i) => 1e-7 * (i as f64 - k as f64),
+                        _ => 0.1 * (i as f64 - k as f64),
+                    })
+                    .collect();
+                let a = &q * Mat::<f64>::from_fn(n, n, |i, j| if i == j { lambda[i] } else { 0.0 }) * q.transpose();
+                let f0 = &l * a * l.transpose();
+                let f = Mat::<f64>::from_fn(n, n, |i, j| 0.5 * (f0[(i, j)] + f0[(j, i)]));
+                let mut solver = GenEigSolver::new(s.as_ref(), Par::Seq).unwrap();
+                solver.lapack = None;
+                let (mut e, mut c) = (vec![0.0; n], Mat::<f64>::zeros(n, n));
+                assert_eq!(solver.solve_lowest(f.as_ref(), &mut e, &mut c, |_| k).unwrap(), k);
+                let occupied = c.as_ref().subcols(0, k).to_owned();
+                solver.solve_rest(f.as_ref(), &e, &mut c, k).unwrap();
+                assert_eq!(c.as_ref().subcols(0, k), occupied);
+                check_eigenpairs(&f, &s, &e, &c, 1e-10);
+            }
         }
     }
 
@@ -675,15 +806,12 @@ mod tests {
         let (mut e2, mut c2) = (vec![0.0; n], Mat::<f64>::zeros(n, n));
         let k = solver.solve_lowest(f.as_ref(), &mut e2, &mut c2, |_| n / 2).unwrap();
         assert_eq!(k, n / 2);
-        // every eigenvector: the first k as solve_lowest's, to round-off (the library blocks the
-        // back-transformation of n columns differently from that of k)
-        let (mut e4, mut c4) = (vec![0.0; n], Mat::<f64>::zeros(n, n));
-        solver.solve_all_with(f.as_ref(), &mut e4, &mut c4, false).unwrap();
-        let d4 = (0..k)
-            .flat_map(|j| (0..n).map(move |i| (i, j)))
-            .fold(0.0f64, |m, (i, j)| m.max((c2[(i, j)] - c4[(i, j)]).abs()));
-        eprintln!("solve_all_with against solve_lowest: max |dC| {d4:e}");
-        assert!(d4 < 1e-12, "solve_all_with: {d4:e}");
+        // the rest: the first k columns untouched, every eigenpair S-orthonormal to round-off (the
+        // library's columns k..n come from a back-transformation of n columns)
+        let mut c4 = c2.clone();
+        solver.solve_rest(f.as_ref(), &e2, &mut c4, k).unwrap();
+        assert_eq!(c2.as_ref().subcols(0, k), c4.as_ref().subcols(0, k));
+        check_eigenpairs(&f, &s, &e2, &c4, 1e-11);
         solver.lapack = None;
         let (mut e3, mut c3) = (vec![0.0; n], Mat::<f64>::zeros(n, n));
         solver.solve(f.as_ref(), &mut e3, &mut c3).unwrap();
