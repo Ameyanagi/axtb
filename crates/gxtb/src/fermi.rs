@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //! Orbital occupations of g-xTB 2.0.1 at a finite electronic temperature (Fermi smearing,
 //! the program's `--etemp`), per spin channel, and the electronic entropy term −TS, on the rules
-//! of [`crate::occupations`].
+//! of [`crate::occupations`] and [`axtb_base::occupations`].
 //!
 //! - Program mode reproduces the 2.0.1 program (tblite's `get_fermi_filling` as compiled into
 //!   it; decoded from the binary, spec §4.17.1; [`occupations::fill_gxtb201`]): the 0 K Aufbau
@@ -14,16 +14,16 @@
 //!   tblite's ([`base::entropy_tblite`]). kB = 3.166808578545117e-6 Eh/K (xtb).
 //! - The default conventions fill the integer electron count of each channel with the exact
 //!   Fermi level (Newton steps safeguarded by bisection, to round-off;
-//!   [`occupations::fill_exact`]), so that the free energy E − TS is variational in the
+//!   [`base::fill_exact`]), so that the free energy E − TS is variational in the
 //!   occupations and its analytic derivatives need no occupation response; kB of CODATA 2022.
 //!
 //! The entropy term is −TS = kT Σ_σ Σ_i [f ln f + (1 − f) ln(1 − f)] (≤ 0), added to the
 //! electronic energy (the program spreads it over the atoms' electronic energies, so it enters
 //! the SCF energy, its convergence test and the total).
 
-use crate::occupations::{self, Fermismear, EXACT_MAX_STEPS, NEWTON_GXTB201};
+use crate::occupations::{self, Fermismear, NEWTON_GXTB201};
 use axtb::units::{reference::KB_XTB_TBLITE, KB_HARTREE};
-use axtb_base::occupations as base;
+use axtb_base::occupations::{self as base, EXACT_MAX_STEPS};
 
 /// Boltzmann constant (Eh/K): the program's in program mode, CODATA 2022 otherwise.
 pub fn boltzmann(program: bool) -> f64 {
@@ -55,8 +55,8 @@ pub fn fill_channel(nel: f64, kt: f64, emo: &[f64], program: bool) -> (Vec<f64>,
         let ts = base::entropy_tblite(&occ, kt);
         (occ, mu, ts)
     } else {
-        let mu = occupations::fill_exact(nel, kt, emo, &mut occ, EXACT_MAX_STEPS);
-        let ts = occupations::entropy_exact(emo, mu, kt);
+        let mu = base::fill_exact(nel, kt, emo, &mut occ, EXACT_MAX_STEPS);
+        let ts = base::entropy_exact(emo, mu, kt);
         (occ, Some(mu), ts)
     }
 }
@@ -83,8 +83,8 @@ pub fn fill_channel_v1_1(nel: usize, kt: f64, emo: &[f64], program: bool) -> (Ve
         let ts = occupations::entropy_thresholded(&occ, kt, ENTROPY_THR_V1_1);
         (occ, Some(ef), ts)
     } else {
-        let mu = occupations::fill_exact(nel as f64, kt, emo, &mut occ, occupations::EXACT_MAX_STEPS);
-        let ts = occupations::entropy_exact(emo, mu, kt);
+        let mu = base::fill_exact(nel as f64, kt, emo, &mut occ, EXACT_MAX_STEPS);
+        let ts = base::entropy_exact(emo, mu, kt);
         (occ, Some(mu), ts)
     }
 }

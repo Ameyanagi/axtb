@@ -7,6 +7,7 @@
 //! that avoids the eigenvectors of the whole spectrum (divide and conquer) and their
 //! back-transformation.
 
+use crate::math::dot8;
 use crate::{Error, Result};
 
 const EPS: f64 = f64::EPSILON * 0.5;
@@ -553,7 +554,7 @@ fn inverse_iteration(
         x.iter_mut().for_each(|v| *v *= scl);
         lu_solve(n, a, b, c, dd, piv, inv, tol, x);
         for zi in prev.chunks_exact(n) {
-            let ztr = dot(zi, x);
+            let ztr = dot8(zi, x);
             for (v, p) in x.iter_mut().zip(zi) {
                 *v -= ztr * p;
             }
@@ -566,7 +567,7 @@ fn inverse_iteration(
         if nrmchk < EXTRA + 1 {
             continue;
         }
-        let norm = dot(x, x).sqrt();
+        let norm = dot8(x, x).sqrt();
         let jmax = argmax_abs(x);
         let scl = if x[jmax] < 0.0 { -1.0 / norm } else { 1.0 / norm };
         for (zv, v) in out.iter_mut().zip(x.iter()) {
@@ -575,24 +576,6 @@ fn inverse_iteration(
         return Ok(());
     }
     Err(())
-}
-
-/// Dot product with eight partial sums in a fixed order (vectorizes; the result depends on
-/// the length alone).
-#[inline]
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    let m = a.len() / 8 * 8;
-    let mut acc = [0.0f64; 8];
-    for (x, y) in a[..m].as_chunks::<8>().0.iter().zip(b[..m].as_chunks::<8>().0) {
-        for i in 0..8 {
-            acc[i] += x[i] * y[i];
-        }
-    }
-    let mut s = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
-    for (x, y) in a[m..].iter().zip(&b[m..]) {
-        s += x * y;
-    }
-    s
 }
 
 #[inline]

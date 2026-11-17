@@ -36,7 +36,7 @@
 //! the Fermi-level shift normalized over the occupied rows, the overlap part dP^S and the
 //! diagonal correction of dW (n'_p e_p) dmu.
 
-use crate::dense::{dot, from_mat_sym, to_mat, to_mat_sym};
+use crate::dense::{from_mat_sym, to_mat, to_mat_sym};
 use crate::exchange::ResponseBase;
 use crate::fock::{add_charge_potential, add_potentials};
 use crate::krylov::{self, CgError};
@@ -44,6 +44,7 @@ use crate::scf::{ScfResult, Setup, State};
 use axtb::response::{occupied_count, MoSpace, OccupationResponse};
 use axtb::{Error, Result};
 use axtb_base::fd;
+use axtb_base::math::dot8;
 use faer::{Mat, Par};
 
 /// Orbitals, occupations and divided differences of one spin channel.
@@ -146,7 +147,7 @@ impl Setup {
         let pops = |p: &[f64]| -> Vec<f64> {
             let mut pop = vec![0.0; self.shells.len()];
             for mu in 0..n {
-                pop[self.basis.scf.ao2sh[mu]] += dot(&p[mu * n..(mu + 1) * n], &self.s[mu * n..(mu + 1) * n]);
+                pop[self.basis.scf.ao2sh[mu]] += dot8(&p[mu * n..(mu + 1) * n], &self.s[mu * n..(mu + 1) * n]);
             }
             pop
         };
@@ -159,10 +160,10 @@ impl Setup {
             let a = self.basis.scf.ao2at[mu];
             let row = &ptot[mu * n..(mu + 1) * n];
             for x in 0..3 {
-                dip[a][x] -= dot(row, &self.dpint[x][mu * n..(mu + 1) * n]);
+                dip[a][x] -= dot8(row, &self.dpint[x][mu * n..(mu + 1) * n]);
             }
             for c in 0..6 {
-                qp[a][c] -= dot(row, &self.qpint[c][mu * n..(mu + 1) * n]);
+                qp[a][c] -= dot8(row, &self.qpint[c][mu * n..(mu + 1) * n]);
             }
         }
         let mag = if dp.len() == 2 {

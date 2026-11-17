@@ -19,8 +19,8 @@
 //! (`crate::scf::Setup::delta_state`); GFN2-xTB's analysis (`axtb::scf`) sums columns with four
 //! accumulators.
 
-use crate::dense::dot_seq;
 use axtb::basis::Basis;
+use axtb_base::math::dot_seq;
 use axtb_base::threads;
 
 /// Mulliken shell populations of a (spin) density `p` with the overlap `s`, rows in parallel

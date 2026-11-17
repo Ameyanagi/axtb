@@ -33,7 +33,6 @@
 
 use crate::cn::gxtb_cn;
 use crate::coulomb::{AesCache, IsotropicCache};
-use crate::dense::dot;
 use crate::exchange::{bo_kernel, mfx_kernel, mfx_pair, Exchange, ResponseBase};
 use crate::explicit::STEP;
 use crate::fock::{add_charge_potential, add_potentials};
@@ -51,6 +50,7 @@ use axtb::scf::ScfVariables;
 use axtb::terms::{Chain, ChainLayout, Geometry, MomentTerm, Values};
 use axtb::{Molecule, Result};
 use axtb_base::fd;
+use axtb_base::math::dot8;
 use faer::{Accum, Mat, MatMut, MatRef, Par};
 
 /// The integral-free kernels of one geometry: coordination number, electrostatic, repulsion
@@ -741,11 +741,11 @@ impl<'a> Analytic<'a> {
             let (o, e) = (tan.off[a] * n, (tan.off[a] + tan.na[a]) * n);
             let (xa, ya) = (&xs[o..e], &ys[o..e]);
             for c in 0..3 {
-                h[3 * a + c] += dot(&self.rows.f_disp[a][c], xa) + dot(&tan.disp[a][c].s, ya);
+                h[3 * a + c] += dot8(&self.rows.f_disp[a][c], xa) + dot8(&tan.disp[a][c].s, ya);
             }
-            wq[a] = dot(&self.rows.f_qeff[a], xa) + dot(&tan.qeff[a].s, ya);
-            wq0[a] = dot(&tan.h_qeff0[a], xa);
-            wcn[a] = dot(&tan.h_cn[a], xa);
+            wq[a] = dot8(&self.rows.f_qeff[a], xa) + dot8(&tan.qeff[a].s, ya);
+            wq0[a] = dot8(&tan.h_qeff0[a], xa);
+            wcn[a] = dot8(&tan.h_cn[a], xa);
         }
         for a in 0..nat {
             let (jq, jq0, jc) = (

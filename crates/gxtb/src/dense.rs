@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-//! Dense row-major matrices and vectors of both g-xTB versions on faer: square matrix products,
-//! conversions between row-major vectors and faer matrices, and dot products in the two
-//! rounding orders the crate uses.
+//! Dense row-major matrices of both g-xTB versions on faer: square matrix products and
+//! conversions between row-major vectors and faer matrices. (The dot products in the two
+//! rounding orders the crate uses are `axtb_base::math`'s `dot8` and `dot_seq`.)
 //!
 //! g-xTB keeps its n x n AO matrices as row-major vectors; the response and Hessian code
 //! (2.0.1) and the AO/MO transforms of `axtb::response::MoSpace` work on faer matrices
@@ -60,29 +60,4 @@ pub fn to_mat_sym(n: usize, v: &[f64]) -> Mat<f64> {
         m.col_as_slice_mut(j).copy_from_slice(&v[j * n..(j + 1) * n]);
     }
     m
-}
-
-/// The sequential dot product `sum_k a_k b_k` (an iterator sum, from -0): the Mulliken
-/// analyses of both versions ([`crate::mulliken`]) and v1.1's Z-vector solver.
-#[inline]
-pub fn dot_seq(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-/// Dot product with eight partial sums (vectorizes; the order of a sequential sum does not):
-/// the 2.0.1 response and analytic Hessian.
-#[inline]
-pub fn dot(a: &[f64], b: &[f64]) -> f64 {
-    let mut acc = [0.0; 8];
-    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
-    for (x, y) in ca.iter().zip(cb) {
-        for k in 0..8 {
-            acc[k] += x[k] * y[k];
-        }
-    }
-    let mut s = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
-    for (x, y) in ra.iter().zip(rb) {
-        s += x * y;
-    }
-    s
 }
