@@ -3,7 +3,7 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
-## 0.2.0-alpha.1 (not released yet)
+## 0.2.0-alpha.1 (2026-11-17)
 
 The first alpha of 0.2. The Python package is new: axtb is a program of the qc* stack (qcdata
 0.24 and qccompute 0.23, both in alpha), with `axtb.compute`, `axtb.Session` and the program
