@@ -233,7 +233,7 @@ The response, for every front end (a field is present when it applies):
 |---|---|
 | `program`, `version`, `method`, `conventions`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the SCF's eigensolver (`faer` or the run-time LAPACK library) |
 | `energy`, `gradient`, `charges`, `dipole`, `terms`, `timings`, `seconds` | Eh, Eh/bohr (with `gradient`), atomic charges (Mulliken; GFN-FF: EEQ), e·bohr, energy terms (Eh), wall time per phase and of the request (s) |
-| `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB) |
+| `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `fermi_levels`, `electronic_temperature`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB; `fermi_levels`: alpha and beta, `null` for the Aufbau filling, the same level twice for a closed shell; `electronic_temperature`: K, 0 for the Aufbau filling) |
 | `n_hbonds`, `n_xbonds`, `topology` | GFN-FF |
 | `molden`, `molden_file` | Molden file |
 | `hessian`, `hessian_method`, `hessian_max_asymmetry`, `hessian_timings`, `dipole_derivatives` | Hessian |
@@ -596,7 +596,7 @@ cutoffs (1 bohr switches beyond the program's radii), and ends the SCF with one 
 whose Fock matrix is diagonalized unmixed (as g-xTB v1.1's programs do): its density is the
 result, the returned orbitals are the fresh eigenvectors of one Fock build, and the result is
 closer to self-consistency (energies move by up to 1e-7 Eh and gradients by up to 3.4e-5 Eh/bohr
-toward those of a tightly converged SCF; +1 iteration, +3-4 % time). The conventions alone
+toward those of a tightly converged SCF; +1 iteration, +2-4 % time on one thread, ~6 % on eight). The conventions alone
 differ by ≤ 3e-10 Eh for the small reference molecules and by ≤ 9e-10 Eh in the energy
 differences tested on them (2.3e-8 Eh for a 2 % expansion of C50H102); with the extra
 iteration the default conventions differ from the program by ≤ 1.4e-7 Eh for the small
@@ -841,6 +841,7 @@ and 2.0.1, the g-xTB part of the solvation composite):
 | Mayer–Wiberg bond orders (N x N), on request | `singlepoint(..., bond_orders=True)` → `bond_orders` | `--wbo` (`"bond_orders": true`) → `bond_orders` | keyword `bond_orders` → `extras['bond_orders']` | `Want::bond_orders` → `Electronic::bond_orders` |
 | orbital energies and occupations per spin | `orbital_energies_alpha/_beta`, `occupations_alpha/_beta` | the same | `wavefunction.scf_eigenvalues_a/b`, `scf_occupations_a/b`, `calcinfo_nbasis/nmo/nalpha/nbeta/natoms` | `Electronic::levels` |
 | HOMO–LUMO gap (Eh) | `homo_lumo_gap` | the same | `extras['homo_lumo_gap']` | `Electronic::homo_lumo_gap` |
+| Fermi levels of the alpha and beta electrons (Eh; `null` for the Aufbau filling) and the electronic temperature used (K; 0 for the Aufbau filling) | `fermi_levels`, `electronic_temperature` | the same | — | `Electronic::fermi_levels`, `Electronic::electronic_temperature` |
 | molecular quadrupole (xx, xy, yy, xz, yz, zz; e·bohr², about the origin) | `quadrupole` | the same | `extras['quadrupole']` | `Electronic::quadrupole` |
 
 qcdata has fields for the orbital levels but none for bond orders or quadrupoles. Bond orders cost

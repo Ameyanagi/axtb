@@ -90,6 +90,13 @@ pub struct Electronic {
     pub levels: Vec<OrbitalLevels>,
     /// HOMO–LUMO gap (Eh, the method's and conventions' rule); `None` without a LUMO.
     pub homo_lumo_gap: Option<f64>,
+    /// The Fermi levels (Eh) of the alpha and beta electrons; `None` where the occupations are
+    /// the Aufbau filling (at 0 K, and for a spin without electrons). A closed shell has the same
+    /// level in both.
+    pub fermi_levels: [Option<f64>; 2],
+    /// The electronic temperature (K) of the occupations; 0 where they are the Aufbau filling
+    /// (0 K, or GFN2-xTB's program conventions up to 0.1 K).
+    pub electronic_temperature: f64,
     /// The converged orbitals with their basis ([`Want::orbitals`](super::Want::orbitals)).
     pub orbitals: Option<Orbitals>,
     /// Mayer–Wiberg bond orders, N x N row-major ([`Want::bond_orders`](super::Want::bond_orders)).

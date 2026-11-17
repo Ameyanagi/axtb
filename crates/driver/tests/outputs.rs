@@ -40,6 +40,8 @@ fn numbers(r: &Response) -> Vec<(&'static str, Vec<u64>)> {
         ("occupations_alpha", bits(&s.occupations_alpha)),
         ("occupations_beta", bits(&s.occupations_beta)),
         ("homo_lumo_gap", bits(&[s.homo_lumo_gap.unwrap_or(f64::NAN)])),
+        ("fermi_levels", bits(&s.fermi_levels.map(|x| x.unwrap_or(f64::NAN)))),
+        ("electronic_temperature", bits(&[s.electronic_temperature])),
         ("iterations", vec![s.iterations as u64]),
     ]
 }
@@ -116,4 +118,42 @@ fn gxtb_outputs_change_no_number() {
         ..with(&caffeine, "gxtb-v2.0.1", "axtb")
     };
     check("gxtb-v2.0.1 composite caffeine", &composite);
+}
+
+/// The Fermi levels per spin and the electronic temperature used: `None` and 0 K for the Aufbau
+/// filling (g-xTB's default 0 K, GFN2-xTB at 0 K, and GFN2-xTB's program conventions up to
+/// 0.1 K), the same level twice for a closed shell, two levels for an open shell.
+#[test]
+fn fermi_levels_and_temperature() {
+    let water = structure("water.xyz");
+    let o2 = Request {
+        uhf: Some(2),
+        ..structure("../../crates/gxtb/tests/reference_v2/reference/dioxygen_triplet/mol.xyz")
+    };
+    let cu = Request { charge: 2.0, uhf: Some(1), ..structure("cu-nh3-4.xyz") };
+    let at = |req: &Request, etemp: Option<f64>| {
+        let s = run(&Request { etemp, ..req.clone() }).unwrap().scf.unwrap();
+        (s.fermi_levels, s.electronic_temperature)
+    };
+    let closed = |(f, t): ([Option<f64>; 2], f64), want: f64, label: &str| {
+        assert!(f[0].is_some() && f[0] == f[1], "{label}: {f:?}");
+        assert_eq!(t, want, "{label}");
+    };
+    let aufbau = |r: ([Option<f64>; 2], f64), label: &str| assert_eq!(r, ([None, None], 0.0), "{label}");
+    let open = |(f, t): ([Option<f64>; 2], f64), want: f64, label: &str| {
+        assert!(f[0].is_some() && f[1].is_some() && f[0] != f[1], "{label}: {f:?}");
+        assert_eq!(t, want, "{label}");
+    };
+    closed(at(&with(&water, "gfn2", "axtb"), None), 300.0, "gfn2 water (300 K)");
+    aufbau(at(&with(&water, "gfn2", "axtb"), Some(0.0)), "gfn2 water 0 K");
+    aufbau(at(&with(&water, "gfn2", "xtb"), Some(0.05)), "gfn2 xtb water 0.05 K");
+    closed(at(&with(&water, "gfn2", "xtb"), Some(0.5)), 0.5, "gfn2 xtb water 0.5 K");
+    open(at(&with(&o2, "gfn2", "axtb"), None), 300.0, "gfn2 O2 triplet");
+    for method in ["gxtb-v2.0.1", "gxtb-v1.1"] {
+        for conv in ["axtb", "gxtb"] {
+            aufbau(at(&with(&water, method, conv), None), &format!("{method} {conv} water (0 K)"));
+            closed(at(&with(&water, method, conv), Some(3000.0)), 3000.0, &format!("{method} {conv} water 3000 K"));
+            open(at(&with(&cu, method, conv), Some(3000.0)), 3000.0, &format!("{method} {conv} Cu doublet 3000 K"));
+        }
+    }
 }

@@ -329,6 +329,8 @@ impl Calculator {
                 quadrupole,
                 levels: sp.levels,
                 homo_lumo_gap: sp.homo_lumo_gap,
+                fermi_levels: sp.fermi_levels,
+                electronic_temperature: sp.electronic_temperature,
                 orbitals: sp.orbitals,
                 bond_orders: sp.bond_orders,
                 scf: ScfReport {

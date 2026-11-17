@@ -447,6 +447,8 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
                 .collect()
         }),
         homo_lumo_gap: e.homo_lumo_gap,
+        fermi_levels: e.fermi_levels,
+        electronic_temperature: e.electronic_temperature,
         quadrupole: e.quadrupole,
         shell_charges: e.shell_charges,
         atomic_dipoles: e.atomic_dipoles,

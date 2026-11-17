@@ -102,6 +102,11 @@ pub struct Scf {
     pub scf_attempts: Option<Vec<Attempt>>,
     /// HOMO-LUMO gap (Eh); `null` without a LUMO.
     pub homo_lumo_gap: Option<f64>,
+    /// Fermi levels (Eh) of the alpha and beta electrons; `null` where the occupations are the
+    /// Aufbau filling (0 K). A closed shell has the same level in both.
+    pub fermi_levels: [Option<f64>; 2],
+    /// Electronic temperature (K) of the occupations; 0 for the Aufbau filling.
+    pub electronic_temperature: f64,
     /// Molecular quadrupole about the origin (xx, xy, yy, xz, yz, zz; e bohr², traceless;
     /// tblite's form in the `tblite` and g-xTB 2.0.1 `gxtb` conventions).
     pub quadrupole: [f64; 6],

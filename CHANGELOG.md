@@ -5,6 +5,12 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- Every SCF result reports the Fermi levels of the alpha and beta electrons (`fermi_levels`, Eh;
+  `null` where the occupations are the Aufbau filling, the same level twice for a closed shell)
+  and the electronic temperature the occupations used (`electronic_temperature`, K; 0 for the
+  Aufbau filling, e.g. GFN2-xTB's program conventions up to 0.1 K). In Rust:
+  `Electronic::fermi_levels` and `Electronic::electronic_temperature`. New keys in the CLI's JSON
+  and Python's dict; nothing else changes.
 - g-xTB 2.0.1 in the axtb conventions ends its SCF with one unmixed iteration: once the
   program's convergence test is met after iteration k, the Fock matrix of P_k's state is
   diagonalized as built (not DIIS-mixed), and the resulting density P_{k+1} gives the charges,
@@ -12,8 +18,8 @@ Rust crates, the CLI and the Python package share one version.
   returned orbitals are then the fresh eigenvectors of one Fock build, and the results move toward
   those of a tightly converged SCF: on water, caffeine, taxol, ferrocene, [Cu(NH3)4]²⁺, [ZnCl4]²⁻
   and (H2O)100, energies by up to 9.7e-8 Eh (taxol), gradients by up to 3.4e-5 Eh/bohr, charges by
-  up to 2.4e-4, each closer to the `--acc 1e-4` result. One iteration more (9 → 10), about 3-4 %
-  more time for an energy and gradient. It applies wherever 2.0.1 runs in the axtb conventions
+  up to 2.4e-4, each closer to the `--acc 1e-4` result. One iteration more (9 → 10); an energy and
+  gradient takes 2-4 % more time on one thread and about 6 % more on eight (taxol, (H2O)200). It applies wherever 2.0.1 runs in the axtb conventions
   (single points, Hessians and their reference SCFs, restarts, the solvation composite's g-xTB
   part). The program conventions (`gxtb`) keep the program's ending, bit for bit.
 - Asking for an output changes no other number. In the axtb conventions GFN2-xTB's SCF

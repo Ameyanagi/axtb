@@ -8,6 +8,9 @@ and feature, a few thread counts and the run-time LAPACK path) and compare outpu
     scripts/golden.py compare DIR --report [--allow gxtb11]
                                                   the same, and for every case that differs the
                                                   largest change of each quantity
+    scripts/golden.py compare DIR --added KEYS    the same, with the response fields KEYS (comma-
+                                                  separated) new: ignored where the golden output
+                                                  lacks them (a commit that adds fields)
     scripts/golden.py list                        the cases
 
 Outputs are compared exactly (every float, every field) except the timing fields. Golden files
@@ -646,6 +649,30 @@ def report(gold, new, ladder=False):
     return {q: v for q, v in rows.items() if v != 0.0}, ok, review
 
 
+def drop_added(gold, new, keys):
+    """`new` without the response fields `keys` where the golden output lacks them (in each step of a
+    trajectory), and the names of the fields dropped."""
+    dropped = set()
+
+    def strip(g, n):
+        if not (isinstance(g, dict) and isinstance(n, dict)):
+            return n
+        out = {}
+        for k, v in n.items():
+            if k in keys and k not in g:
+                dropped.add(k)
+            else:
+                out[k] = v
+        return out
+
+    go, no = gold.get("output"), new.get("output")
+    if isinstance(go, list) and isinstance(no, list):
+        out = [strip(g, x) for g, x in zip(go, no)] + no[len(go):]
+    else:
+        out = strip(go, no)
+    return {**new, "output": out}, dropped
+
+
 def flatten(x):
     """All numbers of a nested list of numbers, or None."""
     out = []
@@ -670,6 +697,7 @@ def main():
     ap.add_argument("--only", default="", help="comma-separated case-name substrings")
     ap.add_argument("--report", action="store_true", help="summarize the changes of the --allow cases")
     ap.add_argument("--allow", default="gxtb11", help="comma-separated substrings of the cases that may change")
+    ap.add_argument("--added", default="", help="comma-separated response fields that are new (absent from DIR)")
     a = ap.parse_args()
     cases = corpus()
     if a.only:
@@ -707,10 +735,16 @@ def main():
         return
     failed, changed, over, review = 0, 0, 0, 0
     allowed = [k for k in a.allow.split(",") if k] if a.report else []
+    added = {k for k in a.added.split(",") if k}
+    added_seen = {}
     summary = []
     for name, req, env in cases:
         gold = json.loads((d / f"{name}.json").read_text())
         new = run(a.axtb, req, env, traj)
+        if added:
+            new, dropped = drop_added(gold, new, added)
+            for k in dropped:
+                added_seen[k] = added_seen.get(k, 0) + 1
         ds = diff(gold, new)
         if ds and any(k in name for k in allowed):
             changed += 1
@@ -746,6 +780,9 @@ def main():
               "largest changes:")
         for q, v in sorted(tot.items()):
             print(f"     {q}: {v:.3e}" if isinstance(v, float) else f"     {q}: {v}")
+    if added:
+        print("new fields, absent from the golden outputs and not compared: "
+              + (", ".join(f"{k} ({n} cases)" for k, n in sorted(added_seen.items())) or "none"))
     print(f"{len(cases) - failed - changed} of {len(cases)} identical, {changed} allowed changes, "
           f"{failed} other differences (binary {sha})")
     sys.exit(1 if failed or over else 3 if review else 0)

@@ -866,7 +866,8 @@ then the fresh eigenvectors of one Fock build, and the result is closer to self-
 water, caffeine, taxol, ferrocene, [Cu(NH3)4]²⁺, [ZnCl4]²⁻ and (H2O)100 the extra iteration
 moved energies by up to 9.7e-8 Eh (taxol), gradients by up to 3.4e-5 Eh/bohr and charges by up to
 2.4e-4, each toward the result of a tightly converged SCF (`--acc 1e-4`), for one more iteration
-(9 → 10; (H2O)100 8 → 9) and +3-4 % time (energy and gradient of taxol and (H2O)200). Parameter
+(9 → 10; (H2O)100 8 → 9): +2-4 % time on one thread, about +6 % on eight (energy and gradient
+of taxol and (H2O)200). Parameter
 literals (0.666666666, the `pa_rvdw_scale` defaults, 1.889725949 of the H0 radii, the smoothed
 √CN) are the method's and kept in both.
 

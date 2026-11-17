@@ -825,6 +825,8 @@ fn results(
             atomic_quadrupoles: qpat,
             levels,
             homo_lumo_gap,
+            fermi_levels: r.efermi,
+            electronic_temperature: if r.kt > 0.0 { opts.etemp } else { 0.0 },
             orbitals,
             bond_orders,
             scf: ScfReport {

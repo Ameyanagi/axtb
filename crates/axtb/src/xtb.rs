@@ -166,6 +166,10 @@ pub(crate) struct Gfn2Result {
     /// HOMO–LUMO gap (Eh; `crate::properties::homo_lumo_gap` with the method's and
     /// conventions' rule); `None` without a LUMO.
     pub homo_lumo_gap: Option<f64>,
+    /// Fermi levels (Eh) of the alpha and beta electrons, `None` for the Aufbau filling, and the
+    /// electronic temperature (K) of the occupations (0 for the Aufbau filling).
+    pub fermi_levels: [Option<f64>; 2],
+    pub electronic_temperature: f64,
     /// Mayer–Wiberg bond orders (N x N row-major, zero diagonal), when asked for (see
     /// `crate::properties`).
     pub bond_orders: Option<Vec<f64>>,
@@ -819,6 +823,8 @@ impl XtbModel {
                 orbitals,
                 levels,
                 homo_lumo_gap,
+                fermi_levels: efermi,
+                electronic_temperature: if kt > 0.0 { opts.etemp } else { 0.0 },
                 bond_orders,
                 guess: start_label,
                 eigensolver: solver.backend(),

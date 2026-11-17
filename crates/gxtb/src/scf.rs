@@ -24,8 +24,8 @@
 //!   charges, multipoles and density), is diagonalized as it is, not mixed, giving P_{k+1}, whose
 //!   charges, moments, energy and gradient are the result, as v1.1's programs end their SCFs. Its
 //!   orbitals are then the fresh eigenvectors of one Fock build (the returned Hamiltonian), and the
-//!   result is closer to self-consistency than the last DIIS step's: +1 iteration, +3-4 % time
-//!   (energy + gradient of taxol and (H2O)200), results moved by up to ~1e-7 Eh and 3.4e-5 Eh/bohr
+//!   result is closer to self-consistency than the last DIIS step's: +1 iteration, +2-4 % time
+//!   on one thread and ~6 % on eight (energy + gradient of taxol and (H2O)200), results moved by up to ~1e-7 Eh and 3.4e-5 Eh/bohr
 //!   toward those of a tightly converged SCF.
 
 use crate::basis::Basis;
