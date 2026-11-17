@@ -25,6 +25,8 @@ class Error(Exception):
     code: str
     message: str
     fields: dict[str, Any]
+    attempts: list[dict[str, Any]] | None
+    """The tries of an ``scf_retries`` ladder that did not converge, else None."""
 
 class Engine:
     """A session's calculator: the driver calculator of one request and one committed

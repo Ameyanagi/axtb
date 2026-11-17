@@ -49,7 +49,13 @@ _RECORD_SCHEMA: dict[str, Any] = {
                 "start": {"enum": ["eeq", "sad", "eeq-bc", "previous", "given"]},
                 "iterations": {"type": "integer"},
                 "mixer_used": {"type": "string"},
-                "attempts": {"type": "array", "items": {"type": "object"}},
+                "attempts": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "GFN2-xTB's mixer attempts; with scf.retries every try of the ladder (retry, "
+                    "etemp, max_iter, converged, iterations, start or error; the composite's part), in a failed "
+                    "output too.",
+                },
                 "restart_fallback": {
                     "type": "boolean",
                     "description": "Session frames: the SCF from history failed and ran again fresh.",
@@ -63,7 +69,8 @@ _RECORD_SCHEMA: dict[str, Any] = {
         },
         "contingent": {
             "type": "object",
-            "description": "Contingent settings and whether each fired (key -> {fired}).",
+            "description": "Contingent settings and whether each fired (key -> {fired}; scf.retries: and the "
+            "rung that gave the result, the composite's parts that climbed).",
             "additionalProperties": {"type": "object", "properties": {"fired": {"type": "boolean"}}},
         },
         "hessian": {

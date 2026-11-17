@@ -79,12 +79,54 @@ impl Serialize for Named {
     }
 }
 
-/// One SCF attempt (GFN2-xTB: mixer, iterations, converged).
-#[derive(Serialize, Clone, Debug, PartialEq)]
+/// One SCF attempt: GFN2-xTB's mixers (mixer, iterations, converged); with `scf_retries` every
+/// try of the ladder, with its rung (`retry`: 0 the calculation's own settings, i the i-th
+/// retry), electronic temperature (K), iteration limit and start (a converged try: where its SCF
+/// started), the part and whether it was the part's Hessian (the composite), and the error code
+/// of a failed try (`scf_not_converged`, `numerical_failure`). The fields a try does not have are
+/// left out.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
 pub struct Attempt {
-    pub mixer: &'static str,
-    pub iterations: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hessian: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub etemp: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iter: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mixer: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<usize>,
     pub converged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<&'static str>,
+}
+
+impl Attempt {
+    /// One of GFN2-xTB's mixer attempts.
+    pub(crate) fn mixer(a: &axtb::method::Attempt) -> Self {
+        Self { mixer: Some(a.mixer), iterations: Some(a.iterations), converged: a.converged, ..Self::default() }
+    }
+}
+
+/// How the SCF retry ladder of a request with `scf_retries` went.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Retried {
+    /// The rung that gave the result: 0 the calculation's own settings, i the i-th of the
+    /// retries (the composite: the highest of its parts').
+    pub rung: usize,
+    /// The retries given.
+    pub of: usize,
+    /// The rung's label (`retry i of n: etemp T K, max_iter N`); not for rung 0, nor for the
+    /// composite, whose parts have theirs (`retry`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// What every SCF method reports besides energy and charges.
@@ -97,7 +139,8 @@ pub struct Scf {
     /// GFN2-xTB: the mixer that produced the result (`broyden`, `diis`, `diis-fallback`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mixer_used: Option<&'static str>,
-    /// GFN2-xTB: every SCF attempt.
+    /// GFN2-xTB: every SCF attempt; with `scf_retries`, every try of the ladder (every
+    /// method; the composite: of every part).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scf_attempts: Option<Vec<Attempt>>,
     /// HOMO-LUMO gap (Eh); `null` without a LUMO.
@@ -395,6 +438,9 @@ pub struct Part {
     pub max_iter: usize,
     /// The retry that converged it, if any.
     pub retry: Option<String>,
+    /// With `scf_retries`: the index of that retry (0: the first try).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rung: Option<usize>,
     pub seconds: f64,
     /// The part's Hessian method (in `hessian_parts`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -491,6 +537,9 @@ pub struct Response {
     pub vibrations: Option<Vibrations>,
     #[serde(flatten)]
     pub composite: Option<Composite>,
+    /// With `scf_retries`: the rung that gave the result ([`crate::retry_warnings`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scf_retry: Option<Retried>,
     /// The orbitals with their basis (`Task::orbitals`), structured, for the Python binding (not
     /// in the CLI's JSON).
     #[serde(skip)]

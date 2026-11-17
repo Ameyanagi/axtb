@@ -299,6 +299,7 @@ def test_resolved_settings_reproduce_the_plan(method, conventions, calctype):
     {"conventions": "gxtb", "solvent": {"name": "toluene", "model": "gbsa", "correction": "gfn2"}},
     {"conventions": "gxtb", "solvent": {"name": "water", "correction": "gfn2", "correction_conventions": "axtb"}},
     {"scf": {"etemp": 1000}, "solvent": {"name": "water", "correction": "gfn2"}},
+    {"scf": {"etemp": 1000, "retries": [{"etemp": 3000}]}, "solvent": {"name": "water", "correction": "gfn2"}},
 ])
 @pytest.mark.parametrize("method", ["gxtb-v1.1", "gxtb-v2.0.1"])
 def test_composite_resolved(method, keywords, session):
@@ -360,6 +361,20 @@ def test_driver_request_holds_only_what_was_given():
     assert (p.request["guess"], p.request["restart"]) == ("sad", "previous")
     p = plan(inp("gxtb-v2.0.1", "gradient", {"scf": {"restart": "previous"}}), session=True)
     assert p.request["restart"] == "previous"
+
+
+@pytest.mark.parametrize("method", SCF)
+def test_retries_resolved_and_requested(method):
+    kw = {"scf": {"retries": [{"etemp": 1000, "max_iter": 1000}, {"max_iter": 500}]}}
+    p = plan(inp(method, "gradient", kw))
+    assert p.settings["scf"]["retries"] == [{"etemp": 1000.0, "max_iter": 1000}, {"max_iter": 500}]
+    assert p.request["scf_retries"] == p.settings["scf"]["retries"]
+    assert "scf.retries" in p.record["contingent"]
+    assert plan(inp(method, "gradient", p.settings)).settings == p.settings
+    # a reused plan's rungs are copies
+    p.settings["scf"]["retries"][0]["etemp"] = 5.0
+    assert plan(inp(method, "gradient", kw)).settings["scf"]["retries"][0]["etemp"] == 1000.0
+    assert "retries" not in plan(inp(method, "gradient")).settings["scf"]
 
 
 def test_gfnff_topology_and_accuracy():

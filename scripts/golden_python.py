@@ -23,7 +23,10 @@ Compared exactly (numpy's array_equal on float64; JSON floats read back exactly)
   energy and each contribution;
 - orbital energies and occupations, atomic dipoles, atomic quadrupoles (unpacked) where the
   output has the wavefunction;
-- errors: the qcdata kind of the CLI's kind, and the message of an error of the driver.
+- the SCF attempts (GFN2-xTB's mixers; every try of ``scf.retries``) against ``record.scf.attempts``,
+  and the rung that gave the result against ``record.contingent["scf.retries"]``;
+- errors: the qcdata kind of the CLI's kind, the message of an error of the driver, and the tries of
+  an ``scf.retries`` ladder that failed.
 
 ``--quick`` runs the water and caffeine cases (CI). ``--interleave`` also runs every trajectory
 pair as two lineages alternating in one session, which must equal the sequential frames. Exit
@@ -150,6 +153,10 @@ def compare_results(o, res, rec, method, conventions):
     if "atomic_dipoles" in o and res.atomic_dipoles is not None:
         same("atomic_dipoles", res.atomic_dipoles, o["atomic_dipoles"])
         same("atomic_quadrupoles", res.atomic_quadrupoles, [unpack(q) for q in o["atomic_quadrupoles"]])
+    if "scf_attempts" in o and rec.get("scf", {}).get("attempts") != o["scf_attempts"]:
+        raise Diff(f"attempts: {rec.get('scf', {}).get('attempts')} vs {o['scf_attempts']}")
+    if "scf_retry" in o and rec["contingent"]["scf.retries"]["rung"] != o["scf_retry"]["rung"]:
+        raise Diff(f"rung: {rec['contingent']['scf.retries']} vs {o['scf_retry']}")
 
 
 def compare_error(gold_error, exc):
@@ -161,6 +168,10 @@ def compare_error(gold_error, exc):
     driver = exc.output is not None and exc.output.resolved is not None
     if driver and exc.error.message != gold_error["message"]:
         raise Diff(f"error message: {exc.error.message!r} vs {gold_error['message']!r}")
+    if "attempts" in gold_error:
+        rec = exc.output.record if exc.output is not None else exc.frame.record
+        if rec.get("scf", {}).get("attempts") != gold_error["attempts"]:
+            raise Diff(f"error attempts: {rec.get('scf', {}).get('attempts')} vs {gold_error['attempts']}")
     return "driver" if driver else f"planning: {exc.error.code}"
 
 

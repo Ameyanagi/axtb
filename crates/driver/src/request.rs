@@ -21,6 +21,21 @@ impl Temperatures {
     }
 }
 
+/// One rung of an SCF retry ladder (`scf_retries`): a fresh SCF with another electronic
+/// temperature (K) or iteration limit; a missing value keeps the calculation's.
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ScfRetry {
+    pub etemp: Option<f64>,
+    pub max_iter: Option<usize>,
+}
+
+impl From<ScfRetry> for axtb::method::Retry {
+    fn from(r: ScfRetry) -> Self {
+        Self { etemp: r.etemp, max_iter: r.max_iter }
+    }
+}
+
 /// A calculation: the molecule, the method and its settings, and what to compute. Unknown
 /// fields are refused, and so are settings that do not apply to the method (see
 /// [`crate::run`]); `None` (or a missing field) means the method's default. Units: bohr,
@@ -54,6 +69,11 @@ pub struct Request {
     pub etemp: Option<f64>,
     /// SCF iteration limit (SCF methods; default: GFN2-xTB and g-xTB 2.0.1 250, g-xTB v1.1 1000).
     pub max_iter: Option<usize>,
+    /// SCF retries (SCF methods; default none): after an SCF that fails (does not converge, or
+    /// breaks down), a fresh SCF at each rung in order until one converges. With `etemp`, no
+    /// rung may go below it. The g-xTB solvation composite: they replace its built-in ladders,
+    /// for each part.
+    pub scf_retries: Option<Vec<ScfRetry>>,
     /// Threads (default 1; at least 1).
     pub threads: Option<usize>,
     /// `false` leaves out the dispersion (GFN2-xTB only, for validation).

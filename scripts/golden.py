@@ -328,6 +328,23 @@ def corpus():
     # 100 leaves both rungs a margin there (the warm start would converge after 181 iterations with
     # 803e316 and 144 at C10, on a state 0.0099 Eh lower; the fresh start converges after 56 and 61)
     add("traj-gxtb11-water-stretch-retry", jump, method="gxtb-v1.1", accuracy=1e-4, max_iter=100, gradient=True)
+    # scf_retries, mepd's ladder (1000 K, then 3000 K, each with 1000 iterations): water at 3 Å, whose SCF at the
+    # calculation's own settings does not converge within max_iter and does on the first rung, in each method; a
+    # gradient, a Hessian (whole at the rung, with its single point), a trajectory (water, then the stretched water
+    # twice: the second frame tries the own settings first, from the rung's state), the composite (every part on the
+    # rung, the single point after the Hessian starting there) and every rung failing
+    ladder = [{"etemp": 1000.0, "max_iter": 1000}, {"etemp": 3000.0, "max_iter": 1000}]
+    retry_traj = {**w, "trajectory": [w["positions"], h3w, h3w], "guess": "previous"}
+    for name, method, kw in (("gfn2", "gfn2", {"accuracy": 1e-4, "max_iter": 30}),
+                             ("gxtb2", "gxtb-v2.0.1", {"accuracy": 1e-2, "max_iter": 20}),
+                             ("gxtb11", "gxtb-v1.1", {"accuracy": 1e-4, "max_iter": 30})):
+        add(f"{name}-h2o-3a-retries", h3, method=method, gradient=True, scf_retries=ladder, **kw)
+        add(f"{name}-h2o-3a-retries-hessian", h3, method=method, hessian=True, scf_retries=ladder, **kw)
+        add(f"traj-{name}-water-stretch-retries", retry_traj, method=method, gradient=True, scf_retries=ladder, **kw)
+    add("gxtb2-h2o-3a-composite-retries-hessian", h3, method="gxtb-v2.0.1", accuracy=1e-2, max_iter=20, hessian=True,
+        scf_retries=ladder, **comp)
+    add("error-gfn2-h2o-3a-retries", h3, method="gfn2", accuracy=1e-4, max_iter=30, gradient=True,
+        scf_retries=[{"max_iter": 31}, {"max_iter": 32}])
     return c
 
 
@@ -437,7 +454,10 @@ THRESHOLDS = {
 # with max_iter 200 the two builds agree to 6e-13.
 LADDER_CASES = ("traj-gxtb11-water-stretch-retry", "traj-gxtb2-water-stretch-retry",
                 "traj-gxtb2-water-stretch-retry-hessian", "traj-gfn2-water-stretch-retry",
-                "traj-gfn2-water-stretch-retry-hessian")
+                "traj-gfn2-water-stretch-retry-hessian") + tuple(
+    f"{p}{m}{c}" for m in ("gfn2", "gxtb2", "gxtb11")
+    for p, c in (("", "-h2o-3a-retries"), ("", "-h2o-3a-retries-hessian"), ("traj-", "-water-stretch-retries"))
+) + ("gxtb2-h2o-3a-composite-retries-hessian", "error-gfn2-h2o-3a-retries")
 LADDER_THRESHOLDS = {
     "energy": 1e-10, "gradient": 1e-7, "charges": 2e-5, "shell_charges": 2e-5, "atomic_dipoles": 1e-4,
     "dipole": 1e-4, "atomic_quadrupoles": 2e-4, "quadrupole": 2e-4, "terms": 1e-5, "orbital_energies_alpha": 1e-5,

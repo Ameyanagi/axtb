@@ -134,6 +134,69 @@ alone. A misfit, or a given result with nothing usable, is refused before the ca
 frame given back reproduces its result within the accuracy estimate in at most 3 iterations
 (measured: 2-3, from 9-12).
 
+## SCF retries
+
+`scf.retries` (default none) is a ladder of rungs tried in order after a calculation whose SCF
+fails: it does not converge within `scf.max_iter`, or breaks down (a failed mixer, a lost Fermi
+level). Each rung `{"etemp": K, "max_iter": n}` runs the calculation again as a fresh SCF from the
+method's own start with those settings; a missing key keeps the calculation's value. It applies
+to GFN2-xTB and g-xTB (both versions, every conventions) and the solvation composite; GFN-FF has
+no SCF (`no_effect`). mepd's ladders, for example:
+
+```python
+keywords = {"scf": {"retries": [{"etemp": 1000, "max_iter": 1000}, {"etemp": 3000, "max_iter": 1000}]}}
+# GFN2-xTB in solvent, the first try at the defaults
+keywords = {"solvent": {"name": "water"},
+            "scf": {"retries": [{"etemp": 1000, "max_iter": 1000}, {"max_iter": 1000},
+                                {"etemp": 5000, "max_iter": 1000}]}}
+```
+
+- **Inside each try** the method does what it does without a ladder: GFN2-xTB's Broyden-then-DIIS
+  fallback in the axtb conventions, and in a session an SCF from history that does not converge
+  runs once more fresh (`record.scf.restart_fallback`). The rungs come after that.
+- **A ladder that does not fire changes no number**, and a result from a rung is the calculation
+  at that rung's settings, bit for bit (both are a fresh SCF with the same settings). The
+  composite's single point after its Hessian is the exception: it starts its GFN2 parts fresh at
+  the rung, not from their Hessians' references, so it agrees within the SCF thresholds (its
+  Hessian is bit for bit).
+- **The floor.** With `scf.etemp` the ladder starts at that temperature, and a rung below it is
+  refused (`no_effect`, path `scf.retries[i].etemp`), so a path never drops below its floor.
+- **Hessians** run whole at one rung. When a try fails anywhere (the reference SCF, a displaced
+  SCF of a numerical Hessian, the response of an analytic one), the whole Hessian and the single
+  point of its output run again at the next rung. Every SCF of a result is at the rung that
+  converged, and no displacement climbs alone. A Hessian whose reference converges but one of
+  whose displaced or perturbed SCFs fails has no result at the reference's settings; rerunning it
+  whole at the next rung gives one Hessian at one temperature instead of an error to retry by
+  hand. The composite's own retries already climb its parts' Hessians whole.
+- **Sessions.** A request starts from its lineage's history as usual; when that fails, a fresh SCF
+  at the calculation's own settings, then the rungs. A frame from a rung commits normally: its
+  state is the next frame's history, and the next frame tries the calculation's own settings
+  first. To keep a lineage at a rung's temperature, set `scf.etemp` on its later inputs (it is
+  in the key, so those results are stored and reused like any other).
+- **The composite.** A given ladder replaces the built-in retries (the g-xTB part's at 1000 and
+  3000 K, the GFN2 pair's three rungs) for every part: the g-xTB part and the GFN2 pair each climb
+  the rungs in order after their first try (a missing key: the part's own value). The single point
+  after a composite Hessian starts each part at the rung its Hessian converged on.
+  `record.composite.definition` shows `retries: false` and the ladder (`scf_retries`), and each
+  part its `rung` and `retry` label. Without `scf.retries` the composite is unchanged.
+- **The record.** `resolved.settings.scf.retries` echoes the ladder (it is part of the input's
+  key). `record.contingent["scf.retries"]` says whether a rung gave the result and which (`rung`:
+  0 the calculation's own settings, i the i-th rung; the composite: the highest of its parts' and
+  the `parts` that climbed). `record.scf.attempts` lists every try: `retry` (its rung), `etemp`,
+  `max_iter`, `converged`, `iterations`; a converged try its `start` (GFN2-xTB: one entry per mixer,
+  with `mixer`), a failed one its `error` code (`scf_not_converged`, `numerical_failure`); the
+  composite's tries carry their `part`, and `hessian` for its Hessian's. Every rung starts from the
+  method's own start. A result from a rung has the warning `scf_retry`, e.g. "converged on retry 2
+  of 2: etemp 3000 K, max_iter 1000" (the composite one per part: "the gxtb part converged on
+  ...").
+- **When every rung fails**, the error is the last rung's: kind `convergence`, code
+  `scf_not_converged`, `details` with the last rung's `iterations`, `energy_change` and
+  `residual`, and the failed output's (or frame's) `record.scf.attempts` lists every try. A last
+  rung whose SCF broke down raises `numerical_failure` instead.
+
+The CLI takes the ladder as `--scf-retry etemp=1000,max_iter=1000`, repeated, and the JSON
+request as `scf_retries`.
+
 ## Keywords
 
 `ProgramInput.keywords` hold axtb's settings, grouped as qcdata's conventions say
@@ -170,6 +233,7 @@ raises (kind `input`):
 | `conventions` | axtb |  | axtb | G2, X1, X2, XC, FF | EGH | Whose numbers to reproduce: axtb (CODATA 2022, fixes), or a reference program: GFN2-xTB xtb-6.8.0, xtb-6.7.1, tblite-0.8.0; g-xTB gxtb-1.1.0, gxtb-2.0.1; GFN-FF xtb-6.8.0, xtb-6.7.1 (aliases xtb, tblite, gxtb). |
 | `scf.max_iter` | shared |  | GFN2-xTB, g-xTB 2.0.1 250; v1.1 1000 | G2, X1, X2, XC | EGH | Iteration limit of one SCF. |
 | `scf.etemp` | axtb | K | GFN2-xTB 300; g-xTB 0; the composite each part's (g-xTB 0, GFN2 300; not echoed) | G2, X1, X2, XC | EGH | Electronic temperature of the Fermi smearing; given for the composite, it sets every part (and turns off the g-xTB part's retries at 1000 and 3000 K). |
+| `scf.retries` | axtb |  | none | G2, X1, X2, XC | EGH | SCF retry ladder: after a calculation whose SCF fails, a fresh SCF at each rung in order until one converges; a rung is {"etemp": K, "max_iter": n}, either key optional (missing: the calculation's). No rung below a given scf.etemp. A Hessian runs whole at one rung. A result from a rung has the warning scf_retry (contingent). The composite: replaces its built-in retries, for every part. |
 | `scf.mixer` | axtb |  | axtb conventions broyden-then-diis; the programs' broyden | G2, XC | EGH | Mixer of GFN2-xTB's SCF (and of the composite's GFN2 parts): broyden-then-diis falls back to DIIS when Broyden fails (contingent). |
 | `scf.guess` | shared |  | GFN2-xTB eeq (tblite-0.8.0 sad); g-xTB eeq-bc | G2, X1, X2 | EGH | Where an SCF without history starts: GFN2-xTB eeq (charges) or sad (neutral atoms), g-xTB eeq-bc; given: from the input's given wavefunction. |
 | `scf.restart` | axtb |  | previous; g-xTB in its program's conventions off | G2, X1, X2, XC | EGH | Sessions: whether an SCF starts from its lineage's history (previous) or fresh (off). |
@@ -216,7 +280,7 @@ raises (kind `input`):
 
 | field | axtb |
 |---|---|
-| `energy`, `gradient`, `hessian` | Eh, Eh/bohr (n_atoms x 3), Eh/bohr² (3N x 3N), as the calctype asks |
+| `energy`, `gradient`, `hessian` | Eh, Eh/bohr (n_atoms x 3), Eh/bohr² (3N x 3N), as the calctype asks; the Hessian is the full Cartesian second derivative, symmetrized and never projected: translations and rotations are projected out only in `vibrational_analysis` |
 | `energy_components` | the energy's pieces, which add up to the energy (GFN2-xTB: `repulsion`, `dispersion`, `isotropic_es`, `third_order`, `anisotropic`, `entropy`, `solvation`, `band`; g-xTB's and GFN-FF's own terms; the composite's `solvation_correction`); the subtotal `electronic`, which overlaps them, is in `record.energy_subtotals` |
 | `dipole_moment`, `quadrupole_moment` | e·bohr; e·bohr², the traceless (Buckingham) tensor about the origin of the input's coordinates, in every conventions |
 | `atomic_charges`, `atomic_charges_kind` | Mulliken charges (`mulliken`); GFN-FF's EEQ charges (`eeq`) |
@@ -248,9 +312,9 @@ applied, `resolved.reasons` why (`threads`: the keyword, the grant, or the plan)
 |---|---|
 | `method`, `conventions`, `numerics` | the canonical method and conventions, the numerics identity ([Numerics](#numerics)) |
 | `eigensolver` | `faer`, or the run-time LAPACK library (`AXTB_LAPACK`) |
-| `scf` | `start` (`eeq`, `sad`, `eeq-bc`, `previous`, `given`), `iterations`, `mixer_used` and `attempts` (GFN2-xTB's ladder), `restart_fallback` (a session's SCF from history failed and ran again fresh) |
+| `scf` | `start` (`eeq`, `sad`, `eeq-bc`, `previous`, `given`), `iterations`, `mixer_used` and `attempts` (GFN2-xTB's mixers; with `scf.retries` every try of the ladder, [SCF retries](#scf-retries), in a failed output too), `restart_fallback` (a session's SCF from history failed and ran again fresh) |
 | `energy_subtotals` | terms that overlap the energy components (the electronic energy) |
-| `contingent` | contingent settings and whether each fired (`scf.mixer`, `composite.retries`) |
+| `contingent` | contingent settings and whether each fired (`scf.mixer`, `scf.retries` with its `rung`, `composite.retries`, `scf.restart`, a session's `hessian.*` and `freq.*`) |
 | `accuracy` | with a target: the target, the thresholds used and the model's estimate at them |
 | `hessian` | the Hessian's method and largest asymmetry before symmetrization |
 | `composite` | the solvation composite: its definition, the energies of its parts and their SCFs (`wavefunction.part` names the part the orbitals are) |
@@ -261,7 +325,8 @@ applied, `resolved.reasons` why (`threads`: the keyword, the grant, or the plan)
 ### Warnings
 
 `warnings` are `qcdata.ProgramWarning`s with a code: `resource_capped` (the `threads` keyword
-above the grant), `accuracy_limited` (a target below what axtb's thresholds reach),
+above the grant), `accuracy_limited` (a target below what axtb's thresholds reach), `scf_retry`
+(a result from a rung of `scf.retries`, naming the rung's settings),
 `orbitals_omitted` (no Fermi level for qcdata's `Orbitals`), `eigensolver_fallback`
 (`AXTB_LAPACK` was set, but faer solved). Settings problems are errors, not warnings, and axtb
 writes no text in process (`logs` is None).
@@ -282,7 +347,7 @@ the driver's:
 | `input` | `topology_failed` | a structure GFN-FF cannot set up |
 | `input` | `session_closed` | a request to a closed session |
 | `unsupported` | `unsupported_calctype`, `unsupported_setting`, `not_applicable` | a calctype, shared setting or output axtb does not have |
-| `convergence` | `scf_not_converged` | the SCF did not converge (`details`: `iterations`, `energy_change`, `residual`) |
+| `convergence` | `scf_not_converged` | the SCF did not converge (`details`: `iterations`, `energy_change`, `residual`; with `scf.retries` every rung failed, the details are the last rung's and `record.scf.attempts` lists every try) |
 | `numerical` | `numerical_failure` | a numerical failure (a singular matrix, a failed eigensolver) |
 | `internal` | `panic` | a bug: please report it (a session closes) |
 

@@ -6,13 +6,13 @@ use crate::error::{Error, Result};
 use crate::names::{self, Method};
 use crate::request::Request;
 use crate::response::{
-    self, Attempt, Composite, Details, Gfnff, HessianPart, Matrix, Named, Part, Parts, Response, Scf, Topology,
-    Vibrations,
+    self, Attempt, Composite, Details, Gfnff, HessianPart, Matrix, Named, Part, Parts, Response, Retried, Scf,
+    Topology, Vibrations,
 };
 use crate::task::Task;
 use axtb::method::{
-    Fingerprint, HessianOptions, Method as MethodTrait, Restart, ScfData, ScfSettings, SinglePoint, TermKind, Want,
-    WavefunctionData,
+    Fingerprint, HessianOptions, Method as MethodTrait, Restart, Retry, RetryLadder, RetryOn, Rung, ScfData,
+    ScfSettings, SinglePoint, TermKind, Try, Want, WavefunctionData,
 };
 use axtb::ToMolden;
 use std::time::Instant;
@@ -23,6 +23,14 @@ pub use axtb::method::Wavefunction;
 /// settings, built from a [`Request`]: [`Calculator::compute`] runs a [`Task`] at any
 /// geometry and starts each SCF from the previous geometry's wavefunction (as the method's
 /// conventions or the request's `guess` say).
+///
+/// With `scf_retries`, a calculation that fails (an SCF that does not converge or breaks down)
+/// runs again at each rung in order, each from the method's own start, until one succeeds: the
+/// whole calculation, so that a Hessian (its reference and every displaced or perturbed SCF) and
+/// the single point of its response come from one rung. The g-xTB solvation composite climbs
+/// them per part instead ([`axtb_gxtb::CompositeOptions::scf_retries`]). Afterwards the method has
+/// its own settings again, and the wavefunction of the rung that converged is the next SCF's
+/// history (a session still tries its own settings first).
 pub struct Calculator {
     method: Box<dyn MethodTrait>,
     kind: Method,
@@ -32,7 +40,15 @@ pub struct Calculator {
     charge: f64,
     uhf: Option<usize>,
     threads: usize,
+    /// The `scf_retries` the calculator climbs itself (empty: none, or the composite's own).
+    retries: Vec<Retry>,
+    /// How many `scf_retries` the request gave (the composite's included).
+    given_retries: usize,
 }
+
+/// A calculation's Hessian and single point, and with `scf_retries` the rung that gave them
+/// and every try.
+type Climbed = (Option<axtb::Hessian>, SinglePoint, Option<(Retried, Vec<Attempt>)>);
 
 fn input(msg: impl Into<String>) -> Error {
     Error::Input(msg.into())
@@ -93,6 +109,10 @@ impl Calculator {
         }
         if req.max_iter == Some(0) {
             return Err(input("max_iter must be at least 1"));
+        }
+        let retries: Vec<Retry> = req.scf_retries.iter().flatten().map(|&r| r.into()).collect();
+        if req.scf_retries.is_some() && kind != Method::Gfnff {
+            Retry::check(&retries, req.etemp)?;
         }
         if kind != Method::Gfnff && (req.fragment_charges.is_some() || req.topology_positions.is_some()) {
             return Err(input("fragment_charges and topology_positions are GFN-FF settings"));
@@ -166,12 +186,13 @@ impl Calculator {
                 if req.accuracy.is_some()
                     || req.etemp.is_some()
                     || req.max_iter.is_some()
+                    || req.scf_retries.is_some()
                     || req.mixer.is_some()
                     || req.guess.is_some()
                     || req.restart.is_some()
                     || req.scf_trace
                 {
-                    bad.push("SCF settings (accuracy, etemp, max_iter, mixer, guess, restart, scf_trace)");
+                    bad.push("SCF settings (accuracy, etemp, max_iter, scf_retries, mixer, guess, restart, scf_trace)");
                 }
                 refuse(kind, &bad)?;
                 let conventions = names::gfnff_conventions(req.conventions.as_deref().unwrap_or("axtb"))?;
@@ -192,8 +213,21 @@ impl Calculator {
             }
             Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_method(req, kind, threads, uhf, guess, restart)?,
         };
-        let numerics = crate::numerics(kind, kind.is_gxtb() && req.solvation_correction.is_some());
-        Ok(Self { method, kind, numerics, numbers: req.numbers.clone(), charge: req.charge, uhf, threads })
+        let composite = kind.is_gxtb() && req.solvation_correction.is_some();
+        let numerics = crate::numerics(kind, composite);
+        let given_retries = retries.len();
+        let retries = if composite { Vec::new() } else { retries };
+        Ok(Self {
+            method,
+            kind,
+            numerics,
+            numbers: req.numbers.clone(),
+            charge: req.charge,
+            uhf,
+            threads,
+            retries,
+            given_retries,
+        })
     }
 
     /// The method.
@@ -242,8 +276,14 @@ impl Calculator {
             task.hessian.as_ref().map(|h| HessianOptions { method: h.method, step: h.step, accuracy: h.accuracy });
         task.check(self.method.info())?;
         self.method.check(&want, hessian.as_ref())?;
-        let hessian = hessian.map(|o| self.method.hessian(positions, &o)).transpose()?;
-        let sp = self.method.singlepoint(positions, &want)?;
+        let (hessian, sp, retried) = if !self.retries.is_empty() {
+            self.climb(positions, &want, hessian.as_ref())?
+        } else if self.given_retries > 0 {
+            self.composite_tries(positions, &want, hessian.as_ref())?
+        } else {
+            let hessian = hessian.map(|o| self.method.hessian(positions, &o)).transpose()?;
+            (hessian, self.method.singlepoint(positions, &want)?, None)
+        };
         let info = self.method.info();
         let mut out = Response {
             program: response::PROGRAM,
@@ -253,7 +293,13 @@ impl Calculator {
             numerics: self.numerics.clone(),
             ..Default::default()
         };
-        let orbitals = fill(&mut out, sp, hessian);
+        let orbitals = fill(&mut out, sp, hessian, self.given_retries > 0);
+        if let Some((retried, attempts)) = retried {
+            out.scf_retry = Some(retried);
+            if let Some(s) = out.scf.as_mut() {
+                s.scf_attempts = Some(attempts);
+            }
+        }
         check_finite(&out)?;
         if let Some(m) = &task.molden {
             let orbitals =
@@ -284,6 +330,92 @@ impl Calculator {
         }
         out.seconds = Some(t0.elapsed().as_secs_f64());
         Ok(out)
+    }
+
+    /// The electronic temperature (K) and iteration limit of `s` for this method, its defaults
+    /// where `s` has none.
+    fn effective(&self, s: &ScfSettings) -> (f64, usize) {
+        let (etemp, max_iter) = match self.kind {
+            Method::Gfn2 => (axtb::ETEMP, axtb::MAX_ITER),
+            Method::GxtbV1_1 => (axtb_gxtb::composite::GXTB_ETEMP, axtb_gxtb::options::MAX_ITER_V1_1),
+            Method::GxtbV2_0_1 => (axtb_gxtb::composite::GXTB_ETEMP, axtb_gxtb::scf::MAX_ITER),
+            Method::Gfnff => (0.0, 0),
+        };
+        (s.etemp.unwrap_or(etemp), s.max_iter.unwrap_or(max_iter))
+    }
+
+    /// The calculation of `compute` on the `scf_retries` ladder: the Hessian (if any) and the
+    /// single point at the method's own settings, then at each rung from the method's own start
+    /// until both succeed; returns them with the rung and every try.
+    fn climb(&mut self, positions: &[[f64; 3]], want: &Want, hessian: Option<&HessianOptions>) -> Result<Climbed> {
+        let base = self.method.scf_settings().cloned().expect("an SCF method has SCF settings");
+        let first = self.effective(&base);
+        let mut rungs = vec![Rung::default()];
+        rungs.extend(Retry::rungs(first, &self.retries));
+        let ladder = RetryLadder { rungs, on: RetryOn::Failed };
+        let mut attempts = Vec::new();
+        let m: &mut dyn MethodTrait = self.method.as_mut();
+        let r = ladder.climb_methods(&mut [m], 0, |_, m, i, rung| {
+            let (etemp, max_iter) = (rung.etemp.unwrap_or(first.0), rung.max_iter.unwrap_or(first.1));
+            let tried = Attempt { retry: Some(i), etemp: Some(etemp), max_iter: Some(max_iter), ..Attempt::default() };
+            let r = hessian
+                .map(|o| m.hessian(positions, o))
+                .transpose()
+                .and_then(|h| Ok((h, m.singlepoint(positions, want)?)));
+            match &r {
+                Ok((_, sp)) => {
+                    let scf = sp.scf().expect("an SCF method's single point has its SCF");
+                    let one = Attempt { start: Some(scf.start), ..tried };
+                    if scf.attempts.is_empty() {
+                        attempts.push(Attempt {
+                            mixer: scf.mixer_used,
+                            iterations: Some(scf.iterations),
+                            converged: true,
+                            ..one
+                        });
+                    } else {
+                        attempts.extend(scf.attempts.iter().map(|a| Attempt {
+                            retry: one.retry,
+                            etemp: one.etemp,
+                            max_iter: one.max_iter,
+                            start: one.start,
+                            ..Attempt::mixer(a)
+                        }));
+                    }
+                }
+                Err(e) => attempts.push(failed_try(tried, e)),
+            }
+            r
+        });
+        match r {
+            Ok((mut v, i)) => {
+                let (h, sp) = v.pop().expect("one method's result");
+                let label = ladder.rungs[i].label.clone();
+                Ok((h, sp, Some((Retried { rung: i, of: self.given_retries, label }, attempts))))
+            }
+            Err(e) => Err(with_attempts(e.into(), attempts)),
+        }
+    }
+
+    /// The calculation of `compute` with the composite's own `scf_retries` ladders: every try of
+    /// its parts (its Hessian's, then its single point's), and the highest rung of a part.
+    fn composite_tries(
+        &mut self,
+        positions: &[[f64; 3]],
+        want: &Want,
+        hessian: Option<&HessianOptions>,
+    ) -> Result<Climbed> {
+        let mut attempts = Vec::new();
+        let h = hessian.map(|o| self.method.hessian(positions, o)).transpose();
+        if hessian.is_some() {
+            attempts.extend(self.method.tries().iter().map(|t| Attempt { hessian: Some(true), ..try_attempt(t) }));
+        }
+        let h = h.map_err(|e| with_attempts(e.into(), attempts.clone()))?;
+        let sp = self.method.singlepoint(positions, want);
+        attempts.extend(self.method.tries().iter().map(try_attempt));
+        let sp = sp.map_err(|e| with_attempts(e.into(), attempts.clone()))?;
+        let rung = attempts.iter().filter(|a| a.converged).filter_map(|a| a.retry).max().unwrap_or(0);
+        Ok((h, sp, Some((Retried { rung, of: self.given_retries, label: None }, attempts))))
     }
 
     /// The converged wavefunction of the last SCF (`None` before the first, after an error and
@@ -407,6 +539,7 @@ fn gxtb_method(
         };
         o.correction_conventions = req.correction_conventions.as_deref().map(names::gfn2_conventions).transpose()?;
         o.mixer = req.mixer.as_deref().map(names::mixer).transpose()?;
+        o.scf_retries = req.scf_retries.as_ref().map(|r| r.iter().map(|&x| x.into()).collect());
         return Ok(Box::new(axtb_gxtb::CompositeCalculator::new(&req.numbers, &req.positions, req.charge, uhf, o)?));
     }
     if req.alpb.is_some() || req.gbsa.is_some() || req.solvation_state.is_some() || req.correction_conventions.is_some()
@@ -448,12 +581,54 @@ fn hessian_part(h: axtb::Hessian) -> HessianPart {
     }
 }
 
+/// The attempt of a failed try `tried`: its error's iterations and code.
+fn failed_try(tried: Attempt, e: &axtb::Error) -> Attempt {
+    let iterations = match e {
+        axtb::Error::ScfNotConverged { iterations, .. } => Some(*iterations),
+        _ => None,
+    };
+    Attempt { iterations, converged: false, error: Some(Error::from(e.clone()).code()), ..tried }
+}
+
+/// A composite's try as an attempt.
+fn try_attempt(t: &Try) -> Attempt {
+    let tried = Attempt {
+        part: t.part,
+        retry: Some(t.rung),
+        etemp: Some(t.etemp),
+        max_iter: Some(t.max_iter),
+        start: t.start,
+        mixer: t.mixer,
+        ..Attempt::default()
+    };
+    match &t.error {
+        None => Attempt { iterations: t.iterations, converged: true, ..tried },
+        Some(e) => failed_try(tried, e),
+    }
+}
+
+/// `e` with the tries of a ladder (an SCF that did not converge carries them).
+fn with_attempts(e: Error, attempts: Vec<Attempt>) -> Error {
+    match e {
+        Error::ScfNotConverged { iterations, energy_change, residual, .. } => {
+            Error::ScfNotConverged { iterations, energy_change, residual, attempts }
+        }
+        other => other,
+    }
+}
+
 /// Fill a single point and its Hessian into `out`: the energy, gradient, charges, dipole,
 /// terms and timings of every method, the SCF group of an SCF method, GFN-FF's and a
-/// composite's groups; returns the orbitals (when kept).
-fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>) -> Option<axtb::Orbitals> {
+/// composite's groups (`rungs`: with each part's rung on its `scf_retries`); returns the
+/// orbitals (when kept).
+fn fill(
+    out: &mut Response,
+    mut sp: SinglePoint,
+    hessian: Option<axtb::Hessian>,
+    rungs: bool,
+) -> Option<axtb::Orbitals> {
     if let Some(report) = sp.extras.composite.take() {
-        out.composite = Some(composite_response(*report, hessian.as_ref().map(|h| h.parts.as_slice())));
+        out.composite = Some(composite_response(*report, hessian.as_ref().map(|h| h.parts.as_slice()), rungs));
     }
     if let Some(g) = sp.extras.gfnff.take() {
         let t = g.topology;
@@ -491,12 +666,7 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
         iterations: s.iterations,
         guess: s.start,
         mixer_used: s.mixer_used,
-        scf_attempts: (!s.attempts.is_empty()).then(|| {
-            s.attempts
-                .iter()
-                .map(|a| Attempt { mixer: a.mixer, iterations: a.iterations, converged: a.converged })
-                .collect()
-        }),
+        scf_attempts: (!s.attempts.is_empty()).then(|| s.attempts.iter().map(Attempt::mixer).collect()),
         homo_lumo_gap: e.homo_lumo_gap,
         fermi_levels: e.fermi_levels,
         electronic_temperature: e.electronic_temperature,
@@ -538,8 +708,12 @@ fn check_finite(out: &Response) -> Result<()> {
 }
 
 /// A composite's report as the response's `composite` group (`hessian`: the parts of its
-/// Hessian).
-fn composite_response(r: axtb::method::CompositeReport, hessian: Option<&[axtb::method::PartReport]>) -> Composite {
+/// Hessian; `rungs`: with each part's rung on its `scf_retries`).
+fn composite_response(
+    r: axtb::method::CompositeReport,
+    hessian: Option<&[axtb::method::PartReport]>,
+    rungs: bool,
+) -> Composite {
     let part = |p: &axtb::method::PartReport| {
         let scf = p.scf.as_ref();
         let attempts = scf.map_or(&[][..], |s| &s.attempts[..]);
@@ -549,13 +723,11 @@ fn composite_response(r: axtb::method::CompositeReport, hessian: Option<&[axtb::
             energy: p.energy,
             iterations: scf.map_or(0, |s| s.iterations),
             mixer_used: scf.and_then(|s| s.mixer_used),
-            scf_attempts: attempts
-                .iter()
-                .map(|a| Attempt { mixer: a.mixer, iterations: a.iterations, converged: a.converged })
-                .collect(),
+            scf_attempts: attempts.iter().map(Attempt::mixer).collect(),
             etemp: p.etemp,
             max_iter: p.max_iter,
             retry: p.retry.clone(),
+            rung: rungs.then_some(p.rung),
             seconds: p.seconds,
             hessian_method: p.hessian_method.map(names::hessian_method_label),
         };

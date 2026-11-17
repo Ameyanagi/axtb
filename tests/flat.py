@@ -40,6 +40,7 @@ KEYWORD = {
     "conventions": "conventions",
     "etemp": "scf.etemp",
     "max_iter": "scf.max_iter",
+    "scf_retries": "scf.retries",
     "mixer": "scf.mixer",
     "restart": "scf.restart",
     "solvation_state": "solvent.state",
