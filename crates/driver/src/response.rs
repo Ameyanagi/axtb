@@ -135,6 +135,22 @@ pub struct Scf {
     /// shell, alpha and beta for an open shell; when asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hamiltonian: Option<Vec<Matrix>>,
+    /// For the Python binding (not in the CLI's JSON): the electrons of each atom outside the
+    /// valence-only orbitals; Mulliken shell populations (electrons) with each shell's atom,
+    /// angular momentum and reference occupation; the traceless (Buckingham) molecular quadrupole
+    /// in every conventions.
+    #[serde(skip)]
+    pub core_electrons: Vec<usize>,
+    #[serde(skip)]
+    pub shell_populations: Vec<f64>,
+    #[serde(skip)]
+    pub shell_atoms: Vec<usize>,
+    #[serde(skip)]
+    pub shell_angular_momenta: Vec<usize>,
+    #[serde(skip)]
+    pub reference_shell_occupations: Vec<f64>,
+    #[serde(skip)]
+    pub quadrupole_traceless: [f64; 6],
 }
 
 /// The GFN-FF topology (0-based atom indices).
@@ -249,6 +265,14 @@ pub struct Thermo {
     pub n_modes: usize,
     pub n_inverted: usize,
     pub n_dropped: usize,
+    /// For the Python binding (not in the CLI's JSON): the imaginary frequencies (cm⁻¹) inverted
+    /// and left out, and the average moment of inertia B_av (kg m²) of the rotor interpolation.
+    #[serde(skip)]
+    pub inverted_frequencies: Vec<f64>,
+    #[serde(skip)]
+    pub dropped_frequencies: Vec<f64>,
+    #[serde(skip)]
+    pub average_moment: f64,
     pub zpve: f64,
     pub pressure: f64,
     pub rotor_cutoff: f64,
@@ -295,6 +319,9 @@ impl Vibrations {
             n_modes: t.n_modes,
             n_inverted: t.n_inverted,
             n_dropped: t.n_dropped,
+            inverted_frequencies: t.inverted_frequencies.clone(),
+            dropped_frequencies: t.dropped_frequencies.clone(),
+            average_moment: t.average_moment,
             zpve: t.zpve,
             pressure: t.pressure,
             rotor_cutoff: t.rotor_cutoff,
@@ -464,6 +491,10 @@ pub struct Response {
     pub vibrations: Option<Vibrations>,
     #[serde(flatten)]
     pub composite: Option<Composite>,
+    /// The orbitals with their basis (`Task::orbitals`), structured, for the Python binding (not
+    /// in the CLI's JSON).
+    #[serde(skip)]
+    pub orbitals: Option<axtb::Orbitals>,
     /// Wall time per phase of the single point (s).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timings: Option<Named>,

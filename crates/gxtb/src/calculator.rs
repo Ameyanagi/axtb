@@ -818,6 +818,10 @@ fn results(
     let (dpat, qpat) = (r.state.dip.clone(), r.state.qp.clone());
     let positions = &setup.mol.positions;
     let v1 = setup.model.version == Version::V1_1;
+    let shell_populations = setup.shell_populations(&setup.total_density_ref(&r.state.p));
+    let shell_atoms: Vec<usize> = setup.shells.iter().map(|&(a, _, _)| a).collect();
+    let core_electrons = axtb::method::core_electrons(&setup.mol.numbers, &shell_atoms, &setup.ref_occ)
+        .expect("g-xTB's reference occupations are whole electrons per atom to 1e-6");
     let sp = SinglePoint {
         energy: r.energies.total,
         terms: r.energies.terms(),
@@ -836,6 +840,18 @@ fn results(
             bond_orders,
             overlap: (want.overlap || want.hamiltonian).then(|| setup.s.clone()),
             hamiltonian: r.hamiltonian.take(),
+            shell_populations,
+            shell_angular_momenta: setup.shells.iter().map(|&(_, _, l)| l).collect(),
+            shell_atoms,
+            reference_shell_occupations: setup.ref_occ.clone(),
+            core_electrons,
+            quadrupole_traceless: molecular_quadrupole(
+                positions,
+                &r.atom_charges,
+                &r.state.dip,
+                &r.state.qp,
+                QuadrupoleForm::Traceless,
+            ),
             scf: ScfReport {
                 iterations: r.iterations,
                 start,

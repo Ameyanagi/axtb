@@ -223,7 +223,7 @@ impl Calculator {
         }
         let want = Want {
             gradient: task.gradient || task.hessian.is_some(),
-            orbitals: task.molden.is_some(),
+            orbitals: task.molden.is_some() || task.orbitals,
             bond_orders: task.bond_orders,
             overlap: task.overlap,
             hamiltonian: task.hamiltonian,
@@ -246,7 +246,8 @@ impl Calculator {
         let orbitals = fill(&mut out, sp, hessian);
         check_finite(&out)?;
         if let Some(m) = &task.molden {
-            let orbitals = orbitals.ok_or_else(|| Error::Numerical("the calculation returned no orbitals".into()))?;
+            let orbitals =
+                orbitals.as_ref().ok_or_else(|| Error::Numerical("the calculation returned no orbitals".into()))?;
             let title = format!("axtb {} {}", response::VERSION, self.kind);
             let text = orbitals.to_molden(m.functions, &title)?;
             if let Some(path) = &m.file {
@@ -254,6 +255,9 @@ impl Calculator {
             }
             out.molden_file = m.file.clone();
             out.molden = m.text.then_some(text);
+        }
+        if task.orbitals {
+            out.orbitals = orbitals;
         }
         if let (Some(h), Some(hp)) = (&task.hessian, &out.hessian) {
             if let Some(v) = &h.vibrations {
@@ -472,6 +476,12 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
         bond_orders: e.bond_orders.map(|bo| Matrix { rows: nat, cols: nat, data: bo }),
         overlap: e.overlap.map(Matrix::square),
         hamiltonian: e.hamiltonian.map(|h| h.into_iter().map(Matrix::square).collect()),
+        core_electrons: e.core_electrons,
+        shell_populations: e.shell_populations,
+        shell_atoms: e.shell_atoms,
+        shell_angular_momenta: e.shell_angular_momenta,
+        reference_shell_occupations: e.reference_shell_occupations,
+        quadrupole_traceless: e.quadrupole_traceless,
     });
     e.orbitals
 }

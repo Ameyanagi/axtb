@@ -30,7 +30,8 @@ mod wavefunction;
 
 pub use composite::{Composite, CompositeReport, Correction, Detail, Guard, Part, PartReport};
 pub use results::{
-    Attempt, Electronic, Extras, GfnffReport, GfnffTopology, Hessian, ScfReport, SinglePoint, Term, TermKind,
+    core_electrons, Attempt, Electronic, Extras, GfnffReport, GfnffTopology, Hessian, ScfReport, SinglePoint, Term,
+    TermKind,
 };
 pub use retry::{RetryLadder, RetryOn, Rung};
 pub use settings::{Restart, ScfSettings};

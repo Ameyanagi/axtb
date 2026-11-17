@@ -184,6 +184,9 @@ pub(crate) struct Gfn2Result {
     /// for both spins): n x n row-major, when asked for.
     pub overlap: Option<Vec<f64>>,
     pub hamiltonian: Option<Vec<f64>>,
+    /// Mulliken shell populations Σ_{μ∈shell} (P S)_μμ and the reference shell occupations.
+    pub shell_populations: Vec<f64>,
+    pub reference_shell_occupations: Vec<f64>,
     /// Where the SCF started: `"previous"` (a given wavefunction, usually the previous
     /// geometry's), or the method's own start: `"eeq"` (GFN2-xTB: EEQ charges), `"sad"` (neutral
     /// atoms, also when the EEQ charges cannot be computed), `"eeq-bc"` (g-xTB: the program's
@@ -645,6 +648,7 @@ impl XtbModel {
         let Gfn2Scf {
             geo,
             ints,
+            n0sh,
             mut solver,
             fock,
             mut coeff,
@@ -796,6 +800,11 @@ impl XtbModel {
                 crate::properties::mayer_bond_orders(nat, &bas.ao2at, s, &[pa.as_ref(), pb.as_ref()], par)
             }
         });
+        let mut shell_populations = vec![0.0; nsh];
+        for mu in 0..nao {
+            shell_populations[bas.ao2sh[mu]] +=
+                axtb_base::math::dot_seq(density.col_as_slice(mu), ints.overlap.col_as_slice(mu));
+        }
         let row_major = |m: &Mat<f64>| (0..m.nrows()).flat_map(|i| (0..m.ncols()).map(move |j| m[(i, j)])).collect();
         let overlap = opts.keep_overlap.then(|| row_major(&ints.overlap));
         let hamiltonian = opts.keep_hamiltonian.then(|| row_major(&fock));
@@ -842,6 +851,8 @@ impl XtbModel {
                 bond_orders,
                 overlap,
                 hamiltonian,
+                shell_populations,
+                reference_shell_occupations: n0sh,
                 guess: start_label,
                 eigensolver: solver.backend(),
             },

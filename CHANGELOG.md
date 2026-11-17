@@ -5,6 +5,18 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- For the Python binding (in Rust and the driver's response, not in the CLI's JSON): the
+  orbitals with their basis, structured, without Molden text (`Task::orbitals`,
+  `Response::orbitals`); per atom the core electrons outside the valence-only orbitals, Z less
+  the reference shell occupations (`Electronic::core_electrons`; Zn: 28 in GFN2-xTB and g-xTB);
+  Mulliken shell populations Σ(P S) of the total density with each shell's atom, angular
+  momentum and reference occupation (`Electronic::shell_populations`, `shell_atoms`,
+  `shell_angular_momenta`, `reference_shell_occupations`); the traceless (Buckingham) molecular
+  quadrupole in every conventions beside the conventions' form (`quadrupole_traceless`); the
+  thermochemistry's average moment of inertia B_av (kg m²) and the imaginary frequencies it
+  inverts and leaves out (`Thermo::average_moment`, `inverted_frequencies`,
+  `dropped_frequencies`). `axtb_base::method::core_electrons`, `units::ELECTRON_MASS_KG`. No
+  number and no CLI output changes.
 - GFN2-xTB's energy terms partition the energy: a new piece `band`, the band energy Tr(H0 P),
   which xtb reports only inside the electronic energy, so that the pieces (every term but the
   subtotal `electronic`) add up to the energy, as g-xTB's and GFN-FF's do. `dispersion` and

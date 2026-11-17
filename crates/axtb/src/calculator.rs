@@ -315,6 +315,19 @@ impl Calculator {
         let form = self.info.quadrupole.unwrap_or_default();
         let quadrupole =
             crate::properties::molecular_quadrupole(&self.mol.positions, &sp.qat, &sp.dpat, &sp.qpat, form);
+        let quadrupole_traceless = crate::properties::molecular_quadrupole(
+            &self.mol.positions,
+            &sp.qat,
+            &sp.dpat,
+            &sp.qpat,
+            QuadrupoleForm::Traceless,
+        );
+        let bas = &self.model.basis;
+        let shell_angular_momenta =
+            (0..self.mol.nat()).flat_map(|a| bas.cgto[self.mol.id[a]][..bas.nsh_at[a]].iter().map(|c| c.l)).collect();
+        let core_electrons =
+            crate::method::core_electrons(&self.mol.numbers, &bas.sh2at, &sp.reference_shell_occupations)
+                .expect("GFN2-xTB's reference occupations are whole electrons per atom");
         let attempts = sp.scf_attempts.iter().map(|a| Attempt {
             mixer: a.mixer.label(),
             iterations: a.iterations,
@@ -339,6 +352,12 @@ impl Calculator {
                 bond_orders: sp.bond_orders,
                 overlap: sp.overlap,
                 hamiltonian: sp.hamiltonian.map(|h| vec![h]),
+                shell_populations: sp.shell_populations,
+                shell_atoms: bas.sh2at.clone(),
+                shell_angular_momenta,
+                reference_shell_occupations: sp.reference_shell_occupations,
+                core_electrons,
+                quadrupole_traceless,
                 scf: ScfReport {
                     iterations: sp.iterations,
                     start: sp.guess,

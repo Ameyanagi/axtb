@@ -111,7 +111,44 @@ pub struct Electronic {
     /// closed shell, alpha and beta for an open shell)
     /// ([`Want::hamiltonian`](super::Want::hamiltonian)).
     pub hamiltonian: Option<Vec<Vec<f64>>>,
+    /// Mulliken shell populations Σ_{μ∈shell} (P S)_μμ of the total density (electrons), with
+    /// the atom and angular momentum of each shell and the reference shell occupations the shell
+    /// charges are relative to (charge = reference − population), in the order of the basis'
+    /// shells.
+    pub shell_populations: Vec<f64>,
+    pub shell_atoms: Vec<usize>,
+    pub shell_angular_momenta: Vec<usize>,
+    pub reference_shell_occupations: Vec<f64>,
+    /// The electrons of each atom outside the valence-only orbitals: Z less the reference
+    /// occupations of its shells ([`core_electrons`]; Zn: 28 in GFN2-xTB and g-xTB).
+    pub core_electrons: Vec<usize>,
+    /// The molecular quadrupole about the origin as the traceless (Buckingham) tensor
+    /// Θ = Σ_A [θ_A + 3/2 (q r r + r d + d r) − 1/2 (q r² + 2 r·d) 1] (xx, xy, yy, xz, yz, zz; e
+    /// bohr²) in every conventions; equal to `quadrupole` where that is the traceless form.
+    pub quadrupole_traceless: [f64; 6],
     pub scf: ScfReport,
+}
+
+/// The core electrons of each atom of the atomic numbers `numbers`: Z less the reference
+/// occupations `reference` of its shells (`shell_atoms`: the atom of each shell), which must be
+/// an integer to 1e-6 (a numerical error otherwise).
+pub fn core_electrons(numbers: &[usize], shell_atoms: &[usize], reference: &[f64]) -> crate::Result<Vec<usize>> {
+    let mut valence = vec![0.0; numbers.len()];
+    for (&a, &n) in shell_atoms.iter().zip(reference) {
+        valence[a] += n;
+    }
+    numbers
+        .iter()
+        .zip(&valence)
+        .map(|(&z, &v)| {
+            let core = z as f64 - v;
+            if (core - core.round()).abs() <= 1e-6 && core.round() >= 0.0 {
+                Ok(core.round() as usize)
+            } else {
+                Err(crate::Error::Numerical(format!("Z = {z} less {v} valence electrons is not a core electron count")))
+            }
+        })
+        .collect()
 }
 
 /// How the SCF of a single point went.

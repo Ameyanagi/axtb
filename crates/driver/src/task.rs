@@ -113,6 +113,9 @@ pub struct Task {
     pub bond_orders: bool,
     pub overlap: bool,
     pub hamiltonian: bool,
+    /// The orbitals with their basis, structured in the response (`Response::orbitals`; no
+    /// Molden text): for the Python binding.
+    pub orbitals: bool,
 }
 
 impl Task {
@@ -173,6 +176,7 @@ impl Task {
             bond_orders: req.bond_orders,
             overlap: req.overlap,
             hamiltonian: req.hamiltonian,
+            orbitals: false,
         })
     }
 
