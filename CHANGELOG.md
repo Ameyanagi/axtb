@@ -5,6 +5,54 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+### SCF retries
+
+- `scf.retries` (Python), `scf_retries` (the JSON request), `--scf-retry etemp=K,max_iter=N` (the
+  CLI, repeated): an opt-in ladder of rungs `{etemp, max_iter}` (either key optional; a missing one
+  keeps the calculation's value) for GFN2-xTB and g-xTB, both versions, every conventions. After
+  a calculation whose SCF fails (does not converge, or breaks down), each rung runs it again as a
+  fresh SCF from the method's own start, in order, until one converges. Default none: nothing
+  changes without it. GFN-FF refuses it (`no_effect`).
+  - A ladder that does not fire changes no number; a result from a rung is the calculation at the
+    rung's settings, bit for bit.
+  - The floor: with `scf.etemp` the ladder starts there, and a rung below it is refused
+    (`no_effect`, `scf.retries[i].etemp`).
+  - Hessians run whole at one rung: a try that fails anywhere (the reference SCF, a displaced
+    SCF, the response) reruns the whole Hessian and its single point at the next rung, so no
+    rung mixes temperatures inside one Hessian and no displacement climbs alone. (A displacement
+    that fails at the reference's settings moves the Hessian to the next rung rather than failing
+    it: one Hessian at one temperature instead of an error to retry by hand.)
+  - Sessions: a request starts from history as usual, then fresh at its own settings
+    (`restart_fallback`), then the rungs; a frame from a rung commits, and the next frame tries the
+    calculation's own settings first. A sticky floor is `scf.etemp` on later inputs.
+  - The composite: a given ladder replaces the built-in retries (`GXTB_RETRIES`, `PAIR_RETRIES`)
+    for every part, each part group climbing it after its first try; the single point after a
+    composite Hessian starts each part at its Hessian's rung. Without it the composite is
+    unchanged, bit for bit.
+  - Recording: `resolved.settings.scf.retries` echoes the ladder (it is in the key);
+    `record.contingent["scf.retries"]` has `fired` and the `rung` (the composite: and the `parts`
+    that climbed); `record.scf.attempts` lists every try (`retry`, `etemp`, `max_iter`,
+    `converged`, `iterations`, `start` or `error`; the composite's `part`), in failed outputs and
+    frames too; the warning `scf_retry` names the rung ("converged on retry 2 of 2: etemp 3000 K,
+    max_iter 1000"), per part for the composite. The response's `scf_retry` (`rung`, `of`, `label`)
+    and `scf_attempts`; the CLI prints the warning on stderr.
+  - When every rung fails: kind `convergence`, code `scf_not_converged`, the last rung's
+    `iterations`, `energy_change` and `residual`, and every try (`attempts` of the CLI's JSON
+    error, `record.scf.attempts` in Python). A last rung whose SCF broke down is
+    `numerical_failure`.
+- Rust: axtb-base `method::Retry` (`check`, `rungs`), `method::Try`, `Rung::apply`,
+  `RetryLadder::climb_methods` (the composite's rung machinery, shared), `Method::tries`,
+  `Composite::with_pinned_rungs` and `PartReport::rung`; axtb-gxtb
+  `CompositeOptions::scf_retries`; axtb-driver `Request::scf_retries` (`ScfRetry`),
+  `Response::scf_retry` (`Retried`), `retry_warnings`, `Part::rung`, and `Attempt` with the
+  fields of a try (`mixer` and `iterations` now optional); `Error::ScfNotConverged` carries the
+  tries (`attempts`).
+- Numerics epochs unchanged: every existing result is bit for bit the same (the golden set,
+  177 of 177); 11 golden cases for the ladder (stretched water in each method: a gradient, a
+  Hessian, a trajectory; the composite's Hessian; every rung failing).
+
+### Docs and tests
+
 - docs/python.md states how far a session's warm start moves a frame from a fresh `compute`, per
   method and conventions (none where `scf.restart` is off, the default for g-xTB in its programs'
   conventions), that sessions work in forked children, and how results differ across CPU types

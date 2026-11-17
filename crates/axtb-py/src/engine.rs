@@ -15,8 +15,9 @@
 //!   and only when the method does not already hold it.
 //!
 //! Every call releases the GIL while it runs. A driver error raises [`Error`] with the driver's
-//! `kind` and `code`, its message and its fields (`z`; `iterations`, `energy_change`,
-//! `residual`); a panic raises it with kind and code `panic` and closes the engine.
+//! `kind` and `code`, its message, its fields (`z`; `iterations`, `energy_change`, `residual`)
+//! and, for an SCF that did not converge on its `scf_retries`, the ladder's `attempts`; a panic
+//! raises it with kind and code `panic` and closes the engine.
 
 use axtb_driver::{Calculator, Request, Response, Task, Wavefunction};
 use numpy::{AllowTypeChange, PyArray1, PyArrayLike2, PyArrayMethods};
@@ -33,8 +34,8 @@ pyo3::create_exception!(
     "A failed engine call: `kind` (the driver's: input, unsupported_element, topology, \
      scf_not_converged, numerical, not_applicable; structure, panic, closed), `code` (invalid_input, \
      unsupported_element, topology_failed, scf_not_converged, numerical_failure, not_applicable; \
-     invalid_structure, panic, session_closed), `message` and `fields` (a dict: `z`; `iterations`, `energy_change`, \
-     `residual`)."
+     invalid_structure, panic, session_closed), `message`, `fields` (a dict: `z`; `iterations`, `energy_change`, \
+     `residual`) and `attempts` (the tries of an `scf_retries` ladder that did not converge, as dicts; else None)."
 );
 
 /// What an engine call failed with, before it becomes a Python exception (built without the
@@ -44,6 +45,8 @@ pub(crate) struct Failure {
     code: &'static str,
     message: String,
     fields: Vec<(&'static str, FieldValue)>,
+    /// The tries of an `scf_retries` ladder (JSON), if any.
+    attempts: Option<serde_json::Value>,
 }
 
 pub(crate) enum FieldValue {
@@ -53,7 +56,7 @@ pub(crate) enum FieldValue {
 
 impl Failure {
     fn of(kind: &'static str, code: &'static str, message: impl Into<String>) -> Self {
-        Self { kind, code, message: message.into(), fields: Vec::new() }
+        Self { kind, code, message: message.into(), fields: Vec::new(), attempts: None }
     }
 
     /// A panic's message: the payload of `std::panic::catch_unwind`.
@@ -82,6 +85,8 @@ impl Failure {
         let _ = value.setattr("code", self.code);
         let _ = value.setattr("message", self.message);
         let _ = value.setattr("fields", fields);
+        let attempts = self.attempts.as_ref().and_then(|a| crate::to_py(py, a).ok()).unwrap_or_else(|| py.None());
+        let _ = value.setattr("attempts", attempts);
         err
     }
 }
@@ -91,10 +96,13 @@ impl From<axtb_driver::Error> for Failure {
         let mut f = Failure::of(e.kind(), e.code(), e.to_string());
         match e {
             axtb_driver::Error::UnsupportedElement { z, .. } => f.fields.push(("z", FieldValue::Int(z))),
-            axtb_driver::Error::ScfNotConverged { iterations, energy_change, residual } => {
+            axtb_driver::Error::ScfNotConverged { iterations, energy_change, residual, attempts } => {
                 f.fields.push(("iterations", FieldValue::Int(iterations)));
                 f.fields.push(("energy_change", FieldValue::Float(energy_change)));
                 f.fields.push(("residual", FieldValue::Float(residual)));
+                if !attempts.is_empty() {
+                    f.attempts = serde_json::to_value(&attempts).ok();
+                }
             }
             _ => {}
         }
@@ -538,7 +546,8 @@ fn json<'py, T: serde::Serialize>(py: Python<'py>, v: &T) -> PyResult<Bound<'py,
 /// binding-only fields included (`subtotals`;
 /// `core_electrons`, `shell_populations`, `shell_atoms`, `shell_angular_momenta`,
 /// `reference_shell_occupations`, `quadrupole_traceless`; the thermochemistry's
-/// `inverted_frequencies`, `dropped_frequencies`, `average_moment`).
+/// `inverted_frequencies`, `dropped_frequencies`, `average_moment`), and the warnings the
+/// Python layer adds (`eigensolver_warning`, `retry_warnings`).
 fn response_dict(py: Python<'_>, r: Response) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("method", r.method)?;
@@ -546,6 +555,11 @@ fn response_dict(py: Python<'_>, r: Response) -> PyResult<Bound<'_, PyDict>> {
     d.set_item("numerics", &r.numerics)?;
     d.set_item("eigensolver", &r.eigensolver)?;
     d.set_item("eigensolver_warning", axtb_driver::eigensolver_warning(&r))?;
+    d.set_item("retry_warnings", axtb_driver::retry_warnings(&r))?;
+    match &r.scf_retry {
+        Some(x) => d.set_item("scf_retry", json(py, x)?)?,
+        None => d.set_item("scf_retry", py.None())?,
+    }
     d.set_item("energy", r.energy)?;
     if let Some(g) = &r.gradient {
         d.set_item("gradient", rows(py, g)?)?;

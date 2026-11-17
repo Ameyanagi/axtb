@@ -8,7 +8,7 @@
 //! (-1·x and 1·x are exact, and IEEE addition is commutative), so E_base + (E_plus - E_minus)
 //! keeps the association of a hand-written difference.
 
-use super::{Fingerprint, Hessian, WavefunctionData};
+use super::{Fingerprint, Hessian, Try, WavefunctionData};
 use super::{
     HessianMethod, HessianOptions, Method, MethodInfo, RetryLadder, Rung, ScfReport, SinglePoint, Term, Want,
     Wavefunction,
@@ -58,6 +58,8 @@ pub struct PartReport {
     pub seconds: f64,
     /// A Hessian's part: how its Hessian was computed.
     pub hessian_method: Option<HessianMethod>,
+    /// The index of the try that converged on the part's ladder (0: the first).
+    pub rung: usize,
 }
 
 /// One part of a composite.
@@ -98,14 +100,33 @@ pub struct Composite {
     corrections: Vec<Correction>,
     description: Vec<(&'static str, Detail)>,
     report_order: Vec<&'static str>,
+    /// Whether the single point that follows a Hessian at the same positions starts each group's
+    /// ladder at the rung its Hessian converged on ([`Composite::with_pinned_rungs`]).
+    pin: bool,
+    /// The positions of the last Hessian and the rung of each group (base, then the corrections).
+    pinned: Option<(Vec<[f64; 3]>, Vec<usize>)>,
+    /// Every try of the last call ([`Method::tries`]).
+    tries: Vec<Try>,
 }
 
 /// The outcome of one group of parts on its ladder: each part's result, its time over all
-/// tries, and the rung that converged.
+/// tries, and the rung that converged (and its index).
 struct Climbed<T> {
     results: Vec<T>,
     seconds: Vec<f64>,
     rung: Rung,
+    index: usize,
+}
+
+/// What a try's result says about its SCF: start, iterations and the mixer that converged it.
+type Scf = (Option<&'static str>, Option<usize>, Option<&'static str>);
+
+fn describe_singlepoint(sp: &SinglePoint) -> Scf {
+    sp.scf().map_or((None, None, None), |s| (Some(s.start), Some(s.iterations), s.mixer_used))
+}
+
+fn describe_hessian(_: &Hessian) -> Scf {
+    (None, None, None)
 }
 
 impl Composite {
@@ -120,7 +141,27 @@ impl Composite {
     ) -> Self {
         let mut report_order = vec![base.key];
         report_order.extend(corrections.iter().flat_map(|c| c.parts.iter().map(|(_, p)| p.key)));
-        Self { info, fingerprint, base, base_ladder, corrections, description: Vec::new(), report_order }
+        Self {
+            info,
+            fingerprint,
+            base,
+            base_ladder,
+            corrections,
+            description: Vec::new(),
+            report_order,
+            pin: false,
+            pinned: None,
+            tries: Vec::new(),
+        }
+    }
+
+    /// With `pin`, the single point that follows a Hessian at the same positions starts each
+    /// group's ladder at the rung that group's Hessian converged on, so that a response's energy,
+    /// gradient and Hessian come from one rung of each group (default: every single point climbs
+    /// from the first rung).
+    pub fn with_pinned_rungs(mut self, pin: bool) -> Self {
+        self.pin = pin;
+        self
     }
 
     /// The description the reports carry, and the order of the parts in them (by key; every
@@ -170,16 +211,30 @@ impl Composite {
 
     fn singlepoint_inner(&mut self, positions: &[[f64; 3]], want: &Want) -> Result<SinglePoint> {
         let t0 = Instant::now();
-        let base = climb(std::slice::from_mut(&mut self.base), &self.base_ladder, |m| m.singlepoint(positions, want))?;
+        self.tries.clear();
+        // the rungs of the Hessian just computed at these positions
+        let pinned = self.pinned.take().filter(|(x, _)| x.as_slice() == positions).map(|(_, r)| r);
+        let from = |g: usize| pinned.as_ref().map_or(0, |r| r[g]);
+        let base = climb(
+            std::slice::from_mut(&mut self.base),
+            &self.base_ladder,
+            from(0),
+            &mut self.tries,
+            describe_singlepoint,
+            |m| m.singlepoint(positions, want),
+        )?;
         let mut sp = base.results.into_iter().next().expect("the base's result");
-        let mut reports = vec![part_report(&self.base, sp.energy, sp.scf().cloned(), &base.rung, base.seconds[0])];
+        let mut reports =
+            vec![part_report(&self.base, sp.energy, sp.scf().cloned(), &base.rung, base.index, base.seconds[0])];
         let mut timings = vec![(self.base.timing, base.seconds[0])];
         let (mut energy, mut gradient) = (sp.energy, sp.gradient.take());
         let part_want = Want::gradient(want.gradient);
         let mut components = Vec::new();
-        for c in &mut self.corrections {
+        for (g, c) in self.corrections.iter_mut().enumerate() {
             let (weights, mut parts): (Vec<f64>, Vec<Part>) = std::mem::take(&mut c.parts).into_iter().unzip();
-            let climbed = climb(&mut parts, &c.ladder, |m| m.singlepoint(positions, &part_want));
+            let climbed = climb(&mut parts, &c.ladder, from(g + 1), &mut self.tries, describe_singlepoint, |m| {
+                m.singlepoint(positions, &part_want)
+            });
             c.parts = weights.iter().copied().zip(parts).collect();
             let climbed = climbed?;
             let value = weighted(&weights, climbed.results.iter().map(|r| r.energy));
@@ -188,7 +243,7 @@ impl Composite {
                 c.guard = None;
             }
             for (((_, part), r), s) in c.parts.iter().zip(&climbed.results).zip(&climbed.seconds) {
-                reports.push(part_report(part, r.energy, r.scf().cloned(), &climbed.rung, *s));
+                reports.push(part_report(part, r.energy, r.scf().cloned(), &climbed.rung, climbed.index, *s));
                 timings.push((part.timing, *s));
             }
             if let Some(g) = gradient.as_mut() {
@@ -219,18 +274,30 @@ impl Composite {
 
     fn hessian_inner(&mut self, positions: &[[f64; 3]], opts: &HessianOptions) -> Result<Hessian> {
         let t0 = Instant::now();
-        let base = climb(std::slice::from_mut(&mut self.base), &self.base_ladder, |m| m.hessian(positions, opts))?;
+        self.tries.clear();
+        self.pinned = None;
+        let base = climb(
+            std::slice::from_mut(&mut self.base),
+            &self.base_ladder,
+            0,
+            &mut self.tries,
+            describe_hessian,
+            |m| m.hessian(positions, opts),
+        )?;
+        let mut rungs = vec![base.index];
         let mut h = base.results.into_iter().next().expect("the base's Hessian");
         let mut reports = vec![PartReport {
             hessian_method: Some(h.method),
-            ..part_report(&self.base, h.energy, None, &base.rung, base.seconds[0])
+            ..part_report(&self.base, h.energy, None, &base.rung, base.index, base.seconds[0])
         }];
         let mut timings = vec![(self.base.timing, base.seconds[0])];
         for c in &mut self.corrections {
             let (weights, mut parts): (Vec<f64>, Vec<Part>) = std::mem::take(&mut c.parts).into_iter().unzip();
-            let climbed = climb(&mut parts, &c.ladder, |m| m.hessian(positions, opts));
+            let climbed =
+                climb(&mut parts, &c.ladder, 0, &mut self.tries, describe_hessian, |m| m.hessian(positions, opts));
             c.parts = weights.iter().copied().zip(parts).collect();
             let climbed = climbed?;
+            rungs.push(climbed.index);
             let value = weighted(&weights, climbed.results.iter().map(|r| r.energy));
             if let Some(guard) = c.guard.as_mut() {
                 guard(value)?;
@@ -239,7 +306,7 @@ impl Composite {
             for (((_, part), r), s) in c.parts.iter().zip(&climbed.results).zip(&climbed.seconds) {
                 reports.push(PartReport {
                     hessian_method: Some(r.method),
-                    ..part_report(part, r.energy, None, &climbed.rung, *s)
+                    ..part_report(part, r.energy, None, &climbed.rung, climbed.index, *s)
                 });
                 timings.push((part.timing, *s));
                 h.max_asymmetry = h.max_asymmetry.max(r.max_asymmetry);
@@ -261,50 +328,67 @@ impl Composite {
         timings.push(("total", t0.elapsed().as_secs_f64()));
         h.timings = timings;
         h.parts = self.ordered(reports);
+        if self.pin {
+            self.pinned = Some((positions.to_vec(), rungs));
+        }
         Ok(h)
     }
 }
 
-/// Run `f` on every part of a group in order, rung by rung of `ladder`, until every part
-/// succeeds at one rung; the parts' settings are those of the rung for its try and their own
-/// again afterwards.
+/// Run `f` on every part of a group in order, rung by rung of `ladder` from the rung `from`,
+/// until every part succeeds at one rung ([`RetryLadder::climb_methods`]: the parts' settings are
+/// those of the rung for its try and their own again afterwards); every try that ran goes to
+/// `tries`, its SCF as `describe` reads the result.
 fn climb<T>(
     parts: &mut [Part],
     ladder: &RetryLadder,
+    from: usize,
+    tries: &mut Vec<Try>,
+    describe: fn(&T) -> Scf,
     mut f: impl FnMut(&mut dyn Method) -> Result<T>,
 ) -> Result<Climbed<T>> {
-    let base: Vec<_> = parts.iter().map(|p| p.method.scf_settings().cloned()).collect();
+    let keys: Vec<&'static str> = parts.iter().map(|p| p.key).collect();
     let mut seconds = vec![0.0; parts.len()];
-    let r = ladder.climb(|rung| {
-        let mut results = Vec::with_capacity(parts.len());
-        for ((part, b), s) in parts.iter_mut().zip(&base).zip(seconds.iter_mut()) {
-            if let Some(b) = b {
-                let mut settings = b.clone();
-                settings.etemp = rung.etemp.or(b.etemp);
-                settings.max_iter = rung.max_iter.or(b.max_iter);
-                part.method.set_scf_settings(settings)?;
-            }
-            if rung.fresh {
-                part.method.reset_wavefunction();
-            }
-            let t0 = Instant::now();
-            let r = f(part.method.as_mut());
-            *s += t0.elapsed().as_secs_f64();
-            results.push(r?);
-        }
-        Ok(results)
-    });
-    for (part, b) in parts.iter_mut().zip(base) {
-        if let Some(b) = b {
-            part.method.set_scf_settings(b)?;
-        }
-    }
-    let (results, i) = r?;
-    Ok(Climbed { results, seconds, rung: ladder.rungs[i].clone() })
+    let mut methods: Vec<&mut dyn Method> = parts
+        .iter_mut()
+        .map(|p| {
+            let m: &mut dyn Method = p.method.as_mut();
+            m
+        })
+        .collect();
+    let (results, i) = ladder.climb_methods(&mut methods, from, |k, m, i, rung| {
+        let t0 = Instant::now();
+        let r = f(m);
+        seconds[k] += t0.elapsed().as_secs_f64();
+        let (start, iterations, mixer) = match &r {
+            Ok(v) => describe(v),
+            Err(Error::ScfNotConverged { iterations, .. }) => (None, Some(*iterations), None),
+            Err(_) => (None, None, None),
+        };
+        tries.push(Try {
+            part: Some(keys[k]),
+            rung: i,
+            etemp: rung.etemp.unwrap_or(f64::NAN),
+            max_iter: rung.max_iter.unwrap_or(0),
+            start,
+            iterations,
+            mixer,
+            error: r.as_ref().err().cloned(),
+        });
+        r
+    })?;
+    Ok(Climbed { results, seconds, rung: ladder.rungs[i].clone(), index: i })
 }
 
-/// The report of `part` with `energy` and `scf`, converged at `rung`.
-fn part_report(part: &Part, energy: f64, scf: Option<ScfReport>, rung: &Rung, seconds: f64) -> PartReport {
+/// The report of `part` with `energy` and `scf`, converged at `rung` (the ladder's `index`).
+fn part_report(
+    part: &Part,
+    energy: f64,
+    scf: Option<ScfReport>,
+    rung: &Rung,
+    index: usize,
+    seconds: f64,
+) -> PartReport {
     PartReport {
         key: part.key,
         label: part.label.clone(),
@@ -316,6 +400,7 @@ fn part_report(part: &Part, energy: f64, scf: Option<ScfReport>, rung: &Rung, se
         retry: rung.label.clone(),
         seconds,
         hessian_method: None,
+        rung: index,
     }
 }
 
@@ -376,6 +461,11 @@ impl Method for Composite {
             self.reset_wavefunction();
         }
         r
+    }
+
+    /// Every try of the parts on their ladders in the last single point or Hessian, in order.
+    fn tries(&self) -> Vec<Try> {
+        self.tries.clone()
     }
 
     /// Every part's wavefunction (`None` where a part has none); `None` when no part has one.
@@ -460,16 +550,22 @@ mod tests {
     use super::*;
 
     /// A one-atom "method" with energy `e` at temperatures of at least `needs` K (below: an SCF
-    /// that does not converge) and gradient `e` along x.
+    /// that does not converge) and gradient `e` along x; with `hessian_needs`, a Hessian (H = e)
+    /// at temperatures of at least that.
     struct Toy {
         e: f64,
         needs: f64,
+        hessian_needs: Option<f64>,
         scf: ScfSettings,
         info: MethodInfo,
         tries: usize,
     }
 
     fn toy(e: f64, needs: f64) -> Box<dyn Method> {
+        toy_hessian(e, needs, None)
+    }
+
+    fn toy_hessian(e: f64, needs: f64, hessian_needs: Option<f64>) -> Box<dyn Method> {
         let info = MethodInfo {
             name: "toy",
             conventions: "axtb",
@@ -479,7 +575,7 @@ mod tests {
             quadrupole: None,
         };
         let scf = ScfSettings { etemp: Some(0.0), ..ScfSettings::default() };
-        Box::new(Toy { e, needs, scf, info, tries: 0 })
+        Box::new(Toy { e, needs, hessian_needs, scf, info, tries: 0 })
     }
 
     impl Method for Toy {
@@ -503,7 +599,20 @@ mod tests {
             })
         }
         fn hessian(&mut self, _: &[[f64; 3]], _: &HessianOptions) -> Result<Hessian> {
-            Err(Error::Input("no Hessian".into()))
+            let needs = self.hessian_needs.ok_or_else(|| Error::Input("no Hessian".into()))?;
+            if self.scf.etemp.unwrap() < needs {
+                return Err(Error::ScfNotConverged { iterations: 2, energy_change: 0.0, residual: 0.0 });
+            }
+            Ok(Hessian {
+                energy: self.e,
+                gradient: vec![[self.e, 0.0, 0.0]],
+                hessian: vec![self.e; 9],
+                max_asymmetry: 0.0,
+                dipole_derivatives: None,
+                method: HessianMethod::Numerical,
+                timings: vec![],
+                parts: vec![],
+            })
         }
         fn scf_settings(&self) -> Option<&ScfSettings> {
             Some(&self.scf)
@@ -552,6 +661,42 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), vec![eb - ea]);
         for p in c.parts_mut() {
             assert_eq!(p.method.scf_settings().unwrap().etemp, Some(0.0));
+        }
+    }
+
+    /// The tries of a composite's ladders are logged; with pinned rungs, the single point after a
+    /// Hessian at the same positions starts at the Hessian's rung (elsewhere, and without the pin,
+    /// at the first).
+    #[test]
+    fn tries_and_pinned_rungs() {
+        let info = toy(0.0, 0.0).info().clone();
+        let fingerprint = Fingerprint::new("toy", &[1], 0.0, None);
+        let rung = |t: f64| Rung { fresh: t > 0.0, etemp: Some(t), max_iter: Some(1), label: Some(format!("{t} K")) };
+        let ladder = || RetryLadder { rungs: vec![rung(0.0), rung(500.0), rung(1000.0)], on: RetryOn::Failed };
+        let x = [[0.0; 3]];
+        for pin in [false, true] {
+            let base = part("base", toy_hessian(-1.5, 0.0, Some(800.0)));
+            let mut c =
+                Composite::new(info.clone(), fingerprint.clone(), base, ladder(), vec![]).with_pinned_rungs(pin);
+            let h = c.hessian(&x, &HessianOptions::default()).unwrap();
+            assert_eq!((h.parts[0].rung, h.parts[0].etemp), (2, 1000.0));
+            let tries = c.tries();
+            assert_eq!(
+                tries.iter().map(|t| (t.rung, t.error.is_none())).collect::<Vec<_>>(),
+                [(0, false), (1, false), (2, true)]
+            );
+            assert_eq!((tries[0].part, tries[0].iterations, tries[2].iterations), (Some("base"), Some(2), None));
+            let sp = c.singlepoint(&x, &Want::ENERGY).unwrap();
+            let p = &sp.extras.composite.unwrap().parts[0];
+            assert_eq!(p.rung, if pin { 2 } else { 0 }, "pin {pin}");
+            assert_eq!(c.tries().len(), 1);
+            // the pin is used once, and only at the Hessian's positions
+            c.hessian(&x, &HessianOptions::default()).unwrap();
+            let sp = c.singlepoint(&[[0.0, 0.0, 1.0]], &Want::ENERGY).unwrap();
+            assert_eq!(sp.extras.composite.unwrap().parts[0].rung, 0);
+            for p in c.parts_mut() {
+                assert_eq!(p.method.scf_settings().unwrap().etemp, Some(0.0));
+            }
         }
     }
 }

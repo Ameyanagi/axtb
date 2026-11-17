@@ -52,10 +52,10 @@ pub use error::{Error, Result};
 pub use names::{
     canonical, canonical_method, shell_layout, supported_elements, valence_electrons, Method, ShellLayout,
 };
-pub use request::{Request, Temperatures};
+pub use request::{Request, ScfRetry, Temperatures};
 pub use response::{
-    Attempt, Composite, Contribution, Details, Gfnff, HessianPart, Matrix, Named, Part, Parts, Response, Scf, Thermo,
-    ThermoPoint, Topology, Vibrations, PROGRAM, VERSION,
+    Attempt, Composite, Contribution, Details, Gfnff, HessianPart, Matrix, Named, Part, Parts, Response, Retried, Scf,
+    Thermo, ThermoPoint, Topology, Vibrations, PROGRAM, VERSION,
 };
 pub use task::{HessianTask, MoldenTask, Task, ThermoSettings, VibSettings};
 
@@ -159,6 +159,7 @@ pub fn analyze(req: &Request) -> Result<Response> {
         ("accuracy", req.accuracy.is_some()),
         ("etemp", req.etemp.is_some()),
         ("max_iter", req.max_iter.is_some()),
+        ("scf_retries", req.scf_retries.is_some()),
         ("threads", req.threads.is_some()),
         ("dispersion", req.dispersion.is_some()),
         ("mixer", req.mixer.is_some()),
@@ -259,6 +260,28 @@ pub fn threads_warning(method: Method, threads: usize, hessian: bool) -> Option<
     } else {
         None
     }
+}
+
+/// The warnings of a response whose result came from a rung of `scf_retries`: "converged on
+/// retry 2 of 2: etemp 3000 K, max_iter 1000"; the composite: one per part whose single point
+/// converged on a rung ("the gxtb part converged on ..."), and one per part whose Hessian
+/// converged on another rung than its single point ("the gxtb part's Hessian converged on ...").
+pub fn retry_warnings(response: &Response) -> Vec<String> {
+    let Some(r) = &response.scf_retry else { return Vec::new() };
+    let Some(c) = &response.composite else {
+        return r.label.iter().map(|l| format!("converged on {l}")).collect();
+    };
+    fn fired(p: &Part) -> Option<&str> {
+        p.rung.is_some_and(|i| i > 0).then_some(p.retry.as_deref()).flatten()
+    }
+    let mut out: Vec<String> =
+        c.parts.0.iter().filter_map(|(k, p)| fired(p).map(|l| format!("the {k} part converged on {l}"))).collect();
+    for (k, p) in c.hessian_parts.iter().flat_map(|h| &h.0) {
+        if let Some(l) = fired(p).filter(|_| c.parts.get(k).is_none_or(|s| s.rung != p.rung)) {
+            out.push(format!("the {k} part's Hessian converged on {l}"));
+        }
+    }
+    out
 }
 
 /// The warning for unpaired electrons given to GFN-FF, which has no electronic structure, so

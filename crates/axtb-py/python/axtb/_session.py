@@ -353,7 +353,10 @@ class Session:
                 if e.kind in ("panic", "closed"):
                     self._closed = True
                 exc = ProgramError(error)
-                exc.frame = self._failed(None, exc, x, {"error": fields})
+                rec: dict[str, Any] = {"error": fields}
+                if e.attempts:
+                    rec["scf"] = {"attempts": e.attempts}
+                exc.frame = self._failed(None, exc, x, rec)
                 raise exc from None
         except ProgramError as e:
             if e.frame is None:

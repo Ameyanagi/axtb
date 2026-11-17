@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //! The one error type of the front ends.
 
+use crate::response::Attempt;
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 use std::fmt;
@@ -17,8 +18,8 @@ pub enum Error {
     /// GFN-FF could not set up the topology of the structure (an input problem: xtb stops too).
     Topology(String),
     /// The SCF did not converge: the last attempt's iterations, energy change (Eh) and
-    /// residual.
-    ScfNotConverged { iterations: usize, energy_change: f64, residual: f64 },
+    /// residual; with `scf_retries`, every try of the ladder (empty without).
+    ScfNotConverged { iterations: usize, energy_change: f64, residual: f64, attempts: Vec<Attempt> },
     /// A numerical failure (singular matrices, non-finite results).
     Numerical(String),
     /// A request the method or its conventions cannot honour by design, refused before the
@@ -70,7 +71,7 @@ impl fmt::Display for Error {
             Error::Input(msg) => write!(f, "invalid input: {msg}"),
             Error::UnsupportedElement { message, .. } => f.write_str(message),
             Error::Topology(msg) => write!(f, "GFN-FF topology setup failed: {msg}"),
-            Error::ScfNotConverged { iterations, energy_change, residual } => write!(
+            Error::ScfNotConverged { iterations, energy_change, residual, .. } => write!(
                 f,
                 "SCF not converged in {iterations} iterations (last energy change {energy_change:.3e} Eh, residual {residual:.3e})"
             ),
@@ -83,7 +84,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// The error as the CLI writes it: `kind`, `message` and the kind's own fields (`z`;
-/// `iterations`, `energy_change`, `residual`).
+/// `iterations`, `energy_change`, `residual`, and with `scf_retries` the ladder's `attempts`).
 impl Serialize for Error {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         let mut m = s.serialize_map(None)?;
@@ -91,10 +92,13 @@ impl Serialize for Error {
         m.serialize_entry("message", &self.to_string())?;
         match self {
             Error::UnsupportedElement { z, .. } => m.serialize_entry("z", z)?,
-            Error::ScfNotConverged { iterations, energy_change, residual } => {
+            Error::ScfNotConverged { iterations, energy_change, residual, attempts } => {
                 m.serialize_entry("iterations", iterations)?;
                 m.serialize_entry("energy_change", energy_change)?;
                 m.serialize_entry("residual", residual)?;
+                if !attempts.is_empty() {
+                    m.serialize_entry("attempts", attempts)?;
+                }
             }
             _ => {}
         }
@@ -108,7 +112,7 @@ impl From<axtb::Error> for Error {
             axtb::Error::Input(msg) => Error::Input(msg),
             axtb::Error::UnsupportedElement { z, .. } => Error::UnsupportedElement { z, message: e.to_string() },
             axtb::Error::ScfNotConverged { iterations, energy_change, residual } => {
-                Error::ScfNotConverged { iterations, energy_change, residual }
+                Error::ScfNotConverged { iterations, energy_change, residual, attempts: Vec::new() }
             }
             axtb::Error::Topology(msg) => Error::Topology(msg),
             axtb::Error::Numerical(msg) => Error::Numerical(msg),

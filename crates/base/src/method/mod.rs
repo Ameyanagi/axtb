@@ -17,7 +17,8 @@
 //! ([`Extras`]).
 //!
 //! [`RetryLadder`] is the one retry policy: a list of tries ([`Rung`]: a fresh start, another
-//! electronic temperature or iteration limit) climbed until one succeeds. [`Composite`] is a
+//! electronic temperature or iteration limit) climbed until one succeeds, with the SCF retries a
+//! caller asks for ([`Retry`]) and a log of the tries that ran ([`Try`]). [`Composite`] is a
 //! method made of methods: a base plus weighted corrections, each with its ladder.
 //!
 //! **Unstable until 1.0**: the trait and its types may change in any minor release.
@@ -33,7 +34,7 @@ pub use results::{
     core_electrons, Attempt, Electronic, Extras, GfnffReport, GfnffTopology, Hessian, ScfReport, SinglePoint, Term,
     TermKind,
 };
-pub use retry::{RetryLadder, RetryOn, Rung};
+pub use retry::{Retry, RetryLadder, RetryOn, Rung, Try};
 pub use settings::{Restart, ScfSettings};
 pub use wavefunction::{Fingerprint, ScfData, Wavefunction, WavefunctionData};
 
@@ -119,6 +120,14 @@ pub trait Method: Send + Sync {
     /// set up stays (GFN2-xTB's integral screening keeps the accuracy it was built with).
     fn set_scf_settings(&mut self, _settings: ScfSettings) -> Result<()> {
         Err(Error::Input(format!("{} has no SCF settings", self.info().name)))
+    }
+
+    /// Every try of the method's own retry ladders in the last single point or Hessian (a
+    /// composite's parts on theirs), in order. Default: none. (A single SCF's fresh start after a
+    /// history that did not converge shows in its [`ScfReport::start`], GFN2-xTB's mixers in its
+    /// [`ScfReport::attempts`].)
+    fn tries(&self) -> Vec<Try> {
+        Vec::new()
     }
 
     /// Set the SCF accuracy of later calls (the SCF thresholds; what the method built when it

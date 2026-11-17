@@ -199,10 +199,11 @@ axtb's conventions. Errors: in `--json` mode `{"error": {"kind": ..., "message":
 stdout (`kind`: `input`, `unsupported_element` with `z`, `topology`, `not_applicable` (an
 output the method does not have: GFN-FF's orbitals, Molden file, bond orders and AO matrices,
 g-xTB 2.0.1's AO matrices in the `gxtb` conventions), `scf_not_converged` with `iterations`,
-`energy_change` and `residual`, `numerical`), otherwise `error: <message>` on
-stderr; exit code 1. Invalid arguments and unreadable files are usage errors: `error: ...` on
-stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF single point (see
-[Threads](#threads)), and a run-time LAPACK (`AXTB_LAPACK`) that was not used.
+`energy_change` and `residual` (and with `scf_retries` every try as `attempts`), `numerical`),
+otherwise `error: <message>` on stderr; exit code 1. Invalid arguments and unreadable files are
+usage errors: `error: ...` on stderr, exit code 2. Warnings go to stderr: more than 8 threads for
+one SCF single point (see [Threads](#threads)), a run-time LAPACK (`AXTB_LAPACK`) that was not
+used, and a result from a rung of `scf_retries` (see [SCF retries](#scf-retries)).
 
 | request field (JSON; docs/python.md has the Python keywords) | CLI | meaning |
 |---|---|---|
@@ -212,6 +213,7 @@ stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF sing
 | `conventions` | `--conventions C` | GFN2-xTB `axtb` (default), `xtb` (6.8.0), `xtb-6.7.1`, `tblite`; g-xTB `axtb`, `gxtb`; GFN-FF `axtb`, `xtb`, `xtb-6.7.1` |
 | `threads` | `--threads N` | default 1 |
 | `accuracy`, `etemp`, `max_iter` | `--acc X`, `--etemp K`, `--max-iter N` | SCF methods: accuracy multiplier (1), electronic temperature (GFN2-xTB 300 K, g-xTB 0 K), iteration limit (GFN2-xTB and g-xTB 2.0.1 250, g-xTB v1.1 1000) |
+| `scf_retries` | `--scf-retry etemp=K,max_iter=N` (repeated) | SCF methods: a ladder of fresh SCFs tried in order after one that fails, each rung `{"etemp": K, "max_iter": N}` with either key (default none), see [SCF retries](#scf-retries) |
 | `mixer`, `dispersion`, `scf_trace` | `--mixer M`, `--nodisp`, `--scf-trace` | GFN2-xTB: SCF mixer (`auto`, `broyden`, `diis`), dispersion off (validation), every SCF iteration on stderr |
 | `alpb`, `gbsa`, `solvation_state` | `--alpb S`, `--gbsa S`, `--solvation-state R` | implicit solvent and its reference state (`gsolv`, `bar1M`, `reference`) |
 | `solvation_correction`, `correction_conventions` | `--solvation-correction gfn2`, `--correction-conventions C` | g-xTB in solvent, see [g-xTB in implicit solvent](#g-xtb-in-implicit-solvent) |
@@ -239,6 +241,7 @@ The response, for every front end (a field is present when it applies):
 | `hessian`, `hessian_method`, `hessian_max_asymmetry`, `hessian_timings`, `dipole_derivatives` | Hessian |
 | `vibrational_conventions`, `frequencies`, `normal_modes`, `reduced_masses`, `force_constants`, `ir_intensities`, `n_imaginary`, `linear`, `masses`, `thermo` | vibrational analysis |
 | `composite`, `components`, `parts`, `hessian_parts` | g-xTB in solvent |
+| `scf_retry` | with `scf_retries`: the `rung` that gave the result (0: the calculation's own settings) `of` the rungs given, and its `label` (`retry 2 of 2: etemp 3000 K, max_iter 1000`); `scf_attempts` then lists every try |
 
 ## Design rules
 
@@ -534,6 +537,33 @@ converge runs once more from the program's EEQ-BC start. Results say which start
 docs/validation.md has what restarts save along paths and in optimizations, and where g-xTB
 has several SCF solutions, so that a restart can end on another one than a fresh start.
 
+### SCF retries
+
+`scf_retries` (CLI `--scf-retry etemp=1000,max_iter=1000`, repeated; Python `scf.retries`; default
+none) is a ladder of rungs for an SCF that fails (does not converge, or breaks down): the
+calculation runs again at each rung in order, as a fresh SCF from the method's own start with the
+rung's electronic temperature and iteration limit (a missing one: the calculation's), until one
+converges. GFN2-xTB's Broyden-then-DIIS fallback and a calculator's fresh start after a history
+that did not converge run inside each try, before any rung.
+
+```
+axtb h2o-stretched.xyz --grad --max-iter 30 --scf-retry etemp=1000,max_iter=1000 --scf-retry etemp=3000,max_iter=1000
+warning: converged on retry 1 of 2: etemp 1000 K, max_iter 1000
+```
+
+- A ladder that does not fire changes no number, and a result from a rung is the calculation at
+  the rung's settings, bit for bit. With `etemp` no rung may go below it.
+- A Hessian runs whole at one rung (reference, displaced and perturbed SCFs and the single point
+  of its response): a try that fails anywhere moves the whole calculation to the next rung.
+- A calculator (a session) commits the rung's state as the next geometry's history; the next
+  geometry tries the calculation's own settings first.
+- The g-xTB solvation composite climbs the given rungs per part, in place of its own retries.
+- The response says which rung gave the result (`scf_retry`) and lists every try
+  (`scf_attempts`: rung, temperature, iteration limit, outcome). When every rung fails the error
+  is the last rung's `scf_not_converged`, with every try as `attempts`.
+
+docs/python.md (SCF retries) has the details.
+
 ## Hessians
 
 `Calculator::hessian(positions, &HessianOptions { method, step, accuracy })`:
@@ -681,7 +711,8 @@ model given in `alpb=`/`gbsa=`, and a slash in it would read as method/basis to 
   iterations, then at 5000 K with 1000 iterations. A g-xTB SCF that fails runs again at 1000 K,
   then at 3000 K (1000 iterations each), unless `etemp` was given. The rung each part converged
   on is in `parts[...]["retry"]`, so a result from a smeared rung is never mistaken for one at
-  the default temperature.
+  the default temperature. A given `scf_retries` replaces both ladders, for every part (see
+  [SCF retries](#scf-retries)).
 - **The zero check.** The calculation stops if the first geometry's ΔG_solv is zero
   (|ΔG| < 1e-9 Eh), instead of reporting gas-phase energies as solvated.
 

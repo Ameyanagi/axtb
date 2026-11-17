@@ -216,7 +216,10 @@ fn codes_names_and_elements() {
         (Error::Input(String::new()), "invalid_input"),
         (Error::UnsupportedElement { z: 0, message: String::new() }, "unsupported_element"),
         (Error::Topology(String::new()), "topology_failed"),
-        (Error::ScfNotConverged { iterations: 0, energy_change: 0.0, residual: 0.0 }, "scf_not_converged"),
+        (
+            Error::ScfNotConverged { iterations: 0, energy_change: 0.0, residual: 0.0, attempts: vec![] },
+            "scf_not_converged",
+        ),
         (Error::Numerical(String::new()), "numerical_failure"),
         (Error::NotApplicable(String::new()), "not_applicable"),
     ];

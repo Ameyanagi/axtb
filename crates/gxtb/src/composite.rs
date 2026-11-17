@@ -31,7 +31,10 @@
 //!   g-xTB SCF that fails is run again at 1000 K, then 3000 K, each with 1000 iterations,
 //!   unless the temperature was set explicitly. The rung that converged is reported per part
 //!   (the part's `retry` in the composite's report), so a result from a smeared rung is never
-//!   mistaken for a 0 K one.
+//!   mistaken for a 0 K one. A caller's own retries ([`CompositeOptions::scf_retries`]) replace
+//!   both ladders: the g-xTB part and the GFN2 pair each climb them in order after their first
+//!   try, every rung from the method's own start, and the single point that follows a Hessian at
+//!   the same positions starts each ladder at the rung its Hessian converged on.
 //! - **The zero check.** The first geometry's ΔG_solv must not be zero (|ΔG| < 1e-9 Eh), or the
 //!   calculation stops instead of reporting gas-phase energies as solvated (e.g. a solvent
 //!   model that did not apply).
@@ -45,7 +48,7 @@ use crate::calculator::{Calculator, Options, Version};
 use crate::options::Conventions;
 use axtb::method::{
     Composite, Correction as CompositeCorrection, Detail, Fingerprint, Guard, HessianOptions, Method, MethodInfo, Part,
-    Restart, RetryLadder, RetryOn, Rung, ScfSettings, SinglePoint, Want, Wavefunction, WavefunctionData,
+    Restart, Retry, RetryLadder, RetryOn, Rung, ScfSettings, SinglePoint, Try, Want, Wavefunction, WavefunctionData,
 };
 use axtb::{Error, MixerKind, Result, SolvationModel, SolvationSpec};
 use axtb_base::threads::{self, Threads};
@@ -109,6 +112,11 @@ pub struct CompositeOptions {
     pub mixer: Option<MixerKind>,
     /// Retry failed SCFs with the ladders [`PAIR_RETRIES`] and [`GXTB_RETRIES`] (default true).
     pub retries: bool,
+    /// The SCF retries of every part in place of the built-in ladders: the g-xTB part and the
+    /// GFN2 pair each climb them in order after their first try, every rung from the method's own
+    /// start (a missing value: the part's own); `None`: the built-in ladders as `retries` says.
+    /// None may go below an explicit electronic temperature ([`Retry::check`]).
+    pub scf_retries: Option<Vec<Retry>>,
 }
 
 impl Default for CompositeOptions {
@@ -127,6 +135,7 @@ impl Default for CompositeOptions {
             correction_conventions: None,
             mixer: None,
             retries: true,
+            scf_retries: None,
         }
     }
 }
@@ -207,6 +216,22 @@ fn rungs(base: (f64, usize), retries: &[(Option<f64>, usize)], fresh: bool) -> V
     out
 }
 
+/// The caller's retries as the description shows them: each rung's given values, `; ` between
+/// rungs (e.g. `etemp 1000 K, max_iter 1000; max_iter 1000`).
+fn retries_text(given: &[Retry]) -> String {
+    let rung = |r: &Retry| {
+        let mut v = Vec::new();
+        if let Some(t) = r.etemp {
+            v.push(format!("etemp {t} K"));
+        }
+        if let Some(m) = r.max_iter {
+            v.push(format!("max_iter {m}"));
+        }
+        v.join(", ")
+    };
+    given.iter().map(rung).collect::<Vec<_>>().join("; ")
+}
+
 /// What the composite is and offers: g-xTB's information, with the Hessian methods every part
 /// offers.
 fn info(gxtb: &MethodInfo, gfn2: &MethodInfo) -> MethodInfo {
@@ -234,6 +259,9 @@ impl CompositeCalculator {
             if !(t >= 0.0 && t.is_finite()) {
                 return Err(Error::Input(format!("electronic temperature must be >= 0 K and finite, got {t}")));
             }
+        }
+        if let Some(r) = &options.scf_retries {
+            Retry::check(r, scf.etemp)?;
         }
         let threads = Threads::new(options.threads)?;
 
@@ -279,16 +307,30 @@ impl CompositeCalculator {
         let reuse_guess = scf.reuses(default);
 
         // the ladders: g-xTB's only without an explicit temperature; the pair's every rung from
-        // the method's own start when the halves do not reuse wavefunctions
+        // the method's own start when the halves do not reuse wavefunctions; or the caller's
+        // retries after each group's first try
         let gxtb_base = (gxtb_etemp, gxtb_max_iter);
-        let gxtb_retries: Vec<(Option<f64>, usize)> = if options.retries && scf.etemp.is_none() {
-            GXTB_RETRIES.map(|(t, m)| (Some(t), m)).to_vec()
-        } else {
-            vec![]
+        let (gxtb_ladder, pair_ladder) = match &options.scf_retries {
+            Some(given) => {
+                let mut g = rungs(gxtb_base, &[], false);
+                g.extend(Retry::rungs(gxtb_base, given));
+                let mut p = rungs(gfn2_base, &[], !reuse_guess);
+                p.extend(Retry::rungs(gfn2_base, given));
+                (RetryLadder { rungs: g, on: RetryOn::Failed }, RetryLadder { rungs: p, on: RetryOn::Failed })
+            }
+            None => {
+                let gxtb_retries: Vec<(Option<f64>, usize)> = if options.retries && scf.etemp.is_none() {
+                    GXTB_RETRIES.map(|(t, m)| (Some(t), m)).to_vec()
+                } else {
+                    vec![]
+                };
+                let pair_retries = if options.retries { PAIR_RETRIES.to_vec() } else { vec![] };
+                (
+                    RetryLadder { rungs: rungs(gxtb_base, &gxtb_retries, false), on: RetryOn::Failed },
+                    RetryLadder { rungs: rungs(gfn2_base, &pair_retries, !reuse_guess), on: RetryOn::Failed },
+                )
+            }
         };
-        let gxtb_ladder = RetryLadder { rungs: rungs(gxtb_base, &gxtb_retries, false), on: RetryOn::Failed };
-        let pair_retries = if options.retries { PAIR_RETRIES.to_vec() } else { vec![] };
-        let pair_ladder = RetryLadder { rungs: rungs(gfn2_base, &pair_retries, !reuse_guess), on: RetryOn::Failed };
 
         let info = info(gxtb.info(), gas.info());
         let fingerprint = Fingerprint::new(info.name, numbers, charge, uhf);
@@ -334,9 +376,10 @@ impl CompositeCalculator {
             ladder: pair_ladder,
             guard: Some(guard),
         };
+        let pin = options.scf_retries.is_some();
         let mut c = Self {
             options,
-            inner: Composite::new(info, fingerprint, base, gxtb_ladder, vec![solvation]),
+            inner: Composite::new(info, fingerprint, base, gxtb_ladder, vec![solvation]).with_pinned_rungs(pin),
             gxtb_base,
             gfn2_base,
             reuse_guess,
@@ -408,7 +451,7 @@ impl CompositeCalculator {
         let (model, state) = self.solvation_labels();
         let (conventions, correction_conventions) = self.conventions_labels();
         let (gxtb, gfn2) = self.etemps();
-        vec![
+        let mut out = vec![
             ("definition", Detail::Text(self.definition())),
             ("method", Detail::Name(o.version.method())),
             ("solvation_correction", Detail::Name(o.correction.name())),
@@ -420,8 +463,12 @@ impl CompositeCalculator {
             ("etemp", Detail::Group(vec![("gxtb", Detail::Number(gxtb)), ("gfn2", Detail::Number(gfn2))])),
             ("reuse_guess", Detail::Flag(self.reuses_guess())),
             ("gxtb_reuse_guess", Detail::Flag(self.gxtb_reuses_guess())),
-            ("retries", Detail::Flag(o.retries)),
-        ]
+            ("retries", Detail::Flag(o.retries && o.scf_retries.is_none())),
+        ];
+        if let Some(given) = &o.scf_retries {
+            out.push(("scf_retries", Detail::Text(retries_text(given))));
+        }
+        out
     }
 }
 
@@ -486,6 +533,10 @@ impl Method for CompositeCalculator {
 
     fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
         self.inner.set_scf_accuracy(accuracy)
+    }
+
+    fn tries(&self) -> Vec<Try> {
+        self.inner.tries()
     }
 
     /// The g-xTB part's SCF from given densities (its wavefunction is the composite's).

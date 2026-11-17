@@ -449,8 +449,16 @@ def record(r: Mapping[str, Any] | None, p: Planned, *, session: bool = False) ->
         if comp.get("hessian_parts") is not None:
             rec["composite"]["hessian_parts"] = comp["hessian_parts"]
         rec["wavefunction"] = {"part": "gxtb"}
-        retried = [k for k, part in comp["parts"].items() if part.get("retry")]
-        contingent["composite.retries"] = {"fired": bool(retried), "parts": retried}
+        if "scf.retries" not in p.contingent:
+            retried = [k for k, part in comp["parts"].items() if part.get("retry")]
+            contingent["composite.retries"] = {"fired": bool(retried), "parts": retried}
+    retry = r.get("scf_retry")
+    if "scf.retries" in p.contingent and retry is not None:
+        contingent["scf.retries"] = {"fired": retry["rung"] > 0, "rung": retry["rung"]}
+        if comp is not None:
+            groups = [comp["parts"], comp.get("hessian_parts") or {}]
+            fired = [k for k in comp["parts"] if any(g.get(k, {}).get("rung", 0) > 0 for g in groups)]
+            contingent["scf.retries"]["parts"] = fired
     if contingent:
         rec["contingent"] = contingent
     h = r.get("hessian")
@@ -480,11 +488,14 @@ def timings(r: Mapping[str, Any], total: float) -> dict[str, float]:
 
 
 def warnings_of(r: Mapping[str, Any], res: SinglePointData | None = None) -> list[ProgramWarning]:
-    """The warnings of a response: a run-time LAPACK that was not used; orbital levels qcdata
-    cannot hold (smeared occupations of a spin without electrons have no Fermi level)."""
+    """The warnings of a response: a run-time LAPACK that was not used; a result from a rung of
+    ``scf.retries`` (one per rung, the composite per part); orbital levels qcdata cannot hold
+    (smeared occupations of a spin without electrons have no Fermi level)."""
     out = []
     if r.get("eigensolver_warning"):
         out.append(build(ProgramWarning, code="eigensolver_fallback", message=r["eigensolver_warning"]))
+    for message in r.get("retry_warnings") or ():
+        out.append(build(ProgramWarning, code="scf_retry", message=message, path="scf.retries"))
     if res is not None and r.get("scf") is not None and res.wavefunction is None:
         out.append(
             build(
@@ -562,6 +573,8 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
         error, fields = from_driver(x)
         rec = record(None, p)
         rec["error"] = fields
+        if x.attempts:
+            rec["scf"] = {"attempts": x.attempts}
         out_error = ProgramError(error)
         execution = ExecutionInfo(threads=n, timings={"total": time.perf_counter() - start})
         out_error.output = failed_output(

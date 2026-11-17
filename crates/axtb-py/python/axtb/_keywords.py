@@ -207,6 +207,16 @@ _ACCURACY_SCHEMA = {
     "properties": {q: {"type": "number", "exclusiveMinimum": 0} for q in ("energy", "gradient", "hessian")},
 }
 _GEOMETRY_SCHEMA = {"type": "array", "items": {"type": "array", "items": _NUM, "minItems": 3, "maxItems": 3}}
+_RETRIES_SCHEMA = {
+    "type": "array",
+    "minItems": 1,
+    "items": {
+        "type": "object",
+        "additionalProperties": False,
+        "minProperties": 1,
+        "properties": {"etemp": {**_NONNEG, "x-unit": "K"}, "max_iter": _INT1},
+    },
+}
 _UNSUPPORTED_SCHEMA: dict[str, Any] = {"not": {}}
 
 KEYS: tuple[Key, ...] = (
@@ -291,6 +301,22 @@ KEYS: tuple[Key, ...] = (
         "Electronic temperature of the Fermi smearing; given for the composite, it sets every part (and "
         "turns off the g-xTB part's retries at 1000 and 3000 K).",
         "etemp",
+    ),
+    Key(
+        "scf.retries",
+        False,
+        "expert",
+        "convergence",
+        None,
+        _RETRIES_SCHEMA,
+        _SCF,
+        _EGH,
+        "none",
+        "SCF retry ladder: after a calculation whose SCF fails, a fresh SCF at each rung in order until one "
+        'converges; a rung is {"etemp": K, "max_iter": n}, either key optional (missing: the calculation\'s). '
+        "No rung below a given scf.etemp. A Hessian runs whole at one rung. A result from a rung has the warning "
+        "scf_retry (contingent). The composite: replaces its built-in retries, for every part.",
+        "scf_retries",
     ),
     Key(
         "scf.mixer",
@@ -790,6 +816,8 @@ RENAMED = {
     "etemp": "scf.etemp",
     "max_iter": "scf.max_iter",
     "maxiter": "scf.max_iter",
+    "retries": "scf.retries",
+    "scf_retries": "scf.retries",
     "mixer": "scf.mixer",
     "guess": "scf.guess (the start) or scf.restart (previous or off)",
     "restart": "scf.restart",
@@ -1001,8 +1029,16 @@ _CACHE_SIZE = 64
 
 
 def _copy_tree(s: dict[str, Any]) -> dict[str, Any]:
-    """A copy of a settings tree (groups and lists copied; values are immutable)."""
-    return {k: (_copy_tree(x) if isinstance(x, dict) else list(x) if isinstance(x, list) else x) for k, x in s.items()}
+    """A copy of a settings tree (groups, lists and the objects in lists copied; values are
+    immutable)."""
+
+    def item(x: Any) -> Any:
+        return _copy_tree(x) if isinstance(x, dict) else x
+
+    return {
+        k: (_copy_tree(x) if isinstance(x, dict) else [item(e) for e in x] if isinstance(x, list) else x)
+        for k, x in s.items()
+    }
 
 
 def plan_input(
@@ -1163,6 +1199,15 @@ def _plan_input(
         raise no_effect(
             "scf.restart", "a calculation of its own has one SCF and no history (scf.restart is a session setting)"
         )
+    if "scf.retries" in v and "scf.etemp" in v:
+        floor = v["scf.etemp"]
+        for i, rung in enumerate(v["scf.retries"]):
+            if rung.get("etemp", floor) < floor:
+                raise no_effect(
+                    f"scf.retries[{i}].etemp",
+                    f"{rung['etemp']:g} K is below scf.etemp ({floor:g} K), where the ladder starts and below which "
+                    "no rung goes",
+                )
 
     # 4. not_applicable
     def not_applicable(path: str, why: str) -> ProgramError:
@@ -1432,6 +1477,8 @@ def _value(path: str, value: Any, method: str, nat: int, flat: Mapping[str, Any]
         return _number(value, path, nonnegative=True)
     if path in ("scf.max_iter", "freq.symmetry_number"):
         return _integer(value, path)
+    if path == "scf.retries":
+        return _retries(value)
     if path == "conventions":
         return canonical_conventions(value, method)
     if path == "scf.mixer":
@@ -1498,6 +1545,43 @@ def _value(path: str, value: Any, method: str, nat: int, flat: Mapping[str, Any]
     raise AssertionError(f"no check for {path}")  # pragma: no cover - every key has one
 
 
+def _retries(value: Any) -> list[dict[str, Any]]:
+    """The canonical rungs of ``scf.retries``: each an object with ``etemp`` (K, a float) and/or
+    ``max_iter`` (an int), as given."""
+    path = "scf.retries"
+    if not isinstance(value, list | tuple) or not value:
+        raise refuse(
+            "input",
+            "invalid_value",
+            f'{path}: a list of rungs, e.g. [{{"etemp": 1000, "max_iter": 1000}}, {{"etemp": 3000}}], not {value!r}',
+        )
+    out = []
+    for i, rung in enumerate(value):
+        at = f"{path}[{i}]"
+        if not isinstance(rung, Mapping):
+            raise refuse(
+                "input", "invalid_value", f'{at}: a rung is an object {{"etemp": K, "max_iter": n}}, not {rung!r}'
+            )
+        for k in rung:
+            if k not in ("etemp", "max_iter"):
+                close = difflib.get_close_matches(str(k), ["etemp", "max_iter"], n=1, cutoff=0.6)
+                hint = f"; did you mean {close[0]}?" if close else ""
+                raise refuse("input", "unknown_key", f"{at}.{k}: not a setting of a rung (etemp, max_iter){hint}")
+        if not rung:
+            raise refuse(
+                "input",
+                "invalid_value",
+                f"{at}: a rung sets etemp, max_iter or both (one without either repeats the SCF that failed)",
+            )
+        c: dict[str, Any] = {}
+        if "etemp" in rung:
+            c["etemp"] = _number(rung["etemp"], f"{at}.etemp", nonnegative=True)
+        if "max_iter" in rung:
+            c["max_iter"] = _integer(rung["max_iter"], f"{at}.max_iter")
+        out.append(c)
+    return out
+
+
 def _put(tree: dict[str, Any], path: str, value: Any) -> None:
     group, _, leaf = path.rpartition(".")
     (tree.setdefault(group, {}) if group else tree)[leaf] = value
@@ -1543,6 +1627,8 @@ def _resolve(
             put("scf.etemp", 300.0 if method == "gfn2" else 0.0)
         else:
             reasons["scf.etemp"] = "the composite: each part its method's (g-xTB 0 K, GFN2-xTB 300 K)"
+        if "scf.retries" in v:
+            put("scf.retries", v["scf.retries"])
         gfn2_conventions = None
         if method == "gfn2":
             gfn2_conventions = conventions
@@ -1646,6 +1732,8 @@ def _resolve(
         req["etemp"] = v["scf.etemp"]
     if "scf.max_iter" in v:
         req["max_iter"] = v["scf.max_iter"]
+    if "scf.retries" in v:
+        req["scf_retries"] = v["scf.retries"]
     if "scf.mixer" in v:
         req["mixer"] = {"broyden-then-diis": "auto"}.get(v["scf.mixer"], v["scf.mixer"])
     if "scf.guess" in v and v["scf.guess"] != "given":
@@ -1684,6 +1772,8 @@ def _resolve(
         contingent += [p for p in v if p.startswith(("hessian.", "freq."))]
     if session and s.get("scf", {}).get("restart") == "previous":
         contingent.append("scf.restart")
+    if "scf.retries" in v:
+        contingent.append("scf.retries")
     record: dict[str, Any] = {
         "method": method,
         "conventions": conventions,
