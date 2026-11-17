@@ -16,10 +16,17 @@
 //!   iteration early after an energy change |E_k - E_{k-1}| below 1e-12 Eh (tblite's mixer
 //!   stages; e.g. H2, whose density is fixed from iteration 1;
 //!   `Gxtb201FockDiis`);
-//! - convergence after iteration k once |E_j - E_{j-1}| < 1e-6 acc Eh in some iteration j <= k
-//!   and the RMS of r_j over the full vector < 2e-5 acc in some iteration 1 < j <= k (tblite's
-//!   `check_convergence` sets each flag and never clears it); no extra iteration
-//!   (`Gxtb201Rule`).
+//! - the convergence test is met after iteration k once |E_j - E_{j-1}| < 1e-6 acc Eh in some
+//!   iteration j <= k and the RMS of r_j over the full vector < 2e-5 acc in some iteration
+//!   1 < j <= k (tblite's `check_convergence` sets each flag and never clears it;
+//!   `Gxtb201Rule`). The program's conventions stop there (the program has no extra iteration).
+//!   axtb's conventions run one more, unmixed iteration: F_{k+1}, built from P_k's state (its
+//!   charges, multipoles and density), is diagonalized as it is, not mixed, giving P_{k+1}, whose
+//!   charges, moments, energy and gradient are the result, as v1.1's programs end their SCFs. Its
+//!   orbitals are then the fresh eigenvectors of one Fock build (the returned Hamiltonian), and the
+//!   result is closer to self-consistency than the last DIIS step's: +1 iteration, +3-4 % time
+//!   (energy + gradient of taxol and (H2O)200), results moved by up to ~1e-7 Eh and 3.4e-5 Eh/bohr
+//!   toward those of a tightly converged SCF.
 
 use crate::basis::Basis;
 use crate::cn::gxtb_cn;
@@ -724,8 +731,9 @@ pub struct ScfResult {
     pub energies: Energies,
     pub shell_charges: Vec<f64>,
     pub atom_charges: Vec<f64>,
-    /// Orbital energies (eigenvalues of the last mixed Fock matrix) and occupations per spin
-    /// channel (closed shell: one, doubly occupied).
+    /// Orbital energies (eigenvalues of the last diagonalized Fock matrix: mixed for 2.0.1 in the
+    /// program's conventions, the unmixed last build otherwise) and occupations per spin channel
+    /// (closed shell: one, doubly occupied).
     pub orbital_energies: Vec<Vec<f64>>,
     pub occupations: Vec<Vec<f64>>,
     /// kT (Eh) of the occupations (0: Aufbau) and the Fermi levels the occupations of the
@@ -857,7 +865,8 @@ impl Setup {
                 let ethr = opts.energy_tol.unwrap_or(1e-6 * opts.accuracy);
                 let pthr = opts.residual_tol.unwrap_or(2e-5 * opts.accuracy);
                 let mixer = v2_mixer.insert(Gxtb201FockDiis::new(n, damping, diis_size, self.parallel));
-                let rule = v2_rule.insert(Gxtb201Rule::new(ethr, pthr));
+                // axtb's conventions end with one unmixed iteration, the program's do not
+                let rule = v2_rule.insert(Gxtb201Rule::new(ethr, pthr, !self.model.program()));
                 ScfStrategy { accelerator: Accelerator::Fock(mixer), rule, max_iter }
             }
             Version::V1_1 => {
@@ -963,8 +972,8 @@ struct Scf201<'a> {
     /// Keep the matrices of an unmixed iteration in `last` (the orbitals without occupation
     /// are computed from them after the SCF).
     keep_last: bool,
-    /// The Fock matrices of the last unmixed iteration (v1.1's last iteration diagonalizes the
-    /// matrices as built, which the mixer does not hold); `None` without one.
+    /// The Fock matrices of the last unmixed iteration (v1.1's last iteration, and 2.0.1's in axtb's
+    /// conventions, diagonalize the matrices as built, which the mixer does not hold); `None` without one.
     last: Option<Vec<Vec<f64>>>,
     /// The RMS change of the packed spin densities in the last iteration (v1.1's convergence
     /// test; 2.0.1 measures the Fock residual instead).

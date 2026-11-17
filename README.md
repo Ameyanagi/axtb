@@ -589,14 +589,22 @@ energy, so both conventions share the Fock matrix, the SCF (tblite's: damping, t
 the full Fock matrix) and analytic gradients without a response term.
 `conventions="gxtb"` reproduces the program: mctc-lib's Ångström factor, its fractional
 electron count (the sum of the stored reference occupations), its hard cutoffs (CNs and
-repulsion 25 bohr, revD4 50/25 bohr, integral pairs) and its gradient formula.
+repulsion 25 bohr, revD4 50/25 bohr, integral pairs), its gradient formula and the end of its
+SCF (the density of the last, DIIS-mixed Fock matrix).
 `conventions="axtb"` (default) uses CODATA 2022 units, an integer electron count and smooth
-cutoffs (1 bohr switches beyond the program's radii). The two differ by ≤ 3e-10 Eh for the
-small reference molecules (same iterations) and by ≤ 9e-10 Eh in the energy differences
-tested on them (2.3e-8 Eh for a 2 % expansion of C50H102), by ≤ 4e-11 Eh for the conformer,
-reaction, barrier and binding energies of `tests/gxtb_energy_differences.py`; for (H2O)100
-by 1.9e-6 Eh, almost all from the revD4 three-body tail beyond 25 bohr that the program cuts (`bench/results/gxtb2_reproduction.json`, from
-`python tests/gxtb2_reproduction.py`). The program's analytic gradient is wrong (by up to
+cutoffs (1 bohr switches beyond the program's radii), and ends the SCF with one more iteration
+whose Fock matrix is diagonalized unmixed (as g-xTB v1.1's programs do): its density is the
+result, the returned orbitals are the fresh eigenvectors of one Fock build, and the result is
+closer to self-consistency (energies move by up to 1e-7 Eh and gradients by up to 3.4e-5 Eh/bohr
+toward those of a tightly converged SCF; +1 iteration, +3-4 % time). The conventions alone
+differ by ≤ 3e-10 Eh for the small reference molecules and by ≤ 9e-10 Eh in the energy
+differences tested on them (2.3e-8 Eh for a 2 % expansion of C50H102); with the extra
+iteration the default conventions differ from the program by ≤ 1.4e-7 Eh for the small
+reference molecules (one iteration more) and ≤ 2.3e-8 Eh in those energy differences, by
+≤ 4e-11 Eh for the conformer, reaction, barrier and binding energies of
+`tests/gxtb_energy_differences.py` (at accuracy 1e-4); for (H2O)100 by 1.9e-6 Eh, almost all
+from the revD4 three-body tail beyond 25 bohr that the program cuts
+(`python tests/gxtb2_reproduction.py`). The program's analytic gradient is wrong (by up to
 1.4e-4 Eh/bohr) for some complexes with bonds exactly along a coordinate axis
 ([Gd(H2O)6]³⁺, [Lu(H2O)6]³⁺; finite differences of its own energies follow axtb, spec §4.18);
 axtb's gradient is the derivative of the energy in either orientation.

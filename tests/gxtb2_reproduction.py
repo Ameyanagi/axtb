@@ -42,16 +42,19 @@ METHOD = "gxtb-v2.0.1"
 # 2.6e-11 (a near-degenerate HOMO set carries the program's fractional electron count, so the
 # terms of the last, unconverged density follow the round-off); gradients <= 2e-11 Eh/bohr
 # (default) and <= 6e-11 (tight), CeCl3 tight 4.0e-9 (seven near-degenerate f orbitals, where
-# the summation order of the density alone moves it by up to 6e-8). Default conventions: <= 8.7e-10
-# Eh for the 82 small molecules with the same iterations, C50H102 5.3e-8, (H2O)100 1.9e-6 (the
-# revD4 three-body tail); in energy differences, bindings <= 1.7e-11 Eh, 2 % expansions <= 8.7e-10,
-# C50H102's 2.3e-8.
+# the summation order of the density alone moves it by up to 6e-8). Default conventions: since
+# alpha 1 their SCF ends with one unmixed iteration after the program's test, so every molecule takes
+# exactly one iteration more than the program and its energy differs by the conventions (<= 8.7e-10
+# Eh for the 82 small molecules before alpha 1) plus that last step toward self-consistency:
+# <= 1.4e-7 Eh for the 82 small molecules (TmH3 1.34e-7, caffeine 6.6e-8), C50H102 5.4e-8, (H2O)100
+# 1.9e-6 (the revD4 three-body tail); in energy differences, bindings <= 5.1e-9 Eh, 2 % expansions
+# <= 2.3e-8 (C50H102's 2.3e-8).
 LIMITS = {
     "failures": 0, "max_abs_dE": 2.1e-12, "max_abs_dE water100": 9.1e-12, "iteration_mismatches": 0,
     "tight_iteration_mismatches": 0, "tight_scf_failure_mismatches": 0, "max_dterm": 9.1e-12, "max_dterm TbCl3": 2.6e-11,
     "max_dgrad_default": 2e-11, "max_dgrad_tight": 6e-11, "max_dgrad_tight CeCl3": 4.0e-9,
-    "max_abs_dE_default": 8.7e-10, "max_abs_dE_default c50h102": 5.3e-8, "max_abs_dE_default water100": 1.9e-6,
-    "default_iteration_mismatches": 0, "binding default-program": 1.7e-11, "expansion default-program": 8.7e-10,
+    "max_abs_dE_default": 1.4e-7, "max_abs_dE_default c50h102": 5.4e-8, "max_abs_dE_default water100": 1.9e-6,
+    "default_iteration_mismatches": 0, "binding default-program": 5.1e-9, "expansion default-program": 2.3e-8,
     "expansion default-program c50h102": 2.3e-8,
 }
 LARGE = {"water100", "c50h102"}  # the two molecules longer than 50 bohr
@@ -222,7 +225,8 @@ def main() -> int:
         "max_dgrad_tight": max(r["max_dgrad_tight"] for r in ok if "max_dgrad_tight" in r),
         "max_dgrad_tight_by_molecule": sorted(((r["max_dgrad_tight"], r["molecule"]) for r in ok if "max_dgrad_tight" in r))[-3:],
         "max_abs_dE_default": max(abs(r["dE_default"]) for r in ok),
-        "default_iteration_mismatches": [r["molecule"] for r in ok if r["iter_default"] != r["iter_program"]],
+        # the default conventions' unmixed final iteration: one more than the program
+        "default_iteration_mismatches": [r["molecule"] for r in ok if r["iter_default"] != r["iter_program"] + 1],
     }
     a.out.write_text(json.dumps({"program": "g-xTB 2.0.1 (grimme-lab/g-xtb 2.0.1: xtb 6.7.1 --gxtb)", "method": METHOD,
                                  "summary": summary, "rows": rows, "energy_differences": diffs}, indent=1))
@@ -256,7 +260,7 @@ def check(rows: list[dict], diffs: list[dict]) -> int:
         "max_abs_dE_default": worst("dE_default", lambda r: r["molecule"] not in LARGE),
         "max_abs_dE_default c50h102": one("dE_default", "c50h102"),
         "max_abs_dE_default water100": one("dE_default", "water100"),
-        "default_iteration_mismatches": [r["molecule"] for r in ok if r["iter_default"] != r["iter_program"]],
+        "default_iteration_mismatches": [r["molecule"] for r in ok if r["iter_default"] != r["iter_program"] + 1],
         "binding default-program": max((abs(d["default_minus_program_Eh"]) for d in diffs if "binding" in d["quantity"]),
                                        default=None),
         "expansion default-program": max((abs(d["default_minus_program_Eh"]) for d in expansion

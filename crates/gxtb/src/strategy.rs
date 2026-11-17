@@ -190,38 +190,60 @@ pub(crate) fn diis_coefficients(b: &[Vec<f64>]) -> Option<Vec<f64>> {
     Some(rhs[..m].to_vec())
 }
 
-/// The 2.0.1 program's convergence test (tblite's `check_convergence`): converged after
+/// The 2.0.1 program's convergence test (tblite's `check_convergence`): the test is met after
 /// iteration k once |E_j − E_{j−1}| < `ethr` in some iteration j ≤ k and the Fock residual is
 /// below `pthr` in some iteration 1 < j ≤ k. Each criterion counts once met (tblite only ever
-/// sets its flags); no extra iteration.
+/// sets its flags). The program stops there, with the density of a diagonalized DIIS-mixed Fock
+/// matrix. With `unmixed_last` (axtb's conventions) one more iteration follows
+/// ([`Verdict::OneMore`]): the Fock matrix of the converged state diagonalized as built, not
+/// mixed, whose density is the result (as v1.1's programs end); the SCF counts as converged after
+/// it.
 pub(crate) struct Gxtb201Rule {
     ethr: f64,
     pthr: f64,
     econverged: bool,
     pconverged: bool,
+    /// End with one unmixed iteration once the test is met.
+    unmixed_last: bool,
+    /// With `unmixed_last`: the test was met (the next iteration is the last), and that
+    /// iteration ran.
+    met: bool,
+    done: bool,
 }
 
 impl Gxtb201Rule {
     /// The test with the energy threshold `ethr` (Eh; the program's 1e-6·acc) and the residual
-    /// threshold `pthr` (the program's 2e-5·acc).
-    pub(crate) fn new(ethr: f64, pthr: f64) -> Self {
-        Self { ethr, pthr, econverged: false, pconverged: false }
+    /// threshold `pthr` (the program's 2e-5·acc); `unmixed_last`: one more, unmixed iteration
+    /// after it (axtb's conventions), else none (the program's).
+    pub(crate) fn new(ethr: f64, pthr: f64, unmixed_last: bool) -> Self {
+        Self { ethr, pthr, econverged: false, pconverged: false, unmixed_last, met: false, done: false }
     }
 }
 
 impl ConvergenceRule for Gxtb201Rule {
     fn update(&mut self, it: &Iteration) -> Verdict {
+        if self.met {
+            self.done = true;
+            return Verdict::Done;
+        }
         self.econverged |= it.energy_change.abs() < self.ethr;
         self.pconverged |= it.iteration > 1 && it.residual < self.pthr;
-        if self.converged() {
-            Verdict::Done
-        } else {
-            Verdict::Continue
+        match (self.econverged && self.pconverged, self.unmixed_last) {
+            (false, _) => Verdict::Continue,
+            (true, false) => Verdict::Done,
+            (true, true) => {
+                self.met = true;
+                Verdict::OneMore { unmixed: true }
+            }
         }
     }
 
     fn converged(&self) -> bool {
-        self.econverged && self.pconverged
+        if self.unmixed_last {
+            self.done
+        } else {
+            self.econverged && self.pconverged
+        }
     }
 }
 
@@ -236,9 +258,22 @@ mod tests {
     /// Each criterion counts once met, in any iteration; the residual of iteration 1 does not.
     #[test]
     fn the_flags_are_sticky() {
-        let mut r = Gxtb201Rule::new(1e-6, 2e-5);
+        let mut r = Gxtb201Rule::new(1e-6, 2e-5, false);
         assert_eq!(r.update(&it(1, 1e-7, 0.0)), Verdict::Continue);
         assert_eq!(r.update(&it(2, 1e-3, 1e-6)), Verdict::Done);
+        assert!(r.converged());
+    }
+
+    /// axtb's conventions: once the test is met, one unmixed iteration ends the SCF (whatever
+    /// its energy change and residual, NaN for an unmixed iteration), and only then does it
+    /// count as converged (an SCF stopped at its iteration limit before it has not).
+    #[test]
+    fn one_unmixed_iteration_ends_axtb_conventions() {
+        let mut r = Gxtb201Rule::new(1e-6, 2e-5, true);
+        assert_eq!(r.update(&it(1, 1e-7, 0.0)), Verdict::Continue);
+        assert_eq!(r.update(&it(2, 1e-3, 1e-6)), Verdict::OneMore { unmixed: true });
+        assert!(!r.converged());
+        assert_eq!(r.update(&it(3, 1e-3, f64::NAN)), Verdict::Done);
         assert!(r.converged());
     }
 
