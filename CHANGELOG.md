@@ -3,6 +3,14 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
+## Unreleased
+
+- docs/python.md states how far a session's warm start moves a frame from a fresh `compute`, per
+  method and conventions (none where `scf.restart` is off, the default for g-xTB in its programs'
+  conventions), that sessions work in forked children, and how results differ across CPU types
+  (round-off; measured Intel against AMD).
+- `crates/axtb-py/tests/test_fork.py`: a forked child computes, whether or not its parent did.
+
 ## 0.2.0-alpha.1 (2026-11-17)
 
 The first alpha of 0.2. The Python package is new: axtb is a program of the qc* stack (qcdata

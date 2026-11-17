@@ -91,6 +91,28 @@ frames equal the CLI's trajectory cases of the golden set bit for bit. A session
 thread-safe (a lock serializes them; the GIL is released while the engine runs). A session step
 costs about 30 µs of Python on top of the calculation, `compute` about 100 µs (water).
 
+**How far a warm start moves a result.** A frame that starts from its lineage's history converges
+to the same SCF solution as a fresh `compute` at that geometry, within the SCF's thresholds, so
+the two differ by up to the accuracy model's bound at the session's factor
+([Accuracy](#accuracy)). With `scf.restart: off` no frame warm-starts, and every frame equals
+`compute` bit for bit. That is the default for g-xTB in its programs' conventions (`gxtb-2.0.1`,
+`gxtb-1.1.0`), as the g-xTB programs start every SCF fresh. Measured: a 6-geometry path of
+caffeine, taxol and [Cu(NH3)4]²⁺ (steps of 0.01 bohr per atom), the largest difference of any
+frame from a fresh `compute`:
+
+| method, conventions | `accuracy_scale` 1: energy (Eh), gradient (Eh/bohr) | 0.01: energy, gradient |
+|---|---|---|
+| g-xTB 2.0.1, `axtb` | 3.4e-8, 4.4e-5 | 7.5e-11, 1.6e-6 |
+| g-xTB 2.0.1, `gxtb-2.0.1` | 0, 0 (no warm start) | 0, 0 |
+| g-xTB v1.1, `axtb` | 1.3e-8, 1.0e-5 | 2.9e-8, 5.2e-6 ([Cu(NH3)4]²⁺; closed shells ≤ 5.3e-7) |
+| g-xTB v1.1, `gxtb-1.1.0` | 0, 0 (no warm start) | 0, 0 |
+| GFN2-xTB, `axtb`, `xtb-6.8.0`, `tblite-0.8.0` | 8.5e-9, 1.2e-5 | 1.0e-12, 9.2e-8 |
+
+A session can be forked: a child process (`os.fork`) opens sessions and computes whether or not
+the parent computed before the fork. axtb starts no thread that outlives a call; threads a
+process has at a fork are other libraries' (numpy's OpenBLAS pool, for one)
+(`crates/axtb-py/tests/test_fork.py`).
+
 ## Given starts
 
 `ProgramInput.given` takes a converged result (`qcdata.SinglePointData`, e.g. the `results` of
@@ -356,6 +378,23 @@ conventions; the solvation composite joins its parts' (`gxtb-v2.0.1:1+gfn2:1`). 
 changes with every axtb change that may change that method's results for an unchanged input,
 and never with one that keeps every result bit for bit; thread counts and a run-time LAPACK are
 not part of it. The CHANGELOG lists the epochs.
+
+**Across machines.** A build repeats its results bit for bit on one machine and thread count. On
+another CPU type its numbers differ by round-off, because the matrix kernels pick their blocking and
+instructions at run time. The same binary run on an Intel i9-11900H and an AMD Threadripper PRO
+9985WX, over the 177 cases of the CLI's golden set:
+- **Bit-identical:** 92 cases: most GFN2-xTB and GFN-FF cases, almost no g-xTB case.
+- **The rest:** energies ≤ 4.8e-13 Eh, gradients ≤ 1.4e-14 Eh/bohr, charges ≤ 8.8e-14,
+  Hessians ≤ 2.5e-12 Eh/bohr² and frequencies ≤ 6.2e-8 cm⁻¹ apart, with the same SCF
+  iterations.
+- **Exceptions:** an SCF converging slowly or at the edge of its test can take another number
+  of iterations. There the two machines agree only within the SCF's thresholds (the accuracy
+  model's bound). The golden set's stretched-water retry case took 36 and 39 iterations.
+  Ni(CO)4 at 5000 K with g-xTB v1.1 in its program's conventions took 14 and 13 on another
+  machine, 2.2e-10 Eh apart.
+
+So a stored result made on another CPU type agrees with a rerun to round-off as a rule, and
+within the accuracy model's bound always.
 
 ## qccompute
 
