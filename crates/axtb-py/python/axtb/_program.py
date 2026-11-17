@@ -8,8 +8,10 @@ from typing import Any
 
 from qcdata import CalcType, ProgramInput, ProgramOutput, SinglePointData
 
-from ._keywords import CALCTYPES, METHODS, plan_input, plan_threads, settings_schema
+from . import _axtb
+from ._keywords import CALCTYPES, METHODS, alias, canonical_method, plan_input, plan_threads, settings_schema
 from ._qc import VERSION, compute
+from ._session import Session
 
 __all__ = ["Axtb", "program"]
 
@@ -20,6 +22,22 @@ _RECORD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": "axtb's detail of a calculation; diagnostic, not stable across versions.",
     "properties": {
+        "warm_start": {
+            "type": ["boolean", "null"],
+            "description": "Session frames: whether the SCF started from its lineage's history (null: GFN-FF, which "
+            "keeps none). The composite: whether history was installed and a part's restart policy reuses it.",
+        },
+        "from_lineage": {"description": "Session frames: the lineage (or seed) whose history started it, or null."},
+        "accuracy": {
+            "type": "object",
+            "description": "With an accuracy target: the target, the thresholds used and the model's error "
+            "estimate at them (not measured on this run).",
+            "properties": {
+                "target": {"type": "object"},
+                "thresholds": {"type": "object"},
+                "estimate": {"type": "object"},
+            },
+        },
         "numerics": {"type": "string", "description": "The numerics identity of the code that made the numbers."},
         "method": {"type": "string", "description": "The canonical method."},
         "conventions": {"type": "string", "description": "The canonical conventions."},
@@ -32,6 +50,10 @@ _RECORD_SCHEMA: dict[str, Any] = {
                 "iterations": {"type": "integer"},
                 "mixer_used": {"type": "string"},
                 "attempts": {"type": "array", "items": {"type": "object"}},
+                "restart_fallback": {
+                    "type": "boolean",
+                    "description": "Session frames: the SCF from history failed and ran again fresh.",
+                },
             },
         },
         "energy_subtotals": {
@@ -89,7 +111,7 @@ class Axtb:
         return {
             "calctypes": calctypes,
             "methods": {m: calctypes for m in METHODS},
-            "sessions": False,
+            "sessions": True,
             "batches": False,
             "in_process": True,
             "thread_safe": True,
@@ -128,6 +150,29 @@ class Axtb:
     def compute(self, inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, SinglePointData]:
         """`axtb.compute`."""
         return compute(inp, ctx)
+
+    def open_session(self, inp: ProgramInput, ctx: Any = None, calctypes: Any = None) -> Session:
+        """`axtb.Session`: the protocol's session object."""
+        return Session(inp, calctypes=calctypes, ctx=ctx)
+
+    def numerics(self, spec: Any) -> str:
+        """The numerics identity of a spec (an input or a subprogram's `ProgramSpec`): the method's
+        epoch (``gfn2:1``; the g-xTB solvation composite ``gxtb-v2.0.1:1+gfn2:1``), the same for every
+        conventions of a method; axtb's version for a spec that names no method axtb has (its
+        result is a refusal). Never raises: the runner calls it before looking up the store."""
+        try:
+            method = canonical_method(spec.model.method)
+            solvent = (spec.keywords or {}).get("solvent") or {}
+            composite = (
+                method.startswith("gxtb")
+                and isinstance(solvent, dict)
+                and isinstance(solvent.get("correction"), str)
+                and alias(solvent["correction"]) in ("gfn2", "gfn2xtb")
+                and solvent.get("name") is not None
+            )
+            return str(_axtb.numerics(method, composite))
+        except Exception:  # noqa: BLE001 - an input axtb refuses: its result follows axtb's checks
+            return f"axtb {self.version()}"
 
 
 #: The object registered with qccompute.
