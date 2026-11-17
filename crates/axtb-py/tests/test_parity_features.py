@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import old_qccompute
 
 import axtb
 
@@ -126,7 +127,7 @@ def test_composite_reuses_the_gxtb_part():
 
 
 qcdata = pytest.importorskip("qcdata")
-qccompute = pytest.importorskip("qccompute")
+qccompute = old_qccompute(module_level=True)
 
 
 def _structure():

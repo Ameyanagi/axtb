@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import old_qccompute
 
 import axtb
 
@@ -121,7 +122,7 @@ def test_linear_and_gxtb():
 
 
 def test_qccodec_fields():
-    qccompute = pytest.importorskip("qccompute")
+    qccompute = old_qccompute()
     from qccodec.testing import check_normal_modes
     from qcdata import CalcType, Model, ProgramInput, Structure
 

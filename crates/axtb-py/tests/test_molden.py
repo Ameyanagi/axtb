@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import old_qccompute
 
 import axtb
 
@@ -178,7 +179,7 @@ def test_arguments():
 
 
 def test_qccodec():
-    qccompute = pytest.importorskip("qccompute")
+    qccompute = old_qccompute()
     from qccodec.exceptions import EncoderError
     from qcdata import CalcType, Model, ProgramInput, Structure
 

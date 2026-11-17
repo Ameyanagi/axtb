@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import old_qccompute
 
 import axtb
 
@@ -140,7 +141,7 @@ def test_rejected_settings():
 
 
 def test_qccodec():
-    qccompute = pytest.importorskip("qccompute")
+    qccompute = old_qccompute()
     from qcdata import CalcType, Model, ProgramInput, Structure
 
     numbers, pos = caffeine()

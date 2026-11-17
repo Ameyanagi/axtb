@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import old_qccompute
 
 import axtb
 
@@ -97,7 +98,7 @@ def test_molden_of_the_composite():
 
 
 def test_qccodec():
-    qccompute = pytest.importorskip("qccompute")
+    qccompute = old_qccompute()
     from qcdata import CalcType, Model, ProgramInput, Structure
 
     s = Structure(symbols=["C", "C", "O", "O", "H", "H", "H"], geometry=POS, charge=-1, multiplicity=1)
