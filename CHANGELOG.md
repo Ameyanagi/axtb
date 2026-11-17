@@ -3,7 +3,7 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
-## Unreleased
+## 0.1.2 (2026-11-17)
 
 - g-xTB 2.0.1 analytic Hessians: the response terms in a symmetric form
   (`AnalyticOptions::symmetric`, on by default) whose error is quadratic in the response
@@ -28,7 +28,7 @@ Rust crates, the CLI and the Python package share one version.
     geometry instead of building it again (results unchanged).
   - The D4 three-body term no longer gives NaN for a pair whose C6 is exactly zero (no element
     of the shipped tables has one).
-- The Python package's `qc` extra requires `qcdata<0.24`: qcdata 0.24 removes the
+- The Python package's `qc` extra requires `qcdata<0.24` and `qccodec<0.22`: qcdata 0.24 removes the
   `SinglePointData` fields the qccodec codec fills for Hessians (`freqs_wavenumber`,
   `normal_modes_cartesian`, `gibbs_free_energy`). axtb 0.2 fills `vibrational_analysis` and
   `thermochemistry` instead.
