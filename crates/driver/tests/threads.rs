@@ -71,3 +71,32 @@ fn tiny_one_off_tasks_run_on_one_thread() {
     }
     assert_eq!(out[0], out[1]);
 }
+
+/// The plan's thread bands: every method and calculation has bands from 0 atoms on, in order,
+/// with at least one thread and never fewer for more atoms; one thread at or below the one-thread
+/// size; a few sizes.
+#[test]
+fn planned_threads_by_size() {
+    use axtb_driver::{planned_threads, single_thread_atoms, Method, THREAD_BANDS};
+    for method in [Method::Gfn2, Method::GxtbV2_0_1, Method::GxtbV1_1, Method::Gfnff] {
+        for hessian in [false, true] {
+            let bands: Vec<_> = THREAD_BANDS.iter().filter(|(m, h, _)| *m == method && *h == hessian).collect();
+            assert_eq!(bands.len(), 1, "{method} {hessian}");
+            let b = bands[0].2;
+            assert_eq!(b[0].0, 0, "{method} {hessian}");
+            assert!(b.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 <= w[1].1), "{method} {hessian}");
+            assert!(b.iter().all(|&(_, n)| n >= 1));
+            assert_eq!(planned_threads(method, hessian, single_thread_atoms(method, hessian)), 1);
+            for atoms in 0..2000 {
+                assert!(planned_threads(method, hessian, atoms) <= planned_threads(method, hessian, atoms + 1));
+            }
+        }
+    }
+    assert_eq!(planned_threads(Method::Gfn2, false, 24), 1);
+    assert_eq!(planned_threads(Method::GxtbV2_0_1, false, 113), 2);
+    assert_eq!(planned_threads(Method::GxtbV2_0_1, true, 6), 2);
+    assert_eq!(planned_threads(Method::GxtbV2_0_1, true, 24), 8);
+    assert_eq!(planned_threads(Method::GxtbV2_0_1, true, 113), 16);
+    assert_eq!(planned_threads(Method::Gfn2, true, 113), 4);
+    assert_eq!(planned_threads(Method::Gfnff, true, 300), 2);
+}

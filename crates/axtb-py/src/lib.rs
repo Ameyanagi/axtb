@@ -7,7 +7,7 @@
 //! session's calculator with one committed wavefunction per lineage) and returns the response as
 //! a dict of numpy arrays. It also answers the planning's questions from the driver's tables
 //! (canonical names, the elements and shells of a method, numerics identities, the one-thread
-//! sizes). Errors are `axtb._axtb.Error` with the driver's kind and code.
+//! sizes and the planned threads). Errors are `axtb._axtb.Error` with the driver's kind and code.
 
 mod engine;
 
@@ -58,6 +58,8 @@ fn _axtb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(engine::supported_elements, m)?)?;
     m.add_function(wrap_pyfunction!(engine::numerics, m)?)?;
     m.add_function(wrap_pyfunction!(engine::single_thread_atoms, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::planned_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::thread_bands, m)?)?;
     m.add_function(wrap_pyfunction!(engine::valence_electrons, m)?)?;
     m.add_function(wrap_pyfunction!(engine::shell_layout, m)?)?;
     m.add_function(wrap_pyfunction!(engine::solvents, m)?)?;

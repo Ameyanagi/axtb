@@ -394,10 +394,16 @@ def test_plan_threads():
     big = Structure(symbols=["H", "H"] * 160, geometry=[[0, 0, 3.0 * i + 1.4 * (j % 2)] for i in range(160)
                                                         for j in range(2)])
     pb = plan(inp("gfn2", "gradient", structure=big))
-    assert K.plan_threads(pb, "gradient") == 8
-    assert K.plan_threads(pb, "hessian") is None
+    # 320 atoms: the bands of axtb_driver::THREAD_BANDS
+    assert K.plan_threads(pb, "gradient") == 2
+    assert K.plan_threads(pb, "hessian") == 8
     assert K.plan_threads(plan(inp("gfnff", "gradient", structure=big)), "gradient") == 1
+    assert K.plan_threads(plan(inp("gfnff", "hessian", structure=big)), "hessian") == 2
     assert K.plan_threads(plan(inp("gfn2", "hessian")), "hessian") == 1  # water: below the one-thread size
+    assert K.plan_threads(plan(inp("gxtb-v2.0.1", "hessian")), "hessian") == 2
+    assert K.plan_threads(plan(inp("gxtb-v1.1", "hessian", structure=big)), "hessian") == 16
+    table = K.thread_bands()
+    assert "| g-xTB 2.0.1 | Hessian | 2 (below 10), 4 (10-19), 8 (20-59), 16 (from 60) |" in table
 
 
 # ----------------------------------------------------------------------------- schema and docs

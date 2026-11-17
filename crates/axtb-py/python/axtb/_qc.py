@@ -93,26 +93,29 @@ def _cpus() -> int:
         return os.cpu_count() or 1
 
 
-def threads(p: Planned, largest: str, ctx: Any) -> tuple[int, list[ProgramWarning], str]:
-    """The threads of a calculation (or a session, by its largest calctype), the warnings and
-    the reason: the ``threads`` keyword, at most the grant (``resource_capped`` above it); without
-    the keyword the grant; without a grant (a direct call) the plan's threads (None: this
-    machine's CPUs)."""
+def _keyword_threads(p: Planned, grant: int | None) -> tuple[int, list[ProgramWarning], str]:
+    """The ``threads`` keyword, at most the grant (``resource_capped`` above it)."""
+    assert p.threads is not None
+    if grant is not None and p.threads > grant:
+        w = ProgramWarning(
+            code="resource_capped",
+            message=f"threads {p.threads} capped to the {grant} granted",
+            path="threads",
+        )
+        return grant, [w], f"the keyword ({p.threads}) capped to the grant"
+    return p.threads, [], "the keyword"
+
+
+def threads(p: Planned, calctype: str, ctx: Any) -> tuple[int, list[ProgramWarning], str]:
+    """The threads of one calculation, the warnings and the reason: the ``threads`` keyword, at
+    most the grant (``resource_capped`` above it); without the keyword the grant; without a
+    grant (a direct call) the plan's threads."""
     grant = getattr(ctx, "threads", None) if ctx is not None else None
     if p.threads is not None:
-        if grant is not None and p.threads > grant:
-            w = ProgramWarning(
-                code="resource_capped",
-                message=f"threads {p.threads} capped to the {grant} granted",
-                path="threads",
-            )
-            return grant, [w], f"the keyword ({p.threads}) capped to the grant"
-        return p.threads, [], "the keyword"
+        return _keyword_threads(p, grant)
     if grant is not None:
         return grant, [], "the runner's grant"
-    planned = plan_threads(p, largest)
-    if planned is None:
-        return _cpus(), [], "a direct call: this machine's CPUs (the plan asks for all)"
+    planned = plan_threads(p, calctype)
     return planned, [], f"a direct call: the plan's {planned}"
 
 

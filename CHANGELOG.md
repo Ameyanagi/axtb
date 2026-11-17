@@ -5,7 +5,20 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
-### SCF retries
+### Plan threads from measurements
+
+- The plan states a thread count for every calculation by method, calctype and size, never the
+  whole grant (`resources.threads` is no longer None for a Hessian): the largest count whose
+  parallel efficiency stayed at least 0.5 in thread-scaling runs (1-16 threads on an AMD
+  Threadripper PRO 9985WX node, 3-300 atoms; larger energies and gradients on a laptop).
+  Energies and gradients: 1 below 100 atoms, then 2, and 4 from 600 (g-xTB v1.1: from 300;
+  GFN-FF: 1 below 600, then 2), where the plan said 8 from 300 (GFN-FF from 1000). Hessians:
+  g-xTB 2.0.1 2/4/8/16 from 0/10/20/60 atoms, v1.1 4/16 from 0/10, GFN2-xTB 1/4/8 from 0/60/150,
+  GFN-FF 1/2 from 0/100. The `threads` keyword still wins; a direct `axtb.compute` runs on the
+  plan's threads, under a runner on the grant. The table is `axtb_driver::THREAD_BANDS`
+  (`planned_threads`), and docs/python.md's Threads section is generated from it.
+- The CLI keeps its default of 1 thread and its `task_threads` (a request's threads, 1 for a
+  molecule so small that threads only cost): the golden set's cases depend on both.
 
 - `scf.retries` (Python), `scf_retries` (the JSON request), `--scf-retry etemp=K,max_iter=N` (the
   CLI, repeated): an opt-in ladder of rungs `{etemp, max_iter}` (either key optional; a missing one
