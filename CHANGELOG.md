@@ -5,6 +5,20 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- Driver calls for sessions and the Python binding: `Calculator::set_history` (with the new
+  `Method::set_history`) installs a wavefunction as the method's own previous one, so the restart
+  policy still decides whether the next SCF starts from it (`set_wavefunction` marks it given); a
+  session that keeps one wavefunction per lineage computes what one calculator per lineage
+  computes, bit for bit. `Request::restart` (`previous` or `fresh`) sets the restart policy beside
+  `guess`, which then names the start alone (GFN2-xTB `sad` with `previous`); the old `guess`
+  values keep working. `Calculator::set_scf_accuracy` (with `Method::set_scf_accuracy`, every part's
+  for the composite) sets the SCF thresholds of later calls; GFN2-xTB keeps the integral screening
+  it was built with. `Error::code()` gives a stable code for every error variant
+  (`invalid_input`, `unsupported_element`, `topology_failed`, `scf_not_converged`,
+  `numerical_failure`, `not_applicable`; the CLI's JSON keeps `kind`); `axtb_driver::canonical`
+  gives the canonical name of a method, a method's conventions or a solvent, and
+  `supported_elements` the elements a method has parameters for (GFN2-xTB H-Rn, GFN-FF and g-xTB
+  2.0.1 H-Lr, v1.1 H-Ce, Yb-Ac and U); `axtb_solvation::canonical_solvent`.
 - For the Python binding (in Rust and the driver's response, not in the CLI's JSON): the
   orbitals with their basis, structured, without Molden text (`Task::orbitals`,
   `Response::orbitals`); per atom the core electrons outside the valence-only orbitals, Z less

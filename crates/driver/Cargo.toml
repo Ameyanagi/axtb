@@ -25,6 +25,8 @@ axtb = { workspace = true }
 axtb-gfnff = { workspace = true }
 # g-xTB (methods "gxtb-v1.1", "gxtb-v2.0.1") and its solvation composite
 axtb-gxtb = { workspace = true }
+# the canonical solvent names (`names::canonical`)
+axtb-solvation = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

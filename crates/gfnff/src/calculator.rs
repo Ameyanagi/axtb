@@ -227,6 +227,11 @@ impl Method for Calculator {
         wf.check(&self.fingerprint)?;
         Err(Error::Input("gfnff has no SCF; starting moments are GFN2-only".into()))
     }
+
+    /// GFN-FF has no SCF: no history but none.
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        wf.map_or(Ok(()), |w| self.set_wavefunction(w))
+    }
 }
 
 /// A numerical error unless every value is finite: no NaN or infinity leaves the crate.

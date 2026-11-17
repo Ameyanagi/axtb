@@ -49,7 +49,7 @@ mod task;
 
 pub use calculator::{gxtb_solvent_hint, Calculator, Wavefunction};
 pub use error::{Error, Result};
-pub use names::{canonical_method, Method};
+pub use names::{canonical, canonical_method, supported_elements, Method};
 pub use request::{Request, Temperatures};
 pub use response::{
     Attempt, Composite, Contribution, Details, Gfnff, HessianPart, Matrix, Named, Part, Parts, Response, Scf, Thermo,
@@ -167,6 +167,7 @@ pub fn analyze(req: &Request) -> Result<Response> {
         ("solvation_correction", req.solvation_correction.is_some()),
         ("correction_conventions", req.correction_conventions.is_some()),
         ("guess", req.guess.is_some()),
+        ("restart", req.restart.is_some()),
         ("fragment_charges", req.fragment_charges.is_some()),
         ("topology_positions", req.topology_positions.is_some()),
         ("gradient", req.gradient),

@@ -41,6 +41,20 @@ impl Error {
         }
     }
 
+    /// A stable machine-readable code of the error, for the Python binding (not in the CLI's
+    /// JSON, whose `kind` stays): `invalid_input`, `unsupported_element`, `topology_failed`,
+    /// `scf_not_converged`, `numerical_failure` or `not_applicable`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::Input(_) => "invalid_input",
+            Error::UnsupportedElement { .. } => "unsupported_element",
+            Error::Topology(_) => "topology_failed",
+            Error::ScfNotConverged { .. } => "scf_not_converged",
+            Error::Numerical(_) => "numerical_failure",
+            Error::NotApplicable(_) => "not_applicable",
+        }
+    }
+
     /// Whether the request is at fault (input, unsupported element, topology, not applicable):
     /// Python raises `axtb.InputError`, a `ValueError`.
     pub fn is_input(&self) -> bool {

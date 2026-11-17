@@ -240,6 +240,18 @@ pub fn solvent_names(model: Model) -> Vec<&'static str> {
     names
 }
 
+/// The name `model`'s parameter table has for `solvent` (any alias xtb accepts, in any case),
+/// or `None` when the model has no parameters for it.
+pub fn canonical_solvent(solvent: &str, model: Model) -> Option<&'static str> {
+    let lower = solvent.trim().to_ascii_lowercase();
+    let norm = params::NORMALIZE.iter().find(|(a, _)| *a == lower).map_or(lower.as_str(), |(_, t)| *t);
+    let table = match model {
+        Model::Alpb => params::GFN2_ALPB,
+        Model::Gbsa => params::GFN2_GBSA,
+    };
+    table.iter().find(|(n, _)| *n == norm).map(|(n, _)| *n)
+}
+
 fn lookup(solvent: &str, model: Model) -> Result<&'static params::RawParam, SolvError> {
     // xtb: lowercase, then normalizeSolventName, then the GFN2 selection table
     let lower = solvent.trim().to_ascii_lowercase();

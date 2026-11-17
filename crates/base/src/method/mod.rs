@@ -81,6 +81,24 @@ pub trait Method: Send + Sync {
     /// Forget the wavefunction: the next SCF starts from the method's own start.
     fn reset_wavefunction(&mut self) {}
 
+    /// Install `wf` as the method's own previous wavefunction, as if its last SCF had left it:
+    /// the next SCF starts from it as the restart policy says (unlike
+    /// [`set_wavefunction`](Method::set_wavefunction), whose wavefunction it starts from
+    /// whatever the policy). `None` forgets the wavefunction. Checked as `set_wavefunction`
+    /// checks. So a caller that keeps the wavefunction of each of several lineages
+    /// ([`wavefunction`](Method::wavefunction) after a call) and installs it before the next call
+    /// of that lineage computes what one method per lineage computes. Default: `None` resets, a
+    /// wavefunction is refused (a method without an SCF).
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        match wf {
+            None => {
+                self.reset_wavefunction();
+                Ok(())
+            }
+            Some(_) => Err(Error::Input(format!("{} has no SCF to start from a wavefunction", self.info().name))),
+        }
+    }
+
     /// The SCF settings of later calls; `None`: no SCF.
     fn scf_settings(&self) -> Option<&ScfSettings> {
         None
@@ -90,6 +108,18 @@ pub trait Method: Send + Sync {
     /// set up stays (GFN2-xTB's integral screening keeps the accuracy it was built with).
     fn set_scf_settings(&mut self, _settings: ScfSettings) -> Result<()> {
         Err(Error::Input(format!("{} has no SCF settings", self.info().name)))
+    }
+
+    /// Set the SCF accuracy of later calls (the SCF thresholds; what the method built when it
+    /// was set up stays, as with [`set_scf_settings`](Method::set_scf_settings), through which the
+    /// default goes). A composite sets it in every part.
+    fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
+        let mut s = self
+            .scf_settings()
+            .cloned()
+            .ok_or_else(|| Error::Input(format!("{} has no SCF accuracy", self.info().name)))?;
+        s.accuracy = accuracy;
+        self.set_scf_settings(s)
     }
 }
 

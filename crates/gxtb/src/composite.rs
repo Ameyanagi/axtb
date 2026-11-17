@@ -469,4 +469,22 @@ impl Method for CompositeCalculator {
     fn reset_wavefunction(&mut self) {
         self.inner.reset_wavefunction()
     }
+
+    /// The parts' own previous wavefunctions (refused as `set_wavefunction` refuses).
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        if let Some(w) = wf {
+            if matches!(w.data(), WavefunctionData::Scf(d) if d.densities.is_empty()) {
+                return Err(Error::Input(
+                    "starting moments are GFN2-only; g-xTB starts from a whole wavefunction (the guess of another \
+                     calculator)"
+                        .into(),
+                ));
+            }
+        }
+        self.inner.set_history(wf)
+    }
+
+    fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
+        self.inner.set_scf_accuracy(accuracy)
+    }
 }

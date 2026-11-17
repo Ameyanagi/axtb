@@ -106,6 +106,14 @@ impl Calculator {
         let threads = req.threads.unwrap_or(1);
         let uhf = req.uhf.map(|u| u as usize);
         let guess = req.guess.as_deref().map(names::guess).transpose()?;
+        // `restart` sets the policy; `guess` then names a start alone
+        let restart = req.restart.as_deref().map(names::restart).transpose()?;
+        if restart.is_some() && matches!(guess, Some(names::Guess::Previous | names::Guess::Fresh)) {
+            return Err(input(
+                "with restart, guess names where an SCF starts without a previous state (\"eeq\" or \"sad\" for \
+                 GFN2-xTB, \"eeq-bc\" for g-xTB), not \"previous\" or \"fresh\"",
+            ));
+        }
         let method: Box<dyn MethodTrait> = match kind {
             Method::Gfn2 => {
                 let conventions =
@@ -126,11 +134,12 @@ impl Calculator {
                     }
                     _ => {}
                 }
-                // a named start at every geometry is the method's own start at every geometry
-                opts.scf.restart = guess.map(|g| match g {
+                // a named start at every geometry is the method's own start at every geometry,
+                // unless `restart` says otherwise
+                opts.scf.restart = restart.or(guess.map(|g| match g {
                     names::Guess::Previous => Restart::Previous,
                     _ => Restart::Fresh,
-                });
+                }));
                 opts.threads = threads;
                 opts.trace = req.scf_trace;
                 opts.dispersion = req.dispersion.unwrap_or(true);
@@ -159,9 +168,10 @@ impl Calculator {
                     || req.max_iter.is_some()
                     || req.mixer.is_some()
                     || req.guess.is_some()
+                    || req.restart.is_some()
                     || req.scf_trace
                 {
-                    bad.push("SCF settings (accuracy, etemp, max_iter, mixer, guess, scf_trace)");
+                    bad.push("SCF settings (accuracy, etemp, max_iter, mixer, guess, restart, scf_trace)");
                 }
                 refuse(kind, &bad)?;
                 let conventions = names::gfnff_conventions(req.conventions.as_deref().unwrap_or("axtb"))?;
@@ -180,7 +190,7 @@ impl Calculator {
                 };
                 Box::new(axtb_gfnff::Calculator::new(&req.numbers, setup, req.charge, opts)?)
             }
-            Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_method(req, kind, threads, uhf, guess)?,
+            Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_method(req, kind, threads, uhf, guess, restart)?,
         };
         let numerics = crate::numerics(kind, kind.is_gxtb() && req.solvation_correction.is_some());
         Ok(Self { method, kind, numerics, numbers: req.numbers.clone(), charge: req.charge, uhf, threads })
@@ -303,6 +313,20 @@ impl Calculator {
         Ok(self.method.set_wavefunction(&Wavefunction::new(fingerprint, WavefunctionData::Scf(data)))?)
     }
 
+    /// Install `wf` as the method's own previous wavefunction (`None`: none): unlike
+    /// [`Calculator::set_wavefunction`], the restart policy decides whether the next SCF starts
+    /// from it. A session that keeps one wavefunction per lineage installs it before each call of
+    /// that lineage and computes what one calculator per lineage computes.
+    pub fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        Ok(self.method.set_history(wf)?)
+    }
+
+    /// The SCF accuracy of later calls: the SCF thresholds (GFN2-xTB keeps the integral screening
+    /// it was built with); every part's for the composite. GFN-FF has none.
+    pub fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
+        Ok(self.method.set_scf_accuracy(accuracy)?)
+    }
+
     /// Forget the previous wavefunction(s): the next SCF starts from the method's own guess.
     /// `gxtb_only`: of g-xTB only (the composite's g-xTB part; for every other method nothing).
     pub fn reset_wavefunction(&mut self, gxtb_only: bool) {
@@ -334,6 +358,7 @@ fn gxtb_method(
     threads: usize,
     uhf: Option<usize>,
     guess: Option<names::Guess>,
+    restart: Option<Restart>,
 ) -> Result<Box<dyn MethodTrait>> {
     let version = kind.gxtb_version().expect("a g-xTB method");
     let conventions = req.conventions.as_deref().map(names::gxtb_conventions).transpose()?.unwrap_or_default();
@@ -356,7 +381,7 @@ fn gxtb_method(
                 etemp: req.etemp,
                 max_iter: req.max_iter,
                 restart: match guess {
-                    None => None,
+                    None => restart,
                     Some(names::Guess::Previous) => Some(Restart::Previous),
                     Some(names::Guess::Fresh) => Some(Restart::Fresh),
                     Some(_) => {
@@ -392,7 +417,8 @@ fn gxtb_method(
     o.scf.etemp = req.etemp;
     o.scf.max_iter = req.max_iter;
     o.scf.restart = match guess {
-        None => None,
+        None => restart,
+        Some(names::Guess::EeqBc) if restart.is_some() => restart,
         Some(names::Guess::Previous) => Some(Restart::Previous),
         Some(names::Guess::Fresh | names::Guess::EeqBc) => Some(Restart::Fresh),
         Some(names::Guess::Eeq | names::Guess::Sad) => {

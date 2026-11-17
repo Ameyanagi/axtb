@@ -196,6 +196,66 @@ pub(crate) fn correction(name: &str) -> Result<axtb_gxtb::Correction> {
     }
 }
 
+/// The restart policy of a calculator's SCFs (`restart`): `previous` (also `restart`) or
+/// `fresh` (also `off`).
+pub fn restart(name: &str) -> Result<axtb::method::Restart> {
+    match key(name).as_str() {
+        "previous" | "restart" => Ok(axtb::method::Restart::Previous),
+        "fresh" | "off" => Ok(axtb::method::Restart::Fresh),
+        _ => Err(Error::Input(format!("unknown restart {name:?}; use \"previous\" or \"fresh\""))),
+    }
+}
+
+/// The canonical name of `name` of a kind (for the Python binding): `method` (see
+/// [`Method::parse`]); `conventions` of `method` (required; e.g. `xtb-6.8.0` -> `xtb`); `solvent`
+/// (ALPB's table name, else GBSA's; e.g. `H2O` -> `water`).
+pub fn canonical(kind: &str, name: &str, method: Option<&str>) -> Result<&'static str> {
+    match key(kind).as_str() {
+        "method" => canonical_method(name),
+        "conventions" => {
+            let m = method.ok_or_else(|| Error::Input("canonical conventions need the method".into()))?;
+            Ok(match Method::parse(m)? {
+                Method::Gfn2 => gfn2_conventions(name)?.label(),
+                Method::Gfnff => gfnff_conventions(name)?.label(),
+                Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_conventions(name)?.label(),
+            })
+        }
+        "solvent" => [axtb_solvation::Model::Alpb, axtb_solvation::Model::Gbsa]
+            .into_iter()
+            .find_map(|m| axtb_solvation::canonical_solvent(name, m))
+            .ok_or_else(|| Error::Input(format!("unknown solvent {name:?}"))),
+        _ => {
+            Err(Error::Input(format!("unknown kind of name {kind:?}; use \"method\", \"conventions\" or \"solvent\"")))
+        }
+    }
+}
+
+/// The atomic numbers `method` has parameters for (every element a one-atom calculation of the
+/// method can be set up for; computed once per process).
+pub fn supported_elements(method: Method) -> Vec<usize> {
+    use std::sync::OnceLock;
+    static TABLE: [OnceLock<Vec<usize>>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    let i = match method {
+        Method::Gfn2 => 0,
+        Method::Gfnff => 1,
+        Method::GxtbV1_1 => 2,
+        Method::GxtbV2_0_1 => 3,
+    };
+    TABLE[i]
+        .get_or_init(|| {
+            (1..=118)
+                .filter(|&z| {
+                    let req = crate::Request {
+                        method: Some(method.name().into()),
+                        ..crate::Request::new(vec![z], vec![[0.0; 3]])
+                    };
+                    !matches!(crate::Calculator::new(&req), Err(Error::UnsupportedElement { .. }))
+                })
+                .collect()
+        })
+        .clone()
+}
+
 /// Where a calculator's SCFs start ([`guess`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Guess {

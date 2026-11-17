@@ -632,6 +632,43 @@ impl Method for Calculator {
     /// densities (v1.1), with its moments and magnetizations (2.0.1), checked against the setup
     /// when the SCF starts.
     fn set_wavefunction(&mut self, wf: &Wavefunction) -> Result<()> {
+        self.install(wf)?;
+        self.given = true;
+        Ok(())
+    }
+
+    /// The state of `wf` as this calculator's previous one (the restart policy decides).
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        match wf {
+            None => self.reset_wavefunction(),
+            Some(wf) => {
+                self.install(wf)?;
+                self.given = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn reset_wavefunction(&mut self) {
+        self.state = None;
+        self.given = false;
+    }
+
+    fn scf_settings(&self) -> Option<&ScfSettings> {
+        Some(&self.options.scf)
+    }
+
+    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
+        let o = Options { scf: settings, ..self.options.clone() };
+        o.check(self.version)?;
+        self.options = o;
+        Ok(())
+    }
+}
+
+impl Calculator {
+    /// The state of `wf` as the next SCF's start (checked against the setup when it starts).
+    fn install(&mut self, wf: &Wavefunction) -> Result<()> {
         wf.check(&self.fingerprint)?;
         let WavefunctionData::Scf(d) = wf.data() else {
             return Err(Error::Input("the wavefunction belongs to another kind of calculation".into()));
@@ -655,23 +692,6 @@ impl Method for Calculator {
             })),
             Version::V1_1 => Start::V1_1(d.densities.clone()),
         });
-        self.given = true;
-        Ok(())
-    }
-
-    fn reset_wavefunction(&mut self) {
-        self.state = None;
-        self.given = false;
-    }
-
-    fn scf_settings(&self) -> Option<&ScfSettings> {
-        Some(&self.options.scf)
-    }
-
-    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
-        let o = Options { scf: settings, ..self.options.clone() };
-        o.check(self.version)?;
-        self.options = o;
         Ok(())
     }
 }

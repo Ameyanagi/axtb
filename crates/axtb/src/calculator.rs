@@ -421,6 +421,44 @@ impl Method for Calculator {
     /// Start the next SCF from the shell charges and atomic multipoles of `wf` (e.g. another
     /// GFN2-xTB calculator's, or another program's converged moments).
     fn set_wavefunction(&mut self, wf: &Wavefunction) -> Result<()> {
+        self.install(wf)?;
+        self.given = true;
+        Ok(())
+    }
+
+    /// The moments of `wf` as this calculator's previous ones (the restart policy decides).
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        match wf {
+            None => self.reset_wavefunction(),
+            Some(wf) => {
+                self.install(wf)?;
+                self.given = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn reset_wavefunction(&mut self) {
+        self.start = None;
+        self.given = false;
+    }
+
+    fn scf_settings(&self) -> Option<&ScfSettings> {
+        Some(&self.options.scf)
+    }
+
+    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
+        let mut o = self.options.clone();
+        o.scf = settings;
+        check_scf_options(&o.run(self.threads.count(), &Want::ENERGY))?;
+        self.options.scf = o.scf;
+        Ok(())
+    }
+}
+
+impl Calculator {
+    /// The moments of `wf` as the next SCF's start (checked).
+    fn install(&mut self, wf: &Wavefunction) -> Result<()> {
         wf.check(&self.fingerprint)?;
         let WavefunctionData::Scf(d) = wf.data() else {
             return Err(Error::Input("the wavefunction belongs to another kind of calculation".into()));
@@ -448,24 +486,6 @@ impl Method for Calculator {
             dpat: d.atomic_dipoles.clone(),
             qpat: d.atomic_quadrupoles.clone(),
         });
-        self.given = true;
-        Ok(())
-    }
-
-    fn reset_wavefunction(&mut self) {
-        self.start = None;
-        self.given = false;
-    }
-
-    fn scf_settings(&self) -> Option<&ScfSettings> {
-        Some(&self.options.scf)
-    }
-
-    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
-        let mut o = self.options.clone();
-        o.scf = settings;
-        check_scf_options(&o.run(self.threads.count(), &Want::ENERGY))?;
-        self.options.scf = o.scf;
         Ok(())
     }
 }
