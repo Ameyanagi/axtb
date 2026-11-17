@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-//! Orbital occupations of g-xTB at a finite electronic temperature, shared by both versions:
-//! the g-xTB programs' Fermi smearing and the exact filling of the default conventions, with
-//! their entropy terms. tblite's and xtb's rules, the Aufbau filling and the Newton iteration of
-//! xtb's `fermismear` come from [`axtb_base::occupations`]; [`crate::fermi`] chooses among these per
+//! Orbital occupations of the g-xTB programs at a finite electronic temperature: their Fermi
+//! smearing with their entropy terms. tblite's and xtb's rules, the Aufbau filling, the Newton
+//! iteration of xtb's `fermismear` and the exact filling of g-xTB's default conventions (both
+//! versions) come from [`axtb_base::occupations`]; [`crate::fermi`] chooses among these per
 //! version and conventions.
 //!
 //! | rule | function and parameters | used by | from |
 //! |---|---|---|---|
 //! | g-xTB 1.1.0 | [`fill_gxtb110`], [`Fermismear::GXTB110`], kB [`KB_GXTB110`] | v1.1, program conventions | the 1.1.0 program's `fermismear_` (decoded from the binary; `docs/gxtb-v1.1-spec.md` §4.17) |
 //! | g-xTB 2.0.1 | [`fill_gxtb201`], [`NEWTON_GXTB201`] | 2.0.1, program conventions | tblite's `get_fermi_filling` as compiled into the 2.0.1 program (`docs/gxtb-v2.0.1-spec.md` §4.17.1) |
-//! | exact | [`fill_exact`], [`EXACT_MAX_STEPS`] | both versions, default conventions | axtb: the Fermi level to round-off, so that E − TS is variational in the occupations |
+//! | exact | [`axtb_base::occupations::fill_exact`] | both versions, default conventions | axtb: the Fermi level to round-off, so that E − TS is variational in the occupations |
 //!
-//! Entropy terms: [`entropy_thresholded`] (the 1.1.0 program), [`entropy_exact`] (the exact
-//! filling); the 2.0.1 program's is tblite's ([`axtb_base::occupations::entropy_tblite`]).
-//!
-//! The exact filling is AFH's own; only g-xTB's default conventions use it.
+//! Entropy terms: [`entropy_thresholded`] (the 1.1.0 program); the 2.0.1 program's is tblite's
+//! ([`axtb_base::occupations::entropy_tblite`]), the exact filling's
+//! [`axtb_base::occupations::entropy_exact`].
 
 use axtb_base::occupations::{aufbau, fermismear_iterate, Newton};
 
@@ -27,9 +26,6 @@ const SQRT_EPSILON: f64 = 1.490_116_119_384_765_6e-8;
 
 /// The Newton search of the g-xTB 2.0.1 program: √ε = 2⁻²⁶ ≈ 1.49e-8 electrons, 200 steps.
 pub const NEWTON_GXTB201: Newton = Newton { tol: SQRT_EPSILON, max_steps: 200 };
-
-/// Steps of the exact search ([`fill_exact`]); it reaches round-off long before.
-pub const EXACT_MAX_STEPS: usize = 500;
 
 /// The g-xTB 1.1.0 program's `fermismear_` ([`fill_gxtb110`]): its stopping rule and the guard
 /// it adds to Σ f' in the step's denominator.
@@ -181,103 +177,6 @@ pub fn fill_gxtb201(nel: f64, kt: f64, emo: &[f64], occ: &mut [f64], newton: New
     Some(ef_used)
 }
 
-/// Fermi occupation f = 1/(1 + eˣ) and 1 − f = eˣ/(1 + eˣ), both without cancellation
-/// (the exact filling).
-#[inline]
-pub fn fermi_pair(x: f64) -> (f64, f64) {
-    if x > 0.0 {
-        let e = (-x).exp();
-        (e / (1.0 + e), 1.0 / (1.0 + e))
-    } else {
-        let e = x.exp();
-        (1.0 / (1.0 + e), e / (1.0 + e))
-    }
-}
-
-/// Exact filling of `nel` (real) electrons of one spin over the levels `emo` at `kt` > 0:
-/// the occupations `occ` (as long as `emo`) at the Fermi level μ with Σ f = nel to round-off,
-/// and μ. Σ f increases monotonically with μ: a bracket around the solution, then Newton steps
-/// from the midpoint of the levels ⌈nel⌉ and ⌈nel⌉ + 1, replaced by bisection when they leave
-/// the bracket; stop when |Σ f − nel| ≤ 4 ε max(nel, 1), when the step leaves μ unchanged or the
-/// bracket is narrower than 2 ε max(|μ|, kT), or after `max_steps` ([`EXACT_MAX_STEPS`]).
-/// No electrons: empty levels and μ 50 kT below the first; every level full: μ 50 kT above the
-/// last.
-pub fn fill_exact(nel: f64, kt: f64, emo: &[f64], occ: &mut [f64], max_steps: usize) -> f64 {
-    let n = emo.len();
-    let count = |mu: f64| -> (f64, f64) {
-        let mut s = 0.0;
-        let mut ds = 0.0;
-        for &e in emo {
-            let (f, g) = fermi_pair((e - mu) / kt);
-            s += f;
-            ds += f * g / kt;
-        }
-        (s, ds)
-    };
-    if n == 0 || nel <= 0.0 {
-        occ.fill(0.0);
-        return emo.first().copied().unwrap_or(0.0) - 50.0 * kt;
-    }
-    if nel >= n as f64 {
-        occ.fill(1.0);
-        return emo[n - 1] + 50.0 * kt;
-    }
-    let emin = emo.iter().copied().fold(f64::INFINITY, f64::min);
-    let emax = emo.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let (mut lo, mut hi) = (emin - kt, emax + kt);
-    while count(lo).0 > nel {
-        lo -= (hi - lo).max(kt);
-    }
-    while count(hi).0 < nel {
-        hi += (hi - lo).max(kt);
-    }
-    let k = nel.ceil() as usize;
-    let mut mu = if k >= 1 && k < n { 0.5 * (emo[k - 1] + emo[k]) } else { 0.5 * (lo + hi) };
-    if !(mu > lo && mu < hi) {
-        mu = 0.5 * (lo + hi);
-    }
-    let tol = 4.0 * f64::EPSILON * nel.max(1.0);
-    for _ in 0..max_steps {
-        let (s, ds) = count(mu);
-        let r = s - nel;
-        if r.abs() <= tol {
-            break;
-        }
-        if r > 0.0 {
-            hi = mu;
-        } else {
-            lo = mu;
-        }
-        let newton = if ds > 0.0 { mu - r / ds } else { f64::NAN };
-        let next = if newton > lo && newton < hi { newton } else { 0.5 * (lo + hi) };
-        if next == mu || hi - lo <= 2.0 * f64::EPSILON * mu.abs().max(kt) {
-            mu = next;
-            break;
-        }
-        mu = next;
-    }
-    for (o, &e) in occ.iter_mut().zip(emo) {
-        *o = fermi_pair((e - mu) / kt).0;
-    }
-    mu
-}
-
-/// Entropy term kT Σ [f ln f + (1 − f) ln(1 − f)] of the levels `emo` filled at the Fermi level
-/// `mu` (the exact filling; f and 1 − f from [`fermi_pair`]; ≤ 0).
-pub fn entropy_exact(emo: &[f64], mu: f64, kt: f64) -> f64 {
-    let mut s = 0.0;
-    for &e in emo {
-        let (f, g) = fermi_pair((e - mu) / kt);
-        if f > 0.0 {
-            s += f * f.ln();
-        }
-        if g > 0.0 {
-            s += g * g.ln();
-        }
-    }
-    kt * s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,20 +191,6 @@ mod tests {
     #[test]
     fn gxtb201_tolerance_is_sqrt_epsilon() {
         assert_eq!(NEWTON_GXTB201.tol.to_bits(), f64::EPSILON.sqrt().to_bits());
-    }
-
-    #[test]
-    fn exact_filling_places_the_electrons() {
-        let emo = [-0.9, -0.5, -0.31, -0.30, -0.29, 0.1, 0.2];
-        let mut occ = [0.0; 7];
-        for kt in [1e-4, 3e-3, 1.6e-2, 0.2] {
-            for nel in [1.0, 3.0, 4.0, 6.0] {
-                let mu = fill_exact(nel, kt, &emo, &mut occ, EXACT_MAX_STEPS);
-                let s: f64 = occ.iter().sum();
-                assert!((s - nel).abs() < 1e-13, "kt {kt} nel {nel}: {s}");
-                assert!(entropy_exact(&emo, mu, kt) <= 0.0);
-            }
-        }
     }
 
     #[test]

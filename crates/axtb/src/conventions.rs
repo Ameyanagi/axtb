@@ -211,12 +211,14 @@ pub struct ConventionParams {
     pub scc_gradient: SccGradient,
     /// Diagonalize the SCF's Fock matrices for the orbitals that enter the density only (those
     /// with an occupation above [`OCCUPATION_CUTOFF`], as xtb 6.8.0 builds its density,
-    /// grimme-lab/xtb#1466; [`GenEigSolver::solve_lowest`](crate::linalg::GenEigSolver::solve_lowest))
-    /// unless all orbitals are needed (Molden files, Hessians, open-shell bond orders), and
-    /// build the density matrices as triangular products (`linalg::weighted_outer_sym`, the
-    /// syrk of grimme-lab/xtb#1466: half the flops, rounded differently). The program
-    /// conventions keep the full eigensolver and the full products, so that their results
-    /// stay bit for bit.
+    /// grimme-lab/xtb#1466; [`GenEigSolver::solve_lowest`](crate::linalg::GenEigSolver::solve_lowest)),
+    /// whatever the calculation asks for: where the other orbitals are needed (the orbitals of
+    /// a single point, a Hessian's response) they are computed once after the SCF from its last
+    /// Fock matrix ([`GenEigSolver::solve_rest`](crate::linalg::GenEigSolver::solve_rest)), so that
+    /// asking for them changes no other number. Build the density matrices as triangular
+    /// products (`linalg::weighted_outer_sym`, the syrk of grimme-lab/xtb#1466: half the flops,
+    /// rounded differently). The program conventions keep the full eigensolver and the full
+    /// products, so that their results stay bit for bit.
     pub occupied_orbitals_only: bool,
     /// D4 three-body energy and gradient by pair sums (xtb 6.8.0, grimme-lab/xtb#1464,
     /// [`D4Dispersion::with_pair_sums`](axtb_d4::D4Dispersion::with_pair_sums)); the program

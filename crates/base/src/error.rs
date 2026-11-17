@@ -17,6 +17,10 @@ pub enum Error {
     ScfNotConverged { iterations: usize, energy_change: f64, residual: f64 },
     /// A numerical failure (e.g. overlap matrix not positive definite).
     Numerical(String),
+    /// A request the method or its conventions cannot honour by design (e.g. a Hamiltonian
+    /// matrix where the SCF diagonalizes a mixed one, orbitals of a force field), refused before
+    /// anything runs.
+    NotApplicable(String),
 }
 
 impl fmt::Display for Error {
@@ -32,6 +36,7 @@ impl fmt::Display for Error {
                 "SCF not converged in {iterations} iterations (last energy change {energy_change:.3e} Eh, residual {residual:.3e})"
             ),
             Error::Numerical(msg) => write!(f, "numerical failure: {msg}"),
+            Error::NotApplicable(msg) => write!(f, "not applicable: {msg}"),
         }
     }
 }

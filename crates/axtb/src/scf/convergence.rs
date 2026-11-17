@@ -51,6 +51,14 @@ pub trait ConvergenceRule {
     fn residual_norm(&self, r: &[f64]) -> f64 {
         rms(r)
     }
+    /// Whether the unmixed iteration this rule asks for ([`Verdict::OneMore`] with `unmixed`)
+    /// runs even when the test is met in the last iteration the limit allows: true for a final
+    /// iteration of axtb's own that the reference program does not run (so that the iteration
+    /// limit stops the SCF where the program's would), false (the default) where the program's
+    /// rule itself asks for it.
+    fn final_iteration_past_limit(&self) -> bool {
+        false
+    }
 }
 
 /// GFN2-xTB's convergence test (xtb, tblite; points 2 and 3 of

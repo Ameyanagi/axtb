@@ -39,6 +39,9 @@ pub const HARTREE_TO_KCAL_PER_MOL: f64 = HARTREE_TO_JOULE * AVOGADRO / KCAL_TO_J
 /// Electron mass in unified atomic mass units. CODATA 2022 "electron mass in u"
 /// 5.485 799 090 441 e-4 u (qcref `ELECTRON_MASS_IN_U`); for mass-weighted Hessians.
 pub const ELECTRON_MASS_IN_U: f64 = 5.485799090441e-4;
+/// Electron mass in kilograms. CODATA 2022 "electron mass" 9.109 383 7139 e-31 kg; for
+/// moments of inertia in SI units.
+pub const ELECTRON_MASS_KG: f64 = 9.1093837139e-31;
 /// Hartree in inverse centimeters. CODATA 2022 "hartree-inverse meter relationship"
 /// 2.194 746 313 6314 e7 m⁻¹, divided by 100.
 pub const HARTREE_TO_WAVENUMBER: f64 = 2.1947463136314e7 / 100.0;

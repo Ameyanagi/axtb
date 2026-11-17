@@ -75,8 +75,14 @@ pub struct Request {
     pub correction_conventions: Option<String>,
     /// Where the SCFs of a calculator start: `previous` (the previous geometry's state), `fresh`
     /// (the method's own start at every geometry), or a named start at every geometry: `eeq` or
-    /// `sad` (GFN2-xTB), `eeq-bc` (g-xTB); default: the conventions' choice.
+    /// `sad` (GFN2-xTB), `eeq-bc` (g-xTB); default: the conventions' choice. With `restart`, only
+    /// the named start (where an SCF starts without a previous state).
     pub guess: Option<String>,
+    /// Whether a calculator's SCFs start from the previous geometry's state: `previous` (also
+    /// `restart`) or `fresh` (also `off`); default: the conventions' choice (or `guess`'s). With it,
+    /// `guess` names the start alone, so that e.g. GFN2-xTB's neutral-atom start (`sad`) and
+    /// restarts from the previous state go together.
+    pub restart: Option<String>,
     /// GFN-FF: charges of the molecular fragments, in the order of their first atoms (one per
     /// fragment, summing to the total charge).
     pub fragment_charges: Option<Vec<f64>>,
@@ -107,6 +113,13 @@ pub struct Request {
     /// Add the Mayer-Wiberg bond orders (N x N) to the response (SCF methods).
     #[serde(default)]
     pub bond_orders: bool,
+    /// Add the AO overlap matrix of the SCF to the response (SCF methods).
+    #[serde(default)]
+    pub overlap: bool,
+    /// Add the Hamiltonian whose eigenvectors are the orbitals, and the overlap, to the response
+    /// (SCF methods; not g-xTB 2.0.1 in the program's conventions).
+    #[serde(default)]
+    pub hamiltonian: bool,
 
     /// `false` skips the vibrational analysis of the Hessian.
     pub vibrations: Option<bool>,

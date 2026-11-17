@@ -280,7 +280,12 @@ caffeine and 19 ms for taxol on one thread of the i9-11900H, symmetry detection 
 ladder runs 1000 and 3000 K): energies ≤ 1.8e-12 Eh ((H2O)100 1.1e-11), same SCF iterations,
 analytic gradients ≤ 5e-11 Eh/bohr; against 1.1.0: energies ≤ 2e-11 Eh, same iterations. A few
 slowly converging SCFs (Fe4, TmH3 at 3000/5000 K) end where rounding decides the last digits, or
-whether they converge within 250 iterations at all, in either program (spec §4.17.1).
+whether they converge within 250 iterations at all, in either program (spec §4.17.1). Ni(CO)4 at
+5000 K in v1.1's program conventions is exactly tetrahedral. Its SCF path follows the
+eigensolver's choice of vectors within degenerate levels, so its iteration count and last
+~1e-10 Eh depend on the CPU: 14 iterations and 3.7e-11 Eh on the laptop, 13 and 2.2e-10 in CI.
+Shifting Ni by 1e-13 Å gives 14 iterations and 2e-13 Eh, and converged tightly the two
+structures agree to 5e-13 Eh.
 Finite-temperature Hessians agree with tight references to ≤ 3e-9 Eh/bohr² (spec §11.6);
 `bench/results/gxtb_etemp.json` from `python tests/gxtb_etemp_reproduction.py`.
 
@@ -423,7 +428,7 @@ conventions that reproduce it:
 |---|---|---|---|---|
 | g-xTB 2.0.1 (`xtb --gxtb --molden`) | water, caffeine, O2 triplet, [Cu(NH3)4]2+, ferrocene, UF6, GdCl3 (octet), CeCl3 (doublet) | ≤ 1.1e-9 | ≤ 6.5e-11 | ≤ 3.3e-12 |
 | g-xTB 1.1.0 (`gxtb -molden`) | water, caffeine, O2 triplet, [Cu(NH3)4]2+, ferrocene, CeCl3 | ≤ 6.1e-11 | ≤ 6.5e-11 | ≤ 6.4e-8 |
-| g-xTB 1.1.0 | UF6 | 1.1e-7 | 1.1e-10 | 8.6e-6 |
+| g-xTB 1.1.0 | UF6 | 1.9e-5 | 1.1e-10 | 8.6e-6 |
 | GFN2-xTB (`xtb --gfn 2 --molden`), default accuracy | water, caffeine, O2 triplet, [Cu(NH3)4]2+, ferrocene | ≤ 1.1e-10 | ≤ 2.9e-11 | ≤ 3.0e-10 |
 | GFN2-xTB, `--acc 1e-4` (both) | caffeine, ferrocene | ≤ 1.0e-10 | ≤ 1.7e-11 | ≤ 7.0e-10 |
 
@@ -432,10 +437,13 @@ The remaining differences are SCF convergence (GFN2-xTB: the g-xTB build's xtb 6
 (see [xtb's SCC loop](../README.md#xtbs-scc-loop-conventionsxtb-and-xtb-671)), so at the default
 accuracy it agrees as closely as at `--acc 1e-4`; with tblite's loop it would agree only to the
 SCF thresholds. For UF6 axtb's v1.1 SCF
-takes 40 iterations where the 1.1.0 program takes 50 (total energies 1.1e-10 Eh apart): in
-iteration 2 both fill two of three exactly degenerate orbitals, and which two-dimensional
-subspace each eigensolver returns is round-off, so the paths part there and meet again at the
-same state within the SCF thresholds (`docs/gxtb-v1.1-spec.md` §4.17). Every file, axtb's
+takes 36 iterations where the 1.1.0 program takes 50. In iteration 2 both fill two of three
+exactly degenerate orbitals, and which two-dimensional subspace each eigensolver returns is
+round-off. So the paths part there and meet again at the same state within the SCF thresholds
+(`docs/gxtb-v1.1-spec.md` §4.17). The occupied space agrees to 2e-11 and the orbital energies
+to 1.7e-6 Eh. Orbitals of near-degenerate pairs (gaps of ~2e-5 Eh) differ by rotations of up to
+1.9e-5 in 1 − |⟨i|i⟩|. Before the v1.1 merge onto the 2.0.1 engine, axtb took 40 iterations and
+those orbitals agreed to 1.1e-7. Every file, axtb's
 spherical and Cartesian ones and the programs', reads back with orthonormal occupied orbitals
 (C^T S C = 1 to ≤ 6e-11 for axtb's files). The orbital viewer of the private mepd workflow
 (`orbitals.py`; not reproducible outside it) reads only Cartesian files: it reads axtb's

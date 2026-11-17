@@ -16,6 +16,7 @@
 use super::convergence::Iteration;
 use crate::linalg::gauss_last_max;
 use crate::{Error, Result};
+use axtb_base::math::dot_seq;
 use std::collections::VecDeque;
 
 /// A mixer of the input vector of an SCF's self-consistent variables (see the module
@@ -281,7 +282,7 @@ impl VectorMixer for Broyden {
             self.a.push(vec![0.0; self.df.len()]);
         }
 
-        let norm = dot(&self.dq, &self.dq).sqrt();
+        let norm = dot_seq(&self.dq, &self.dq).sqrt();
         self.omega[it1] = if norm > WFAC / MAXW { WFAC / norm } else { MAXW };
         if self.omega[it1] < MINW {
             self.omega[it1] = MINW;
@@ -289,7 +290,7 @@ impl VectorMixer for Broyden {
         for i in 0..n {
             self.df[it1][i] = self.dq[i] - self.dqlast[i];
         }
-        let inv = 1.0 / dot(&self.df[it1], &self.df[it1]).sqrt().max(f64::EPSILON);
+        let inv = 1.0 / dot_seq(&self.df[it1], &self.df[it1]).sqrt().max(f64::EPSILON);
         for x in self.df[it1].iter_mut() {
             *x *= inv;
         }
@@ -301,9 +302,9 @@ impl VectorMixer for Broyden {
             beta.resize_with(nhist, || vec![0.0; nhist]);
         }
         for (ih, &i) in hist.iter().enumerate() {
-            c[ih] = self.omega[i] * dot(&self.df[i], &self.dq);
+            c[ih] = self.omega[i] * dot_seq(&self.df[i], &self.dq);
             for &j in &hist {
-                self.a[i][j] = dot(&self.df[i], &self.df[j]);
+                self.a[i][j] = dot_seq(&self.df[i], &self.df[j]);
             }
         }
         for (ih, &i) in hist.iter().enumerate() {
@@ -335,11 +336,6 @@ impl VectorMixer for Broyden {
         (self.hist, self.c, self.beta) = (hist, c, beta);
         true
     }
-}
-
-#[inline]
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Number of past iterations the DIIS mixer combines.
@@ -416,7 +412,7 @@ impl VectorMixer for Diis {
 
     /// The next input vector from `q_in` and the residual `dq`.
     fn next(&mut self) -> bool {
-        let norm = dot(&self.dq, &self.dq).sqrt();
+        let norm = dot_seq(&self.dq, &self.dq).sqrt();
         if !norm.is_finite() {
             return false;
         }
@@ -475,19 +471,19 @@ fn diis_coefficients(r: &VecDeque<Vec<f64>>) -> Vec<f64> {
     let mut kept: Vec<usize> = Vec::new();
     for j in (0..m - 1).rev() {
         let mut d: Vec<f64> = (0..n).map(|k| last[k] - r[j][k]).collect();
-        let norm0 = dot(&d, &d).sqrt();
+        let norm0 = dot_seq(&d, &d).sqrt();
         if norm0.is_nan() || norm0 <= 0.0 {
             break;
         }
         let mut col = vec![0.0; basis.len() + 1];
         for (l, b) in basis.iter().enumerate() {
-            let h = dot(b, &d);
+            let h = dot_seq(b, &d);
             col[l] = h;
             for k in 0..n {
                 d[k] -= h * b[k];
             }
         }
-        let nr = dot(&d, &d).sqrt();
+        let nr = dot_seq(&d, &d).sqrt();
         if nr < DIIS_DEPENDENCE * norm0 {
             break;
         }
@@ -499,7 +495,7 @@ fn diis_coefficients(r: &VecDeque<Vec<f64>>) -> Vec<f64> {
     }
     // R g = Q^T r_n by back substitution
     let p = basis.len();
-    let rhs: Vec<f64> = basis.iter().map(|b| dot(b, last)).collect();
+    let rhs: Vec<f64> = basis.iter().map(|b| dot_seq(b, last)).collect();
     let mut g = vec![0.0; p];
     for l in (0..p).rev() {
         let mut v = rhs[l];

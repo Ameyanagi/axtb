@@ -7,6 +7,7 @@
 //! that avoids the eigenvectors of the whole spectrum (divide and conquer) and their
 //! back-transformation.
 
+use crate::math::dot8;
 use crate::{Error, Result};
 
 const EPS: f64 = f64::EPSILON * 0.5;
@@ -373,7 +374,6 @@ fn lu_solve(n: usize, a: &[f64], b: &[f64], c: &[f64], dd: &[f64], piv: &[bool],
 /// parallel on the current rayon pool when `parallel` (each vector's start is fixed by its
 /// index, so the result does not depend on the thread count).
 pub fn eigenvectors(d: &[f64], e: &[f64], w: &[f64], z: &mut [f64], parallel: bool) -> Result<()> {
-    use rayon::prelude::*;
     let n = d.len();
     let k = w.len();
     if n == 0 || k == 0 {
@@ -383,23 +383,29 @@ pub fn eigenvectors(d: &[f64], e: &[f64], w: &[f64], z: &mut [f64], parallel: bo
         z[0] = 1.0;
         return Ok(());
     }
-    let Clusters { shifts, clusters, onenrm } = Clusters::new(d, e, w);
-    let run = |&(c0, c1): &(usize, usize)| -> Result<Vec<f64>> {
-        let mut out = vec![0.0; n * (c1 - c0)];
-        let mut ws = Work::new(n);
-        for j in c0..c1 {
-            let (prev, cur) = out.split_at_mut((j - c0) * n);
-            inverse_iteration(d, e, shifts[j], onenrm, j as u64, prev, &mut ws, &mut cur[..n])
-                .map_err(|_| Error::Numerical(format!("inverse iteration did not converge for eigenvalue {j}")))?;
-        }
-        Ok(out)
-    };
-    let parts: Vec<Result<Vec<f64>>> =
-        if parallel { clusters.par_iter().map(run).collect() } else { clusters.iter().map(run).collect() };
-    for (&(c0, c1), part) in clusters.iter().zip(parts) {
-        z[c0 * n..c1 * n].copy_from_slice(&part?);
+    let cl = Clusters::new(d, e, w);
+    cl.run(d, e, &cl.clusters, 0, z, parallel)
+}
+
+/// [`eigenvectors`] for the eigenvalues `w[from..]` alone (`from` < `w.len()`): the vectors of
+/// the cluster that holds eigenvalue `from` are computed from the cluster's first member c0 ≤
+/// `from` on, so that they are orthogonalized in the same sequence as in a call for all of `w`
+/// or for `w[..from]` (vectors c0..`from` are those calls' bit for bit, and the later ones
+/// orthogonal to them). Returns c0 and the vectors c0..`w.len()` (column-major, n x
+/// (`w.len()` − c0)).
+pub fn eigenvectors_from(d: &[f64], e: &[f64], w: &[f64], from: usize, parallel: bool) -> Result<(usize, Vec<f64>)> {
+    let n = d.len();
+    let k = w.len();
+    assert!(from < k && k <= n, "eigenvectors_from: {from} of {k} eigenvalues of {n} rows");
+    if n == 1 {
+        return Ok((0, vec![1.0]));
     }
-    Ok(())
+    let cl = Clusters::new(d, e, w);
+    let first = cl.clusters.iter().position(|&(_, c1)| c1 > from).expect("the clusters cover the eigenvalues");
+    let c0 = cl.clusters[first].0;
+    let mut z = vec![0.0; n * (k - c0)];
+    cl.run(d, e, &cl.clusters[first..], c0, &mut z, parallel)?;
+    Ok((c0, z))
 }
 
 /// Shifts of the inverse iteration (equal eigenvalues separated by a few ulps), the clusters
@@ -433,6 +439,39 @@ impl Clusters {
         }
         clusters.push((clusters.last().map_or(0, |c| c.1), k));
         Self { shifts, clusters, onenrm }
+    }
+
+    /// The vectors of `clusters` (consecutive, starting at eigenvalue `offset`) into `z`: vector
+    /// j in column j − `offset` (n rows). Clusters run in parallel when `parallel`, each
+    /// sequentially.
+    fn run(
+        &self,
+        d: &[f64],
+        e: &[f64],
+        clusters: &[(usize, usize)],
+        offset: usize,
+        z: &mut [f64],
+        parallel: bool,
+    ) -> Result<()> {
+        use rayon::prelude::*;
+        let n = d.len();
+        let Clusters { shifts, onenrm, .. } = self;
+        let run = |&(c0, c1): &(usize, usize)| -> Result<Vec<f64>> {
+            let mut out = vec![0.0; n * (c1 - c0)];
+            let mut ws = Work::new(n);
+            for j in c0..c1 {
+                let (prev, cur) = out.split_at_mut((j - c0) * n);
+                inverse_iteration(d, e, shifts[j], *onenrm, j as u64, prev, &mut ws, &mut cur[..n])
+                    .map_err(|_| Error::Numerical(format!("inverse iteration did not converge for eigenvalue {j}")))?;
+            }
+            Ok(out)
+        };
+        let parts: Vec<Result<Vec<f64>>> =
+            if parallel { clusters.par_iter().map(run).collect() } else { clusters.iter().map(run).collect() };
+        for (&(c0, c1), part) in clusters.iter().zip(parts) {
+            z[(c0 - offset) * n..(c1 - offset) * n].copy_from_slice(&part?);
+        }
+        Ok(())
     }
 }
 
@@ -553,7 +592,7 @@ fn inverse_iteration(
         x.iter_mut().for_each(|v| *v *= scl);
         lu_solve(n, a, b, c, dd, piv, inv, tol, x);
         for zi in prev.chunks_exact(n) {
-            let ztr = dot(zi, x);
+            let ztr = dot8(zi, x);
             for (v, p) in x.iter_mut().zip(zi) {
                 *v -= ztr * p;
             }
@@ -566,7 +605,7 @@ fn inverse_iteration(
         if nrmchk < EXTRA + 1 {
             continue;
         }
-        let norm = dot(x, x).sqrt();
+        let norm = dot8(x, x).sqrt();
         let jmax = argmax_abs(x);
         let scl = if x[jmax] < 0.0 { -1.0 / norm } else { 1.0 / norm };
         for (zv, v) in out.iter_mut().zip(x.iter()) {
@@ -575,24 +614,6 @@ fn inverse_iteration(
         return Ok(());
     }
     Err(())
-}
-
-/// Dot product with eight partial sums in a fixed order (vectorizes; the result depends on
-/// the length alone).
-#[inline]
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    let m = a.len() / 8 * 8;
-    let mut acc = [0.0f64; 8];
-    for (x, y) in a[..m].as_chunks::<8>().0.iter().zip(b[..m].as_chunks::<8>().0) {
-        for i in 0..8 {
-            acc[i] += x[i] * y[i];
-        }
-    }
-    let mut s = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
-    for (x, y) in a[m..].iter().zip(&b[m..]) {
-        s += x * y;
-    }
-    s
 }
 
 #[inline]

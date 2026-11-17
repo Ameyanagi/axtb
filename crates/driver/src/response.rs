@@ -102,6 +102,11 @@ pub struct Scf {
     pub scf_attempts: Option<Vec<Attempt>>,
     /// HOMO-LUMO gap (Eh); `null` without a LUMO.
     pub homo_lumo_gap: Option<f64>,
+    /// Fermi levels (Eh) of the alpha and beta electrons; `null` where the occupations are the
+    /// Aufbau filling (0 K). A closed shell has the same level in both.
+    pub fermi_levels: [Option<f64>; 2],
+    /// Electronic temperature (K) of the occupations; 0 for the Aufbau filling.
+    pub electronic_temperature: f64,
     /// Molecular quadrupole about the origin (xx, xy, yy, xz, yz, zz; e bohr², traceless;
     /// tblite's form in the `tblite` and g-xTB 2.0.1 `gxtb` conventions).
     pub quadrupole: [f64; 6],
@@ -119,6 +124,33 @@ pub struct Scf {
     /// Mayer-Wiberg bond orders (N x N), when asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bond_orders: Option<Matrix>,
+    /// The AO overlap matrix of the SCF (n x n, with its screening; g-xTB: of the SCF basis),
+    /// when asked for or with the Hamiltonian. The AO order is axtb's (atom by atom, shell by
+    /// shell, m = -l..l, p as y, z, x), not the Molden file's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<Matrix>,
+    /// The Hamiltonian whose generalized eigenvectors with the overlap are the orbitals (n x n,
+    /// the operator of one build at the last input), one per spin channel of the orbitals:
+    /// GFN2-xTB one (open shells included: one spin-averaged Hamiltonian), g-xTB one for a closed
+    /// shell, alpha and beta for an open shell; when asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hamiltonian: Option<Vec<Matrix>>,
+    /// For the Python binding (not in the CLI's JSON): the electrons of each atom outside the
+    /// valence-only orbitals; Mulliken shell populations (electrons) with each shell's atom,
+    /// angular momentum and reference occupation; the traceless (Buckingham) molecular quadrupole
+    /// in every conventions.
+    #[serde(skip)]
+    pub core_electrons: Vec<usize>,
+    #[serde(skip)]
+    pub shell_populations: Vec<f64>,
+    #[serde(skip)]
+    pub shell_atoms: Vec<usize>,
+    #[serde(skip)]
+    pub shell_angular_momenta: Vec<usize>,
+    #[serde(skip)]
+    pub reference_shell_occupations: Vec<f64>,
+    #[serde(skip)]
+    pub quadrupole_traceless: [f64; 6],
 }
 
 /// The GFN-FF topology (0-based atom indices).
@@ -233,6 +265,14 @@ pub struct Thermo {
     pub n_modes: usize,
     pub n_inverted: usize,
     pub n_dropped: usize,
+    /// For the Python binding (not in the CLI's JSON): the imaginary frequencies (cm⁻¹) inverted
+    /// and left out, and the average moment of inertia B_av (kg m²) of the rotor interpolation.
+    #[serde(skip)]
+    pub inverted_frequencies: Vec<f64>,
+    #[serde(skip)]
+    pub dropped_frequencies: Vec<f64>,
+    #[serde(skip)]
+    pub average_moment: f64,
     pub zpve: f64,
     pub pressure: f64,
     pub rotor_cutoff: f64,
@@ -279,6 +319,9 @@ impl Vibrations {
             n_modes: t.n_modes,
             n_inverted: t.n_inverted,
             n_dropped: t.n_dropped,
+            inverted_frequencies: t.inverted_frequencies.clone(),
+            dropped_frequencies: t.dropped_frequencies.clone(),
+            average_moment: t.average_moment,
             zpve: t.zpve,
             pressure: t.pressure,
             rotor_cutoff: t.rotor_cutoff,
@@ -395,8 +438,8 @@ pub struct Composite {
 /// The response to a [`crate::Request`], the same for every front end.
 ///
 /// Every response has `program`, `version`, `method` (canonical; `null` for an analysis of a
-/// given Hessian) and `conventions` (the method's, canonical; the analysis conventions for an
-/// analysis); SCF methods add `eigensolver` (`SinglePoint::eigensolver`: `faer`, or the run-time
+/// given Hessian), `conventions` (the method's, canonical; the analysis conventions for an
+/// analysis) and `numerics` (the numerics identity, [`crate::numerics`]); SCF methods add `eigensolver` (`SinglePoint::eigensolver`: `faer`, or the run-time
 /// LAPACK library). A calculation has `energy`, `charges`, `dipole`, `terms`, `timings` and
 /// `seconds`, and `gradient` when asked for or with a Hessian; the groups below are present
 /// when they apply.
@@ -406,6 +449,9 @@ pub struct Response {
     pub version: &'static str,
     pub method: Option<&'static str>,
     pub conventions: &'static str,
+    /// The numerics identity of the calculation ([`crate::numerics`]): `"gfn2:1"`,
+    /// `"gxtb-v2.0.1:1+gfn2:1"` for the composite, [`crate::ANALYSIS_NUMERICS`] for an analysis.
+    pub numerics: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eigensolver: Option<String>,
     /// Eh (an analysis: the given energy).
@@ -420,9 +466,15 @@ pub struct Response {
     /// Dipole moment about the origin (e bohr).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dipole: Option<[f64; 3]>,
-    /// Energy terms (Eh), named as the method's program reports them.
+    /// Energy terms (Eh), named as the method's program reports them: pieces, which add up to
+    /// the energy, and the subtotals named in `subtotals`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terms: Option<Named>,
+    /// The names of the terms that are subtotals of other terms (GFN2-xTB's and g-xTB's
+    /// `electronic`); every other term is a piece of the partition of the energy. For the Python
+    /// binding (not in the CLI's JSON).
+    #[serde(skip)]
+    pub subtotals: Vec<&'static str>,
     #[serde(flatten)]
     pub scf: Option<Scf>,
     #[serde(flatten)]
@@ -439,6 +491,10 @@ pub struct Response {
     pub vibrations: Option<Vibrations>,
     #[serde(flatten)]
     pub composite: Option<Composite>,
+    /// The orbitals with their basis (`Task::orbitals`), structured, for the Python binding (not
+    /// in the CLI's JSON).
+    #[serde(skip)]
+    pub orbitals: Option<axtb::Orbitals>,
     /// Wall time per phase of the single point (s).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timings: Option<Named>,

@@ -201,8 +201,10 @@ XYZ files are converted with the Ångström-to-bohr factor of the reproduced pro
 (CODATA 2018) for GFN2-xTB in the `xtb`, `xtb-6.7.1` and `tblite` conventions, GFN-FF in `xtb`
 and `xtb-6.7.1` and g-xTB 2.0.1 in `gxtb`, the 1.1.0 program's for g-xTB v1.1, CODATA 2022 in
 axtb's conventions. Errors: in `--json` mode `{"error": {"kind": ..., "message": ..., ...}}` on
-stdout (`kind`: `input`, `unsupported_element` with `z`, `topology`, `scf_not_converged` with
-`iterations`, `energy_change` and `residual`, `numerical`), otherwise `error: <message>` on
+stdout (`kind`: `input`, `unsupported_element` with `z`, `topology`, `not_applicable` (an
+output the method does not have: GFN-FF's orbitals, Molden file, bond orders and AO matrices,
+g-xTB 2.0.1's AO matrices in the `gxtb` conventions), `scf_not_converged` with `iterations`,
+`energy_change` and `residual`, `numerical`), otherwise `error: <message>` on
 stderr; exit code 1. Invalid arguments and unreadable files are usage errors: `error: ...` on
 stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF single point (see
 [Threads](#threads)), and a run-time LAPACK (`AXTB_LAPACK`) that was not used.
@@ -219,11 +221,13 @@ stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF sing
 | `alpb`, `gbsa`, `solvation_state` | `--alpb S`, `--gbsa S`, `--solvation-state R` | implicit solvent and its reference state (`gsolv`, `bar1M`, `reference`) |
 | `solvation_correction`, `correction_conventions` | `--solvation-correction gfn2`, `--correction-conventions C` | g-xTB in solvent, see [g-xTB in implicit solvent](#g-xtb-in-implicit-solvent) |
 | `guess` | — | where a calculator's SCFs start, see [Restarts](#restarts-the-previous-geometrys-wavefunction) |
+| `restart` | — | `previous` or `fresh`: whether a calculator's SCFs start from the previous geometry's state; with it, `guess` names the start alone (e.g. `sad` with `previous`) |
 | `fragment_charges`, `topology_positions` | `--frag-charges Q1,Q2`, `--topology-ref ref.xyz` | GFN-FF, see [GFN-FF](#gfn-ff) |
 | `gradient` | `--grad` | the gradient |
 | `hessian`, `hessian_method`, `hessian_step`, `hessian_accuracy` | `--hess`, `--hess-method M`, `--hess-step H`, `--hess-acc X` | the Hessian, see [Hessians](#hessians) |
 | `molden`, `molden_file`, `molden_cartesian` | `--molden[=FILE]`, `--molden-cartesian` | the Molden file's text in the response; a file to write; Cartesian functions |
 | `bond_orders` | `--wbo` | Mayer-Wiberg bond orders |
+| `overlap`, `hamiltonian` | `--overlap`, `--hamiltonian` | the AO overlap matrix of the SCF; the Hamiltonian whose eigenvectors are the orbitals, with the overlap (SCF methods; not g-xTB 2.0.1 in the `gxtb` conventions, whose SCF diagonalizes a DIIS-mixed matrix last: refused as `not_applicable`) |
 | `vibrations`, `thermo`, `analysis_conventions`, `masses`, `temperature`, `pressure`, `rotor_cutoff`, `imaginary_cutoff`, `frequency_scale`, `symmetry_number`, `symmetry_threshold` | `--novib`, `--nothermo`, `--analysis-conventions C`, —, `--temp T[,T]`, `--pressure P`, `--sthr X`, `--ithr X`, `--scale X`, `--symnum N`, `--desy X` | the vibrational analysis of a Hessian, see [Vibrational analysis](#vibrational-analysis-and-thermochemistry) |
 | `analyze_hessian`, `dipole_derivatives`, `energy` | — | the analysis of a given Hessian, like `xtb thermo` (no calculation settings then) |
 
@@ -231,11 +235,12 @@ The response, for every front end (a field is present when it applies):
 
 | fields | what |
 |---|---|
-| `program`, `version`, `method`, `conventions`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the SCF's eigensolver (`faer` or the run-time LAPACK library) |
+| `program`, `version`, `method`, `conventions`, `numerics`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the numerics identity of the code that produced the numbers (`"gfn2:1"`, `"gxtb-v2.0.1:1+gfn2:1"` for the solvation composite, `"analysis:1"`; a method's epoch changes with every change of its results, see the CHANGELOG), the SCF's eigensolver (`faer` or the run-time LAPACK library) |
 | `energy`, `gradient`, `charges`, `dipole`, `terms`, `timings`, `seconds` | Eh, Eh/bohr (with `gradient`), atomic charges (Mulliken; GFN-FF: EEQ), e·bohr, energy terms (Eh), wall time per phase and of the request (s) |
-| `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB) |
+| `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `fermi_levels`, `electronic_temperature`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB; `fermi_levels`: alpha and beta, `null` for the Aufbau filling, the same level twice for a closed shell; `electronic_temperature`: K, 0 for the Aufbau filling) |
 | `n_hbonds`, `n_xbonds`, `topology` | GFN-FF |
 | `molden`, `molden_file` | Molden file |
+| `overlap`, `hamiltonian` | the AO overlap matrix S of the SCF (n x n, with the screening the SCF used; g-xTB: its SCF basis) and the Hamiltonian H (a list: one n x n matrix for GFN2-xTB, open shells included, and for a g-xTB closed shell; alpha and beta for a g-xTB open shell): the operator of one build at the last input, whose generalized eigenvectors with S are the orbitals (GFN2-xTB: H0 and the potentials of the last input moments; g-xTB: the unmixed last build). AO order: atom by atom, shell by shell, m = -l..l, p as y, z, x (not the Molden file's) |
 | `hessian`, `hessian_method`, `hessian_max_asymmetry`, `hessian_timings`, `dipole_derivatives` | Hessian |
 | `vibrational_conventions`, `frequencies`, `normal_modes`, `reduced_masses`, `force_constants`, `ir_intensities`, `n_imaginary`, `linear`, `masses`, `thermo` | vibrational analysis |
 | `composite`, `components`, `parts`, `hessian_parts` | g-xTB in solvent |
@@ -589,14 +594,22 @@ energy, so both conventions share the Fock matrix, the SCF (tblite's: damping, t
 the full Fock matrix) and analytic gradients without a response term.
 `conventions="gxtb"` reproduces the program: mctc-lib's Ångström factor, its fractional
 electron count (the sum of the stored reference occupations), its hard cutoffs (CNs and
-repulsion 25 bohr, revD4 50/25 bohr, integral pairs) and its gradient formula.
+repulsion 25 bohr, revD4 50/25 bohr, integral pairs), its gradient formula and the end of its
+SCF (the density of the last, DIIS-mixed Fock matrix).
 `conventions="axtb"` (default) uses CODATA 2022 units, an integer electron count and smooth
-cutoffs (1 bohr switches beyond the program's radii). The two differ by ≤ 3e-10 Eh for the
-small reference molecules (same iterations) and by ≤ 9e-10 Eh in the energy differences
-tested on them (2.3e-8 Eh for a 2 % expansion of C50H102), by ≤ 4e-11 Eh for the conformer,
-reaction, barrier and binding energies of `tests/gxtb_energy_differences.py`; for (H2O)100
-by 1.9e-6 Eh, almost all from the revD4 three-body tail beyond 25 bohr that the program cuts (`bench/results/gxtb2_reproduction.json`, from
-`python tests/gxtb2_reproduction.py`). The program's analytic gradient is wrong (by up to
+cutoffs (1 bohr switches beyond the program's radii), and ends the SCF with one more iteration
+whose Fock matrix is diagonalized unmixed (as g-xTB v1.1's programs do): its density is the
+result, the returned orbitals are the fresh eigenvectors of one Fock build, and the result is
+closer to self-consistency (energies move by up to 1e-7 Eh and gradients by up to 3.4e-5 Eh/bohr
+toward those of a tightly converged SCF; +1 iteration, +2-4 % time on one thread, ~6 % on eight). The conventions alone
+differ by ≤ 3e-10 Eh for the small reference molecules and by ≤ 9e-10 Eh in the energy
+differences tested on them (2.3e-8 Eh for a 2 % expansion of C50H102); with the extra
+iteration the default conventions differ from the program by ≤ 1.4e-7 Eh for the small
+reference molecules (one iteration more) and ≤ 2.3e-8 Eh in those energy differences, by
+≤ 4e-11 Eh for the conformer, reaction, barrier and binding energies of
+`tests/gxtb_energy_differences.py` (at accuracy 1e-4); for (H2O)100 by 1.9e-6 Eh, almost all
+from the revD4 three-body tail beyond 25 bohr that the program cuts
+(`python tests/gxtb2_reproduction.py`). The program's analytic gradient is wrong (by up to
 1.4e-4 Eh/bohr) for some complexes with bonds exactly along a coordinate axis
 ([Gd(H2O)6]³⁺, [Lu(H2O)6]³⁺; finite differences of its own energies follow axtb, spec §4.18);
 axtb's gradient is the derivative of the energy in either orientation.
@@ -833,6 +846,7 @@ and 2.0.1, the g-xTB part of the solvation composite):
 | Mayer–Wiberg bond orders (N x N), on request | `singlepoint(..., bond_orders=True)` → `bond_orders` | `--wbo` (`"bond_orders": true`) → `bond_orders` | keyword `bond_orders` → `extras['bond_orders']` | `Want::bond_orders` → `Electronic::bond_orders` |
 | orbital energies and occupations per spin | `orbital_energies_alpha/_beta`, `occupations_alpha/_beta` | the same | `wavefunction.scf_eigenvalues_a/b`, `scf_occupations_a/b`, `calcinfo_nbasis/nmo/nalpha/nbeta/natoms` | `Electronic::levels` |
 | HOMO–LUMO gap (Eh) | `homo_lumo_gap` | the same | `extras['homo_lumo_gap']` | `Electronic::homo_lumo_gap` |
+| Fermi levels of the alpha and beta electrons (Eh; `null` for the Aufbau filling) and the electronic temperature used (K; 0 for the Aufbau filling) | `fermi_levels`, `electronic_temperature` | the same | — | `Electronic::fermi_levels`, `Electronic::electronic_temperature` |
 | molecular quadrupole (xx, xy, yy, xz, yz, zz; e·bohr², about the origin) | `quadrupole` | the same | `extras['quadrupole']` | `Electronic::quadrupole` |
 
 qcdata has fields for the orbital levels but none for bond orders or quadrupoles. Bond orders cost

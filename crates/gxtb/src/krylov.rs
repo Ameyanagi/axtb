@@ -10,8 +10,8 @@
 //! Both start from x = 0 and stop at |b - A x| <= tol |b|; the convergence settings and the
 //! messages of a failure belong to the callers.
 
-use crate::dense::dot;
 use axtb::Error;
+use axtb_base::math::dot8;
 use faer::Mat;
 
 /// `y += a x` elementwise.
@@ -36,7 +36,7 @@ pub fn block_dot(a: &[Mat<f64>], b: &[Mat<f64>]) -> f64 {
     let mut s = 0.0;
     for (x, y) in a.iter().zip(b) {
         for j in 0..x.ncols() {
-            s += dot(x.col_as_slice(j), y.col_as_slice(j));
+            s += dot8(x.col_as_slice(j), y.col_as_slice(j));
         }
     }
     s
@@ -44,7 +44,7 @@ pub fn block_dot(a: &[Mat<f64>], b: &[Mat<f64>]) -> f64 {
 
 /// The Euclidean norm.
 fn norm(a: &[f64]) -> f64 {
-    dot(a, a).sqrt()
+    dot8(a, a).sqrt()
 }
 
 /// A conjugate-gradient solution.
@@ -173,7 +173,7 @@ pub fn gmres(
             iters += 1;
             let mut w = op(&pre(&v[k]))?;
             for j in 0..=k {
-                h[j][k] = dot(&w, &v[j]);
+                h[j][k] = dot8(&w, &v[j]);
                 sub_scaled(h[j][k], &v[j], &mut w);
             }
             h[k + 1][k] = norm(&w);

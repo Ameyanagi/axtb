@@ -292,25 +292,42 @@ impl Calculator {
         Ok(finish(reference, nh.hessian, nh.max_asymmetry, dipd, HessianMethod::Numerical, timings))
     }
 
-    /// The single point as the trait reports it: GFN2-xTB's terms (the eight xtb prints, then
-    /// those of added terms), the molecular quadrupole in the conventions' form.
+    /// The single point as the trait reports it: GFN2-xTB's terms (the eight xtb prints, the band
+    /// energy, then those of added terms; every one but `electronic` a piece, so that the pieces
+    /// add up to the energy), the molecular quadrupole in the conventions' form.
     fn report(&self, sp: Gfn2Result) -> crate::method::SinglePoint {
         let t = &sp.terms;
         let mut terms = vec![
             Term::piece("repulsion", t.repulsion),
             Term::piece("dispersion", t.dispersion),
-            // the band energy Tr(H0 P) is only inside the electronic energy
+            // the self-consistent part: the band energy and the second- and third-order, multipole and
+            // entropy terms, with the self-consistent parts of dispersion and solvation (whose
+            // pieces are whole, their charge-independent parts included)
             Term::subtotal("electronic", t.electronic),
             Term::piece("isotropic_es", t.isotropic_es),
             Term::piece("third_order", t.third_order),
             Term::piece("anisotropic", t.anisotropic),
             Term::piece("entropy", t.entropy),
             Term::piece("solvation", t.solvation),
+            Term::piece("band", t.band),
         ];
         terms.extend(t.other.iter().map(|&(n, v)| Term::piece(n, v)));
         let form = self.info.quadrupole.unwrap_or_default();
         let quadrupole =
             crate::properties::molecular_quadrupole(&self.mol.positions, &sp.qat, &sp.dpat, &sp.qpat, form);
+        let quadrupole_traceless = crate::properties::molecular_quadrupole(
+            &self.mol.positions,
+            &sp.qat,
+            &sp.dpat,
+            &sp.qpat,
+            QuadrupoleForm::Traceless,
+        );
+        let bas = &self.model.basis;
+        let shell_angular_momenta =
+            (0..self.mol.nat()).flat_map(|a| bas.cgto[self.mol.id[a]][..bas.nsh_at[a]].iter().map(|c| c.l)).collect();
+        let core_electrons =
+            crate::method::core_electrons(&self.mol.numbers, &bas.sh2at, &sp.reference_shell_occupations)
+                .expect("GFN2-xTB's reference occupations are whole electrons per atom");
         let attempts = sp.scf_attempts.iter().map(|a| Attempt {
             mixer: a.mixer.label(),
             iterations: a.iterations,
@@ -329,8 +346,18 @@ impl Calculator {
                 quadrupole,
                 levels: sp.levels,
                 homo_lumo_gap: sp.homo_lumo_gap,
+                fermi_levels: sp.fermi_levels,
+                electronic_temperature: sp.electronic_temperature,
                 orbitals: sp.orbitals,
                 bond_orders: sp.bond_orders,
+                overlap: sp.overlap,
+                hamiltonian: sp.hamiltonian.map(|h| vec![h]),
+                shell_populations: sp.shell_populations,
+                shell_atoms: bas.sh2at.clone(),
+                shell_angular_momenta,
+                reference_shell_occupations: sp.reference_shell_occupations,
+                core_electrons,
+                quadrupole_traceless,
                 scf: ScfReport {
                     iterations: sp.iterations,
                     start: sp.guess,
@@ -394,6 +421,44 @@ impl Method for Calculator {
     /// Start the next SCF from the shell charges and atomic multipoles of `wf` (e.g. another
     /// GFN2-xTB calculator's, or another program's converged moments).
     fn set_wavefunction(&mut self, wf: &Wavefunction) -> Result<()> {
+        self.install(wf)?;
+        self.given = true;
+        Ok(())
+    }
+
+    /// The moments of `wf` as this calculator's previous ones (the restart policy decides).
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        match wf {
+            None => self.reset_wavefunction(),
+            Some(wf) => {
+                self.install(wf)?;
+                self.given = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn reset_wavefunction(&mut self) {
+        self.start = None;
+        self.given = false;
+    }
+
+    fn scf_settings(&self) -> Option<&ScfSettings> {
+        Some(&self.options.scf)
+    }
+
+    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
+        let mut o = self.options.clone();
+        o.scf = settings;
+        check_scf_options(&o.run(self.threads.count(), &Want::ENERGY))?;
+        self.options.scf = o.scf;
+        Ok(())
+    }
+}
+
+impl Calculator {
+    /// The moments of `wf` as the next SCF's start (checked).
+    fn install(&mut self, wf: &Wavefunction) -> Result<()> {
         wf.check(&self.fingerprint)?;
         let WavefunctionData::Scf(d) = wf.data() else {
             return Err(Error::Input("the wavefunction belongs to another kind of calculation".into()));
@@ -421,24 +486,6 @@ impl Method for Calculator {
             dpat: d.atomic_dipoles.clone(),
             qpat: d.atomic_quadrupoles.clone(),
         });
-        self.given = true;
-        Ok(())
-    }
-
-    fn reset_wavefunction(&mut self) {
-        self.start = None;
-        self.given = false;
-    }
-
-    fn scf_settings(&self) -> Option<&ScfSettings> {
-        Some(&self.options.scf)
-    }
-
-    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
-        let mut o = self.options.clone();
-        o.scf = settings;
-        check_scf_options(&o.run(self.threads.count(), &Want::ENERGY))?;
-        self.options.scf = o.scf;
         Ok(())
     }
 }
@@ -470,10 +517,10 @@ mod tests {
     use crate::method::TermKind;
 
     /// GFN2-xTB's pieces (repulsion, dispersion, the electrostatic and entropy terms,
-    /// solvation) sum to the energy minus the band energy Tr(H0 P), which xtb reports only
-    /// inside the electronic energy (a subtotal); with D4 and ALPB, at 300 K.
+    /// solvation and the band energy Tr(H0 P), which xtb reports only inside the electronic
+    /// energy, a subtotal) sum to the energy; with D4 and ALPB, at 300 K.
     #[test]
-    fn pieces_sum_to_the_energy_less_the_band_energy() {
+    fn pieces_sum_to_the_energy() {
         let numbers = [8, 1, 1, 7, 1, 1, 1];
         let positions = [
             [0.0, 0.0, 0.22],
@@ -501,8 +548,66 @@ mod tests {
         let (h0, p) = (&st.ints.h0, &st.density);
         let n = h0.nrows();
         let band: f64 = (0..n).map(|i| (0..n).map(|j| h0[(i, j)] * p[(j, i)]).sum::<f64>()).sum();
-        let gap = sp.energy - sp.pieces();
-        assert!((gap - band).abs() < 1e-10, "energy - pieces {gap} vs Tr(H0 P) {band}");
+        let piece = sp.term("band").unwrap();
+        assert!((piece - band).abs() < 1e-10, "band piece {piece} vs Tr(H0 P) {band}");
         assert!(band.abs() > 1.0, "the band energy is a large part of the energy");
+        let gap = sp.energy - sp.pieces();
+        assert!(gap.abs() < 1e-12 * sp.energy.abs(), "energy - pieces {gap}");
+    }
+
+    /// The state a Hessian keeps (every orbital) changes no number of the single point, in each
+    /// conventions: closed and open shells, 0 and 3000 K, and (H2O)100 (600 rows, faer's
+    /// parallel tridiagonalization) on four threads. The kept orbitals are S-orthonormal.
+    #[test]
+    fn keeping_the_state_changes_no_number() {
+        let read = |name: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/structures").join(name);
+            crate::io::read_xyz(&std::fs::read_to_string(path).unwrap(), crate::units::AATOAU).unwrap()
+        };
+        let (caffeine, water100) = (read("caffeine.xyz"), read("large/water100.xyz"));
+        let o2 = (vec![8, 8], vec![[0.0, 0.0, -1.14], [0.0, 0.0, 1.14]]);
+        let cases = [
+            (&caffeine, Some(0), 300.0, 1),
+            (&caffeine, Some(0), 3000.0, 1),
+            (&caffeine, Some(0), 0.0, 1),
+            (&o2, Some(2), 300.0, 1),
+            (&o2, Some(0), 0.0, 1),
+            (&water100, Some(0), 300.0, 4),
+        ];
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for conventions in [crate::Conventions::Axtb, crate::Conventions::Xtb, crate::Conventions::Tblite] {
+            for &((numbers, positions), uhf, etemp, threads) in &cases {
+                let mut o = Options { conventions, threads, ..Default::default() };
+                o.scf.etemp = Some(etemp);
+                let calc = Calculator::new(Hamiltonian::Gfn2, numbers, positions, 0.0, uhf, o).unwrap();
+                let scf = calc.scf_options(&Want::GRADIENT);
+                let (m, x) = (&calc.mol, &calc.extra);
+                let a = calc.threads.install(|| calc.model.singlepoint(m, x, &scf, None, true)).unwrap();
+                let (b, st) =
+                    calc.threads.install(|| calc.model.singlepoint_state(m, x, &scf, None, true, true)).unwrap();
+                let label = format!("{conventions:?} {} atoms uhf {uhf:?} {etemp} K", numbers.len());
+                assert_eq!(a.energy.to_bits(), b.energy.to_bits(), "{label}: energy");
+                let g = |r: &Gfn2Result| bits(&r.gradient.as_ref().unwrap().concat());
+                assert_eq!(g(&a), g(&b), "{label}: gradient");
+                assert_eq!(bits(&a.qsh), bits(&b.qsh), "{label}: charges");
+                assert_eq!(bits(&a.dpat.concat()), bits(&b.dpat.concat()), "{label}: dipoles");
+                assert_eq!(bits(&a.qpat.concat()), bits(&b.qpat.concat()), "{label}: quadrupoles");
+                for (la, lb) in a.levels.iter().zip(&b.levels) {
+                    assert_eq!(bits(&la.energies), bits(&lb.energies), "{label}: levels");
+                    assert_eq!(bits(&la.occupations), bits(&lb.occupations), "{label}: occupations");
+                }
+                // every kept orbital, the SCF's and those computed after it, S-orthonormal (O2 at
+                // 0 K: the occupied and the empty orbital of the degenerate pi* pair)
+                let (c, s) = (&st.as_ref().unwrap().coeff, &st.as_ref().unwrap().ints.overlap);
+                let ctsc = c.transpose() * s * c;
+                let n = c.ncols();
+                for j in 0..n {
+                    for i in 0..n {
+                        let want = if i == j { 1.0 } else { 0.0 };
+                        assert!((ctsc[(i, j)] - want).abs() < 1e-11, "{label}: C^T S C ({i}, {j}) {}", ctsc[(i, j)]);
+                    }
+                }
+            }
+        }
     }
 }

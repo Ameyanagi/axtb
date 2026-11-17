@@ -40,7 +40,6 @@ fn settings_that_do_not_apply_are_errors() {
         Request { solvation_state: Some("gsolv".into()), ..water() },
         Request { solvation_correction: Some("gfn2".into()), alpb: Some("water".into()), ..water() },
         Request { accuracy: Some(1.0), ..with("gfnff") },
-        Request { bond_orders: true, ..with("gfnff") },
         Request { pressure: Some(1e5), ..water() },
         Request { hessian: true, hessian_step: Some(0.01), ..water() },
         Request { hessian: true, hessian_method: Some("response".into()), ..with("gfnff") },
@@ -48,6 +47,11 @@ fn settings_that_do_not_apply_are_errors() {
         Request { analyze_hessian: Some(vec![vec![0.0; 9]; 9]), conventions: Some("xtb".into()), ..water() },
     ] {
         input(req);
+    }
+    // GFN-FF has no orbitals: Molden files and bond orders do not apply
+    for req in [Request { bond_orders: true, ..with("gfnff") }, Request { molden: true, ..with("gfnff") }] {
+        let e = run(&req).unwrap_err();
+        assert!(e.kind() == "not_applicable" && e.is_input() && e.to_string().contains("no orbitals"), "{e:?}");
     }
     let msg = input(Request { alpb: Some("water".into()), ..with("g-xTB 2.0") });
     assert!(msg.contains("no implicit-solvent parameters") && msg.contains("solvation_correction"), "{msg}");
@@ -229,4 +233,36 @@ fn wavefunctions_belong_to_one_method_and_molecule() {
     assert!(p[0].is_none() && p[1].is_some() && p[2].is_some());
     composite.reset_wavefunction(false);
     assert!(composite.wavefunction().is_none());
+}
+
+/// The numerics identity: one epoch per method, the same in every conventions; the composite's
+/// parts joined; in every response (an analysis: its own).
+#[test]
+fn numerics_in_every_response() {
+    use axtb_driver::numerics;
+    assert_eq!(numerics(Method::Gfn2, false), "gfn2:1");
+    assert_eq!(numerics(Method::GxtbV1_1, false), "gxtb-v1.1:1");
+    assert_eq!(numerics(Method::GxtbV2_0_1, false), "gxtb-v2.0.1:1");
+    assert_eq!(numerics(Method::Gfnff, false), "gfnff:1");
+    assert_eq!(numerics(Method::GxtbV2_0_1, true), "gxtb-v2.0.1:1+gfn2:1");
+    assert_eq!(numerics(Method::GxtbV1_1, true), "gxtb-v1.1:1+gfn2:1");
+    // GFN2-xTB in solvent is GFN2-xTB's
+    assert_eq!(numerics(Method::Gfn2, true), "gfn2:1");
+    for (method, conventions) in [("gfn2", "xtb"), ("gfn2", "axtb"), ("gxtb-v2.0.1", "gxtb"), ("gfnff", "xtb")] {
+        let r = run(&Request { conventions: Some(conventions.into()), ..with(method) }).unwrap();
+        assert_eq!(r.numerics, numerics(Method::parse(method).unwrap(), false), "{method} {conventions}");
+    }
+    let solvated = |method: &str, correction: Option<&str>| Request {
+        alpb: Some("water".into()),
+        solvation_correction: correction.map(Into::into),
+        ..with(method)
+    };
+    assert_eq!(run(&solvated("gxtb-v2.0.1", Some("gfn2"))).unwrap().numerics, "gxtb-v2.0.1:1+gfn2:1");
+    assert_eq!(run(&solvated("gfn2", None)).unwrap().numerics, "gfn2:1");
+    let analysis = Request { analyze_hessian: Some(vec![vec![0.0; 9]; 9]), ..water() };
+    assert_eq!(run(&analysis).unwrap().numerics, axtb_driver::ANALYSIS_NUMERICS);
+    // a calculator's responses
+    let mut calc = Calculator::new(&with("gxtb-v1.1")).unwrap();
+    assert_eq!(calc.numerics(), "gxtb-v1.1:1");
+    assert_eq!(calc.compute(&water().positions, &Task::default()).unwrap().numerics, "gxtb-v1.1:1");
 }

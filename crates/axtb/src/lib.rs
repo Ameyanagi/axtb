@@ -145,6 +145,8 @@ impl Options {
             guess: self.initial_guess,
             keep_orbitals: want.orbitals,
             bond_orders: want.bond_orders,
+            keep_overlap: want.overlap || want.hamiltonian,
+            keep_hamiltonian: want.hamiltonian,
             trace: self.trace,
         }
     }

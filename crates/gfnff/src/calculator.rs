@@ -149,8 +149,13 @@ impl Method for Calculator {
                 return Err(Error::Input("gfnff Hessians take no hessian_accuracy (no SCF)".into()));
             }
         }
+        if want.overlap || want.hamiltonian {
+            return Err(Error::NotApplicable("gfnff has no orbitals: no overlap or Hamiltonian matrix".into()));
+        }
         if want.orbitals || want.bond_orders {
-            return Err(Error::Input("gfnff has no orbitals (no Molden file, no bond orders; see topology)".into()));
+            return Err(Error::NotApplicable(
+                "gfnff has no orbitals (no Molden file, no bond orders; see topology)".into(),
+            ));
         }
         Ok(())
     }
@@ -223,6 +228,11 @@ impl Method for Calculator {
     fn set_wavefunction(&mut self, wf: &Wavefunction) -> Result<()> {
         wf.check(&self.fingerprint)?;
         Err(Error::Input("gfnff has no SCF; starting moments are GFN2-only".into()))
+    }
+
+    /// GFN-FF has no SCF: no history but none.
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        wf.map_or(Ok(()), |w| self.set_wavefunction(w))
     }
 }
 

@@ -115,6 +115,14 @@ struct Cli {
     #[arg(long = "wbo", help_heading = "SCF (GFN2-xTB, g-xTB)")]
     bond_orders: bool,
 
+    /// Add the AO overlap matrix of the SCF (axtb's AO order)
+    #[arg(long, help_heading = "SCF (GFN2-xTB, g-xTB)")]
+    overlap: bool,
+
+    /// Add the Hamiltonian whose eigenvectors are the orbitals, and the overlap (axtb's AO order)
+    #[arg(long, help_heading = "SCF (GFN2-xTB, g-xTB)")]
+    hamiltonian: bool,
+
     /// Implicit solvent ALPB (GFN2-xTB; g-xTB with --solvation-correction)
     #[arg(long, value_name = "SOLVENT", conflicts_with = "gbsa", help_heading = "Implicit solvent")]
     alpb: Option<String>,
@@ -296,6 +304,8 @@ fn request(mut cli: Cli) -> Result<Request, axtb_driver::Error> {
         molden_file,
         molden_cartesian: cli.molden_cartesian,
         bond_orders: cli.bond_orders,
+        overlap: cli.overlap,
+        hamiltonian: cli.hamiltonian,
         vibrations: cli.novib.then_some(false),
         thermo: cli.nothermo.then_some(false),
         analysis_conventions: cli.analysis_conventions,

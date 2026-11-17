@@ -145,6 +145,7 @@ impl Options {
             etemp: self.scf.etemp.unwrap_or(ETEMP),
             conventions: self.conventions,
             all_orbitals,
+            hamiltonian: false,
         }
     }
 
@@ -394,7 +395,7 @@ impl Calculator {
         self.move_to(positions)?;
         let start = self.take_start();
         let mut setup = self.setup.take();
-        let opts = self.options.run(want.orbitals);
+        let opts = ScfOptions { hamiltonian: want.hamiltonian, ..self.options.run(want.orbitals) };
         let (mol, version, threads, form) = (&self.mol, self.version, &self.threads, self.info.quadrupole);
         // a state from a distant geometry can hurt; once more from the program's start
         let ladder = RetryLadder::warm_then_fresh(start.is_some());
@@ -564,8 +565,12 @@ impl Method for Calculator {
         &self.info
     }
 
-    /// v1.1 has numerical Hessians only.
-    fn check(&self, _want: &Want, hessian: Option<&HessianOptions>) -> Result<()> {
+    /// The Hessian methods the version offers in these conventions; no Hamiltonian matrix for
+    /// 2.0.1 in the program's conventions (its SCF diagonalizes a DIIS-mixed matrix last).
+    fn check(&self, want: &Want, hessian: Option<&HessianOptions>) -> Result<()> {
+        if want.hamiltonian && self.version == Version::V2_0_1 && self.options.conventions == Conventions::Gxtb {
+            return Err(Error::NotApplicable(crate::options::HAMILTONIAN_201_PROGRAM.into()));
+        }
         if let Some(h) = hessian {
             let m = h.method.unwrap_or(self.info.hessian.default);
             if self.info.hessian.get(m).is_none() {
@@ -627,6 +632,43 @@ impl Method for Calculator {
     /// densities (v1.1), with its moments and magnetizations (2.0.1), checked against the setup
     /// when the SCF starts.
     fn set_wavefunction(&mut self, wf: &Wavefunction) -> Result<()> {
+        self.install(wf)?;
+        self.given = true;
+        Ok(())
+    }
+
+    /// The state of `wf` as this calculator's previous one (the restart policy decides).
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        match wf {
+            None => self.reset_wavefunction(),
+            Some(wf) => {
+                self.install(wf)?;
+                self.given = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn reset_wavefunction(&mut self) {
+        self.state = None;
+        self.given = false;
+    }
+
+    fn scf_settings(&self) -> Option<&ScfSettings> {
+        Some(&self.options.scf)
+    }
+
+    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
+        let o = Options { scf: settings, ..self.options.clone() };
+        o.check(self.version)?;
+        self.options = o;
+        Ok(())
+    }
+}
+
+impl Calculator {
+    /// The state of `wf` as the next SCF's start (checked against the setup when it starts).
+    fn install(&mut self, wf: &Wavefunction) -> Result<()> {
         wf.check(&self.fingerprint)?;
         let WavefunctionData::Scf(d) = wf.data() else {
             return Err(Error::Input("the wavefunction belongs to another kind of calculation".into()));
@@ -650,23 +692,6 @@ impl Method for Calculator {
             })),
             Version::V1_1 => Start::V1_1(d.densities.clone()),
         });
-        self.given = true;
-        Ok(())
-    }
-
-    fn reset_wavefunction(&mut self) {
-        self.state = None;
-        self.given = false;
-    }
-
-    fn scf_settings(&self) -> Option<&ScfSettings> {
-        Some(&self.options.scf)
-    }
-
-    fn set_scf_settings(&mut self, settings: ScfSettings) -> Result<()> {
-        let o = Options { scf: settings, ..self.options.clone() };
-        o.check(self.version)?;
-        self.options = o;
         Ok(())
     }
 }
@@ -813,6 +838,10 @@ fn results(
     let (dpat, qpat) = (r.state.dip.clone(), r.state.qp.clone());
     let positions = &setup.mol.positions;
     let v1 = setup.model.version == Version::V1_1;
+    let shell_populations = setup.shell_populations(&setup.total_density_ref(&r.state.p));
+    let shell_atoms: Vec<usize> = setup.shells.iter().map(|&(a, _, _)| a).collect();
+    let core_electrons = axtb::method::core_electrons(&setup.mol.numbers, &shell_atoms, &setup.ref_occ)
+        .expect("g-xTB's reference occupations are whole electrons per atom to 1e-6");
     let sp = SinglePoint {
         energy: r.energies.total,
         terms: r.energies.terms(),
@@ -825,8 +854,24 @@ fn results(
             atomic_quadrupoles: qpat,
             levels,
             homo_lumo_gap,
+            fermi_levels: r.efermi,
+            electronic_temperature: if r.kt > 0.0 { opts.etemp } else { 0.0 },
             orbitals,
             bond_orders,
+            overlap: (want.overlap || want.hamiltonian).then(|| setup.s.clone()),
+            hamiltonian: r.hamiltonian.take(),
+            shell_populations,
+            shell_angular_momenta: setup.shells.iter().map(|&(_, _, l)| l).collect(),
+            shell_atoms,
+            reference_shell_occupations: setup.ref_occ.clone(),
+            core_electrons,
+            quadrupole_traceless: molecular_quadrupole(
+                positions,
+                &r.atom_charges,
+                &r.state.dip,
+                &r.state.qp,
+                QuadrupoleForm::Traceless,
+            ),
             scf: ScfReport {
                 iterations: r.iterations,
                 start,

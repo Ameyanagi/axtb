@@ -11,7 +11,7 @@ use crate::response::{
 };
 use crate::task::Task;
 use axtb::method::{
-    Fingerprint, HessianOptions, Method as MethodTrait, Restart, ScfData, ScfSettings, SinglePoint, Want,
+    Fingerprint, HessianOptions, Method as MethodTrait, Restart, ScfData, ScfSettings, SinglePoint, TermKind, Want,
     WavefunctionData,
 };
 use axtb::ToMolden;
@@ -26,6 +26,8 @@ pub use axtb::method::Wavefunction;
 pub struct Calculator {
     method: Box<dyn MethodTrait>,
     kind: Method,
+    /// The numerics identity of its responses ([`crate::numerics`]).
+    numerics: String,
     numbers: Vec<usize>,
     charge: f64,
     uhf: Option<usize>,
@@ -104,6 +106,14 @@ impl Calculator {
         let threads = req.threads.unwrap_or(1);
         let uhf = req.uhf.map(|u| u as usize);
         let guess = req.guess.as_deref().map(names::guess).transpose()?;
+        // `restart` sets the policy; `guess` then names a start alone
+        let restart = req.restart.as_deref().map(names::restart).transpose()?;
+        if restart.is_some() && matches!(guess, Some(names::Guess::Previous | names::Guess::Fresh)) {
+            return Err(input(
+                "with restart, guess names where an SCF starts without a previous state (\"eeq\" or \"sad\" for \
+                 GFN2-xTB, \"eeq-bc\" for g-xTB), not \"previous\" or \"fresh\"",
+            ));
+        }
         let method: Box<dyn MethodTrait> = match kind {
             Method::Gfn2 => {
                 let conventions =
@@ -124,11 +134,12 @@ impl Calculator {
                     }
                     _ => {}
                 }
-                // a named start at every geometry is the method's own start at every geometry
-                opts.scf.restart = guess.map(|g| match g {
+                // a named start at every geometry is the method's own start at every geometry,
+                // unless `restart` says otherwise
+                opts.scf.restart = restart.or(guess.map(|g| match g {
                     names::Guess::Previous => Restart::Previous,
                     _ => Restart::Fresh,
-                });
+                }));
                 opts.threads = threads;
                 opts.trace = req.scf_trace;
                 opts.dispersion = req.dispersion.unwrap_or(true);
@@ -157,9 +168,10 @@ impl Calculator {
                     || req.max_iter.is_some()
                     || req.mixer.is_some()
                     || req.guess.is_some()
+                    || req.restart.is_some()
                     || req.scf_trace
                 {
-                    bad.push("SCF settings (accuracy, etemp, max_iter, mixer, guess, scf_trace)");
+                    bad.push("SCF settings (accuracy, etemp, max_iter, mixer, guess, restart, scf_trace)");
                 }
                 refuse(kind, &bad)?;
                 let conventions = names::gfnff_conventions(req.conventions.as_deref().unwrap_or("axtb"))?;
@@ -178,14 +190,20 @@ impl Calculator {
                 };
                 Box::new(axtb_gfnff::Calculator::new(&req.numbers, setup, req.charge, opts)?)
             }
-            Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_method(req, kind, threads, uhf, guess)?,
+            Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_method(req, kind, threads, uhf, guess, restart)?,
         };
-        Ok(Self { method, kind, numbers: req.numbers.clone(), charge: req.charge, uhf, threads })
+        let numerics = crate::numerics(kind, kind.is_gxtb() && req.solvation_correction.is_some());
+        Ok(Self { method, kind, numerics, numbers: req.numbers.clone(), charge: req.charge, uhf, threads })
     }
 
     /// The method.
     pub fn method(&self) -> Method {
         self.kind
+    }
+
+    /// The numerics identity of its results ([`crate::numerics`]).
+    pub fn numerics(&self) -> &str {
+        &self.numerics
     }
 
     /// The canonical name of the method's conventions.
@@ -215,8 +233,10 @@ impl Calculator {
         }
         let want = Want {
             gradient: task.gradient || task.hessian.is_some(),
-            orbitals: task.molden.is_some(),
+            orbitals: task.molden.is_some() || task.orbitals,
             bond_orders: task.bond_orders,
+            overlap: task.overlap,
+            hamiltonian: task.hamiltonian,
         };
         let hessian =
             task.hessian.as_ref().map(|h| HessianOptions { method: h.method, step: h.step, accuracy: h.accuracy });
@@ -230,12 +250,14 @@ impl Calculator {
             version: response::VERSION,
             method: Some(info.name),
             conventions: info.conventions,
+            numerics: self.numerics.clone(),
             ..Default::default()
         };
         let orbitals = fill(&mut out, sp, hessian);
         check_finite(&out)?;
         if let Some(m) = &task.molden {
-            let orbitals = orbitals.ok_or_else(|| Error::Numerical("the calculation returned no orbitals".into()))?;
+            let orbitals =
+                orbitals.as_ref().ok_or_else(|| Error::Numerical("the calculation returned no orbitals".into()))?;
             let title = format!("axtb {} {}", response::VERSION, self.kind);
             let text = orbitals.to_molden(m.functions, &title)?;
             if let Some(path) = &m.file {
@@ -243,6 +265,9 @@ impl Calculator {
             }
             out.molden_file = m.file.clone();
             out.molden = m.text.then_some(text);
+        }
+        if task.orbitals {
+            out.orbitals = orbitals;
         }
         if let (Some(h), Some(hp)) = (&task.hessian, &out.hessian) {
             if let Some(v) = &h.vibrations {
@@ -288,6 +313,20 @@ impl Calculator {
         Ok(self.method.set_wavefunction(&Wavefunction::new(fingerprint, WavefunctionData::Scf(data)))?)
     }
 
+    /// Install `wf` as the method's own previous wavefunction (`None`: none): unlike
+    /// [`Calculator::set_wavefunction`], the restart policy decides whether the next SCF starts
+    /// from it. A session that keeps one wavefunction per lineage installs it before each call of
+    /// that lineage and computes what one calculator per lineage computes.
+    pub fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        Ok(self.method.set_history(wf)?)
+    }
+
+    /// The SCF accuracy of later calls: the SCF thresholds (GFN2-xTB keeps the integral screening
+    /// it was built with); every part's for the composite. GFN-FF has none.
+    pub fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
+        Ok(self.method.set_scf_accuracy(accuracy)?)
+    }
+
     /// Forget the previous wavefunction(s): the next SCF starts from the method's own guess.
     /// `gxtb_only`: of g-xTB only (the composite's g-xTB part; for every other method nothing).
     pub fn reset_wavefunction(&mut self, gxtb_only: bool) {
@@ -319,6 +358,7 @@ fn gxtb_method(
     threads: usize,
     uhf: Option<usize>,
     guess: Option<names::Guess>,
+    restart: Option<Restart>,
 ) -> Result<Box<dyn MethodTrait>> {
     let version = kind.gxtb_version().expect("a g-xTB method");
     let conventions = req.conventions.as_deref().map(names::gxtb_conventions).transpose()?.unwrap_or_default();
@@ -341,7 +381,7 @@ fn gxtb_method(
                 etemp: req.etemp,
                 max_iter: req.max_iter,
                 restart: match guess {
-                    None => None,
+                    None => restart,
                     Some(names::Guess::Previous) => Some(Restart::Previous),
                     Some(names::Guess::Fresh) => Some(Restart::Fresh),
                     Some(_) => {
@@ -377,7 +417,8 @@ fn gxtb_method(
     o.scf.etemp = req.etemp;
     o.scf.max_iter = req.max_iter;
     o.scf.restart = match guess {
-        None => None,
+        None => restart,
+        Some(names::Guess::EeqBc) if restart.is_some() => restart,
         Some(names::Guess::Previous) => Some(Restart::Previous),
         Some(names::Guess::Fresh | names::Guess::EeqBc) => Some(Restart::Fresh),
         Some(names::Guess::Eeq | names::Guess::Sad) => {
@@ -430,6 +471,7 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
     out.gradient = sp.gradient;
     out.dipole = Some(sp.dipole);
     out.terms = Some(Named::new(sp.terms.iter().map(|t| (t.name, t.value)).collect()));
+    out.subtotals = sp.terms.iter().filter(|t| t.kind == TermKind::Subtotal).map(|t| t.name).collect();
     out.timings = Some(Named::new(sp.timings));
     out.charges = Some(sp.charges);
     let e = sp.electronic?;
@@ -447,6 +489,8 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
                 .collect()
         }),
         homo_lumo_gap: e.homo_lumo_gap,
+        fermi_levels: e.fermi_levels,
+        electronic_temperature: e.electronic_temperature,
         quadrupole: e.quadrupole,
         shell_charges: e.shell_charges,
         atomic_dipoles: e.atomic_dipoles,
@@ -456,6 +500,14 @@ fn fill(out: &mut Response, mut sp: SinglePoint, hessian: Option<axtb::Hessian>)
         occupations_alpha: a.occupations,
         occupations_beta: b.occupations,
         bond_orders: e.bond_orders.map(|bo| Matrix { rows: nat, cols: nat, data: bo }),
+        overlap: e.overlap.map(Matrix::square),
+        hamiltonian: e.hamiltonian.map(|h| h.into_iter().map(Matrix::square).collect()),
+        core_electrons: e.core_electrons,
+        shell_populations: e.shell_populations,
+        shell_atoms: e.shell_atoms,
+        shell_angular_momenta: e.shell_angular_momenta,
+        reference_shell_occupations: e.reference_shell_occupations,
+        quadrupole_traceless: e.quadrupole_traceless,
     });
     e.orbitals
 }

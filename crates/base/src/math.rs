@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-//! The error function of the reference programs, 3-vector helpers, the Cartesian Hessian
-//! block of a pair term, the normalization of Gaussian primitives and the atomic sums of shell
-//! quantities.
+//! The error function of the reference programs, 3-vector helpers, the two dot products of the
+//! methods' vectors ([`dot8`], [`dot_seq`]: two rounding orders), the Cartesian Hessian block of a
+//! pair term, the normalization of Gaussian primitives and the atomic sums of shell quantities.
 //!
 //! Sources: the C library's `erf`; the 3-vector and pair-Hessian helpers of `axtb` and `axtb-d4`;
+//! the dot products of the SCF eigensolver's inverse iteration, axtb's DIIS mixer and g-xTB;
 //! the primitive normalization of axtb's STO-NG basis (tblite's `slater_to_gauss`) and Molden
 //! writer, which associate the factor 2α/π differently, both kept ([`primitive_norm_tblite`],
 //! [`primitive_norm`]); the shell-to-atom sum of axtb's SCF.
@@ -39,6 +40,34 @@ pub fn norm2_sq(v: [f64; 3]) -> f64 {
 #[inline]
 pub fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Dot product of two slices of equal length with eight partial sums in a fixed order: lanes
+/// k = i mod 8 over the first 8⌊n/8⌋ elements, reduced ((s0 + s4) + (s1 + s5)) + ((s2 + s6) +
+/// (s3 + s7)), then the remainder added in order. It vectorizes (a sequential sum does not),
+/// and its result depends on the length alone. The inverse iteration of the SCF eigensolver
+/// and g-xTB 2.0.1's response, Krylov solvers and analytic Hessian.
+#[inline]
+pub fn dot8(a: &[f64], b: &[f64]) -> f64 {
+    let mut acc = [0.0; 8];
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    for (x, y) in ca.iter().zip(cb) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    let mut s = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
+    for (x, y) in ra.iter().zip(rb) {
+        s += x * y;
+    }
+    s
+}
+
+/// The sequential dot product Σ_k a_k b_k (an iterator sum, from −0, in index order): GFN2-xTB's
+/// DIIS mixer and the Mulliken analyses and Z-vector solver of g-xTB.
+#[inline]
+pub fn dot_seq(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Add the Cartesian Hessian of a pair term `E(r)` with `dE/dr = e1` and `d²E/dr² = e2` to `h`

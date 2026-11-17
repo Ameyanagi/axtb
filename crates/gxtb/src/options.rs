@@ -92,11 +92,23 @@ pub struct ScfOptions {
     /// v1.1: the Fock matrix of the SCF, the exact derivative of the energy or the program's;
     /// 2.0.1: units, electron count and cutoffs (the program's or the default ones).
     pub conventions: Conventions,
-    /// Every orbital's coefficients in the SCF result (2.0.1's Hessians and the orbitals of a
-    /// Molden file need them; without, only the occupied orbitals are computed). v1.1 in the
-    /// program's conventions computes every orbital anyway (the program does).
+    /// Every orbital's coefficients in the SCF result (the Hessians' response and the orbitals
+    /// of a Molden file need them; without, only the occupied orbitals are computed). The SCF
+    /// is the same either way: the orbitals without occupation are computed once after it.
+    /// v1.1 in the program's conventions computes every orbital in every iteration (the
+    /// program does).
     pub all_orbitals: bool,
+    /// The Fock matrices whose eigenvectors are the orbitals, per spin channel, in the SCF result
+    /// ([`crate::ScfResult::hamiltonian`]): the unmixed last build. Refused
+    /// ([`axtb::Error::NotApplicable`]) for 2.0.1 in the program's conventions, whose last
+    /// diagonalized matrix is DIIS-mixed.
+    pub hamiltonian: bool,
 }
+
+/// Why g-xTB 2.0.1 in the program's conventions has no Hamiltonian to return.
+pub const HAMILTONIAN_201_PROGRAM: &str = "g-xTB 2.0.1 in the program's conventions (gxtb) diagonalizes a \
+DIIS-mixed Fock matrix last, so no single Fock build has the orbitals as its eigenvectors: no Hamiltonian matrix \
+(the axtb conventions end with an unmixed iteration and have one; the overlap is available in both)";
 
 impl Default for ScfOptions {
     fn default() -> Self {
@@ -113,6 +125,7 @@ impl Default for ScfOptions {
             etemp: 0.0,
             conventions: Conventions::default(),
             all_orbitals: false,
+            hamiltonian: false,
         }
     }
 }
@@ -156,6 +169,9 @@ impl ScfOptions {
         }
         if self.transition_iteration == Some(0) {
             return Err(Error::Input("transition_iteration must be at least 1 (iterations count from 1)".into()));
+        }
+        if self.hamiltonian && version == Version::V2_0_1 && self.conventions == Conventions::Gxtb {
+            return Err(Error::NotApplicable(HAMILTONIAN_201_PROGRAM.into()));
         }
         let other_version = match version {
             Version::V1_1 if self.residual_tol.is_some() => {

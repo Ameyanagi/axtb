@@ -84,10 +84,15 @@ pub(crate) struct ScfOptions {
     /// Starting point when no previous wavefunction is given.
     pub guess: InitialGuess,
     /// Keep the converged orbitals and their basis in [`Gfn2Result::orbitals`] (e.g. for a
-    /// Molden file); every eigenvector is computed.
+    /// Molden file). The SCF is the same either way: where it computes the occupied orbitals
+    /// alone, the others are computed once after it.
     pub keep_orbitals: bool,
     /// Compute the Mayer–Wiberg bond orders ([`Gfn2Result::bond_orders`]).
     pub bond_orders: bool,
+    /// Keep the overlap matrix ([`Gfn2Result::overlap`]) and the last Fock matrix, the one whose
+    /// eigenvectors are the orbitals ([`Gfn2Result::hamiltonian`]).
+    pub keep_overlap: bool,
+    pub keep_hamiltonian: bool,
     /// Print every SCF iteration (energy, energy change, residual) to stderr, for debugging
     /// SCFs that do not converge.
     pub trace: bool,
@@ -111,6 +116,8 @@ pub(crate) struct EnergyTerms {
     pub third_order: f64,
     pub anisotropic: f64,
     pub entropy: f64,
+    /// The band energy Tr(H0 P) of the output density (a part of `electronic`).
+    pub band: f64,
     /// The energies of the terms added with [`Calculator::push_term`](crate::Calculator::push_term),
     /// by the names of their pieces, in the order the pieces first appear (their
     /// moment-independent and moment-dependent parts summed per name).
@@ -165,9 +172,21 @@ pub(crate) struct Gfn2Result {
     /// HOMO–LUMO gap (Eh; `crate::properties::homo_lumo_gap` with the method's and
     /// conventions' rule); `None` without a LUMO.
     pub homo_lumo_gap: Option<f64>,
+    /// Fermi levels (Eh) of the alpha and beta electrons, `None` for the Aufbau filling, and the
+    /// electronic temperature (K) of the occupations (0 for the Aufbau filling).
+    pub fermi_levels: [Option<f64>; 2],
+    pub electronic_temperature: f64,
     /// Mayer–Wiberg bond orders (N x N row-major, zero diagonal), when asked for (see
     /// `crate::properties`).
     pub bond_orders: Option<Vec<f64>>,
+    /// The overlap matrix of the SCF (with its screening) and its last Fock matrix, H0 plus the
+    /// potentials of the last input moments, the matrix whose eigenvectors are the orbitals (one
+    /// for both spins): n x n row-major, when asked for.
+    pub overlap: Option<Vec<f64>>,
+    pub hamiltonian: Option<Vec<f64>>,
+    /// Mulliken shell populations Σ_{μ∈shell} (P S)_μμ and the reference shell occupations.
+    pub shell_populations: Vec<f64>,
+    pub reference_shell_occupations: Vec<f64>,
     /// Where the SCF started: `"previous"` (a given wavefunction, usually the previous
     /// geometry's), or the method's own start: `"eeq"` (GFN2-xTB: EEQ charges), `"sad"` (neutral
     /// atoms, also when the EEQ charges cannot be computed), `"eeq-bc"` (g-xTB: the program's
@@ -528,9 +547,10 @@ impl XtbModel {
             }
             _ => "sad",
         };
-        // eigenvectors of the occupied orbitals only, where nothing needs all of them
-        let all_orbitals = keep_state || opts.keep_orbitals || (opts.bond_orders && nalpha != nbeta);
-        let lowest = self.params.occupied_orbitals_only && !all_orbitals;
+        // the eigenvectors of the occupied orbitals only in the conventions that ask for it,
+        // whatever is requested (the orbitals without occupation, where needed, once after the
+        // SCF): a request changes no other number
+        let lowest = self.params.occupied_orbitals_only;
         let mut scf = Gfn2Scf {
             xtb: self,
             mol,
@@ -628,8 +648,10 @@ impl XtbModel {
         let Gfn2Scf {
             geo,
             ints,
-            solver,
-            coeff,
+            n0sh,
+            mut solver,
+            fock,
+            mut coeff,
             kocc,
             density,
             emo,
@@ -644,6 +666,12 @@ impl XtbModel {
             ..
         } = scf;
         terms.repulsion = e_repulsion[0];
+        // the orbitals without occupation, for the orbitals kept and the response of a Hessian:
+        // once, from the last Fock matrix, the occupied ones staying those of the SCF
+        if (opts.keep_orbitals || keep_state) && kocc < nao {
+            solver.solve_rest(fock.as_ref(), &emo, &mut coeff, kocc)?;
+            timer.lap("virtual orbitals");
+        }
         let mp_cache = &geo.mp_cache;
         for i in 0..nat {
             energies[i] += eelec[i];
@@ -766,10 +794,20 @@ impl XtbModel {
             if nalpha == nbeta {
                 crate::properties::mayer_bond_orders(nat, &bas.ao2at, s, &[density.as_ref()], par)
             } else {
-                let [pa, pb] = crate::properties::spin_densities(coeff.as_ref(), &occ_a, &occ_b, par);
+                // the spin densities of the orbitals of the SCF's density
+                let c = coeff.as_ref().subcols(0, kocc);
+                let [pa, pb] = crate::properties::spin_densities(c, &occ_a[..kocc], &occ_b[..kocc], par);
                 crate::properties::mayer_bond_orders(nat, &bas.ao2at, s, &[pa.as_ref(), pb.as_ref()], par)
             }
         });
+        let mut shell_populations = vec![0.0; nsh];
+        for mu in 0..nao {
+            shell_populations[bas.ao2sh[mu]] +=
+                axtb_base::math::dot_seq(density.col_as_slice(mu), ints.overlap.col_as_slice(mu));
+        }
+        let row_major = |m: &Mat<f64>| (0..m.nrows()).flat_map(|i| (0..m.ncols()).map(move |j| m[(i, j)])).collect();
+        let overlap = opts.keep_overlap.then(|| row_major(&ints.overlap));
+        let hamiltonian = opts.keep_hamiltonian.then(|| row_major(&fock));
         let state = if keep_state {
             Some(ScfState {
                 geo,
@@ -808,7 +846,13 @@ impl XtbModel {
                 orbitals,
                 levels,
                 homo_lumo_gap,
+                fermi_levels: efermi,
+                electronic_temperature: if kt > 0.0 { opts.etemp } else { 0.0 },
                 bond_orders,
+                overlap,
+                hamiltonian,
+                shell_populations,
+                reference_shell_occupations: n0sh,
                 guess: start_label,
                 eigensolver: solver.backend(),
             },
@@ -835,7 +879,8 @@ impl Moments {
 }
 
 /// One GFN2-xTB SCF of [`XtbModel::singlepoint_state`] as the core's SCF model: the Fock
-/// matrix of the mixed input moments, all or only the occupied eigenpairs, tblite's Fermi
+/// matrix of the mixed input moments, all or (by the conventions) only the occupied
+/// eigenpairs, tblite's Fermi
 /// filling, the density, its Mulliken moments and their energy; the moments are mixed as the
 /// vector of [`ScfVariables`].
 struct Gfn2Scf<'a> {
@@ -1085,6 +1130,7 @@ impl ScfModel for Gfn2Scf<'_> {
         let (h0, density) = (&self.ints.h0, &self.density);
         let eh0 = |nu: usize| dot(h0.col_as_slice(nu), density.col_as_slice(nu));
         let eh0 = threads::map_with_min_len(nao, parallel, 16, eh0);
+        self.terms.band = eh0.iter().sum();
         for (nu, e) in eh0.into_iter().enumerate() {
             eelec[bas.ao2at[nu]] += e;
         }

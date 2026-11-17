@@ -83,9 +83,11 @@ def test_python_equals_cli_and_program(rel, charge, uhf):
         assert c["energy"] == g["energy"]
         assert c["terms"] == g["terms"]
         assert np.array_equal(np.asarray(c["gradient"]), np.asarray(g["gradient"]))
-    # default conventions: same SCF, CODATA 2022 units, integer electron count, smooth cutoffs
+    # default conventions: CODATA 2022 units, integer electron count, smooth cutoffs, and one
+    # unmixed iteration after the program's convergence test (up to 1.4e-7 Eh from the program,
+    # tests/gxtb2_reproduction.py)
     dflt = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=METHOD, gradient=True)
-    assert abs(dflt["energy"] - program) < 1e-8
+    assert abs(dflt["energy"] - program) < 2e-7
     assert abs(sum(dflt["charges"]) - charge) < 1e-8
     if AXTB_BIN.exists():
         c = cli(numbers, pos, charge, uhf, gradient=True, conventions="axtb")

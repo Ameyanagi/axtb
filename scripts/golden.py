@@ -8,6 +8,11 @@ and feature, a few thread counts and the run-time LAPACK path) and compare outpu
     scripts/golden.py compare DIR --report [--allow gxtb11]
                                                   the same, and for every case that differs the
                                                   largest change of each quantity
+    scripts/golden.py compare DIR --added KEYS    the same, with the response fields KEYS (comma-
+                                                  separated; `group.field` for a field inside an
+                                                  object, e.g. terms.band) new: ignored where the
+                                                  golden output lacks them (a commit that adds
+                                                  fields)
     scripts/golden.py list                        the cases
 
 Outputs are compared exactly (every float, every field) except the timing fields. Golden files
@@ -425,10 +430,14 @@ THRESHOLDS = {
 # RMS density change 2e-5, energy change 1e-8 Eh): charges 2e-5, atomic and molecular dipoles 1e-4
 # (x 5 bohr), quadrupoles 2e-4 (x 10 bohr^2), terms, orbital energies and the gap 1e-5 Eh (x 0.5 Eh);
 # the iteration counts may differ and are always printed; the numbers in an error's message (energy change,
-# residual) within the SCF test's scale, 1e-8. (The gfn2 stretch-retry cases can join once their numbers
-# may move.)
+# residual) within the SCF test's scale, 1e-8. The gfn2 stretch-retry cases joined at alpha 1 (the commit
+# that computes GFN2's orbitals without occupation after the SCF, whose SCFs keeping every orbital moved
+# from the full eigensolver to the occupied orbitals' path): at 3 Å the warm start fails within max_iter 60,
+# and round-off decides where the slowly converging fresh rung stops (charges 1.1e-9, dipole 3.7e-9 apart);
+# with max_iter 200 the two builds agree to 6e-13.
 LADDER_CASES = ("traj-gxtb11-water-stretch-retry", "traj-gxtb2-water-stretch-retry",
-                "traj-gxtb2-water-stretch-retry-hessian")
+                "traj-gxtb2-water-stretch-retry-hessian", "traj-gfn2-water-stretch-retry",
+                "traj-gfn2-water-stretch-retry-hessian")
 LADDER_THRESHOLDS = {
     "energy": 1e-10, "gradient": 1e-7, "charges": 2e-5, "shell_charges": 2e-5, "atomic_dipoles": 1e-4,
     "dipole": 1e-4, "atomic_quadrupoles": 2e-4, "quadrupole": 2e-4, "terms": 1e-5, "orbital_energies_alpha": 1e-5,
@@ -642,6 +651,33 @@ def report(gold, new, ladder=False):
     return {q: v for q, v in rows.items() if v != 0.0}, ok, review
 
 
+def drop_added(gold, new, keys):
+    """`new` without the response fields `keys` (`field`, or `group.field` inside an object) where the
+    golden output lacks them (in each step of a trajectory), and the names of the fields dropped."""
+    dropped = set()
+
+    def strip(g, n, prefix=""):
+        if not (isinstance(g, dict) and isinstance(n, dict)):
+            return n
+        out = {}
+        for k, v in n.items():
+            path = prefix + k
+            if path in keys and k not in g:
+                dropped.add(path)
+            elif any(x.startswith(path + ".") for x in keys):
+                out[k] = strip(g.get(k), v, path + ".")
+            else:
+                out[k] = v
+        return out
+
+    go, no = gold.get("output"), new.get("output")
+    if isinstance(go, list) and isinstance(no, list):
+        out = [strip(g, x) for g, x in zip(go, no)] + no[len(go):]
+    else:
+        out = strip(go, no)
+    return {**new, "output": out}, dropped
+
+
 def flatten(x):
     """All numbers of a nested list of numbers, or None."""
     out = []
@@ -666,6 +702,8 @@ def main():
     ap.add_argument("--only", default="", help="comma-separated case-name substrings")
     ap.add_argument("--report", action="store_true", help="summarize the changes of the --allow cases")
     ap.add_argument("--allow", default="gxtb11", help="comma-separated substrings of the cases that may change")
+    ap.add_argument("--added", default="", help="comma-separated response fields that are new (absent from DIR); "
+                    "group.field for a field inside an object")
     a = ap.parse_args()
     cases = corpus()
     if a.only:
@@ -703,10 +741,16 @@ def main():
         return
     failed, changed, over, review = 0, 0, 0, 0
     allowed = [k for k in a.allow.split(",") if k] if a.report else []
+    added = {k for k in a.added.split(",") if k}
+    added_seen = {}
     summary = []
     for name, req, env in cases:
         gold = json.loads((d / f"{name}.json").read_text())
         new = run(a.axtb, req, env, traj)
+        if added:
+            new, dropped = drop_added(gold, new, added)
+            for k in dropped:
+                added_seen[k] = added_seen.get(k, 0) + 1
         ds = diff(gold, new)
         if ds and any(k in name for k in allowed):
             changed += 1
@@ -742,6 +786,9 @@ def main():
               "largest changes:")
         for q, v in sorted(tot.items()):
             print(f"     {q}: {v:.3e}" if isinstance(v, float) else f"     {q}: {v}")
+    if added:
+        print("new fields, absent from the golden outputs and not compared: "
+              + (", ".join(f"{k} ({n} cases)" for k, n in sorted(added_seen.items())) or "none"))
     print(f"{len(cases) - failed - changed} of {len(cases)} identical, {changed} allowed changes, "
           f"{failed} other differences (binary {sha})")
     sys.exit(1 if failed or over else 3 if review else 0)

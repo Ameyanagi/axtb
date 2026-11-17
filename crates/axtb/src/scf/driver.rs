@@ -20,7 +20,10 @@
 //! occupations, density builder, Mulliken analysis and energy) and its programs' conventions in
 //! its strategy types; the loop has no method-specific branch. A rule's
 //! [`Verdict::OneMore`] runs one more iteration whose result counts, with `unmixed` its Fock
-//! matrices as built ([`FockSource::Unmixed`]; the g-xTB 1.1.0 program's last iteration). Retries
+//! matrices as built ([`FockSource::Unmixed`]; the g-xTB 1.1.0 program's last iteration, and g-xTB
+//! 2.0.1's in the axtb conventions). Such an iteration runs past the iteration limit when the rule
+//! says so ([`ConvergenceRule::final_iteration_past_limit`]: an iteration of axtb's own, not the
+//! reference program's); the reported iterations count it. Retries
 //! with another start or mixer are separate SCFs, one [`run_scf`] each (GFN2-xTB's attempts).
 //!
 //! The model is a type parameter (its calls are static); the mixer and the rule are trait
@@ -70,7 +73,8 @@ pub enum Accelerator<'a> {
 pub struct ScfStrategy<'a> {
     pub accelerator: Accelerator<'a>,
     pub rule: &'a mut dyn ConvergenceRule,
-    /// Iterations at most (at least 1).
+    /// Iterations at most (at least 1); one more for a rule's final unmixed iteration when the
+    /// rule says so ([`ConvergenceRule::final_iteration_past_limit`]).
     pub max_iter: usize,
 }
 
@@ -203,7 +207,13 @@ pub fn run_scf<M: ScfModel>(
     }
     // the rule asked for an iteration with the Fock matrices as built
     let mut unmixed = false;
-    for iter in 1..=max_iter {
+    // the iterations up to the limit, and past it a final unmixed iteration of the rule's own
+    let mut iter = 0;
+    loop {
+        iter += 1;
+        if iter > max_iter && !(unmixed && rule.final_iteration_past_limit()) {
+            break;
+        }
         // (the matrices of an unmixed iteration, and the residual a Fock mixer measured)
         let (as_built, residual) = match &mut accelerator {
             Accelerator::Moments(mixer) => {
@@ -384,6 +394,40 @@ mod tests {
         assert_eq!(out.state, 0.5 * (23.0 / 64.0) + 0.25);
         assert!(out.last.residual.is_nan() && out.last.density_change.is_nan());
         assert_eq!(out.last.energy, (out.state - 0.5).powi(2));
+    }
+
+    /// [`Script`], whose unmixed iteration may run past the iteration limit.
+    struct PastLimit(Script);
+
+    impl ConvergenceRule for PastLimit {
+        fn update(&mut self, it: &Iteration) -> Verdict {
+            self.0.update(it)
+        }
+        fn converged(&self) -> bool {
+            self.0.converged()
+        }
+        fn final_iteration_past_limit(&self) -> bool {
+            true
+        }
+    }
+
+    /// A rule whose final unmixed iteration may run past the limit: the test met in the last
+    /// iteration the limit allows (3) converges after 4 iterations, the unmixed one counted; met
+    /// earlier, the SCF ends as before; with a limit below the test's iteration it fails.
+    #[test]
+    fn a_final_unmixed_iteration_past_the_limit() {
+        for (met, max_iter, want) in [(3, 3, (Stop::Converged, 4, true)), (3, 10, (Stop::Converged, 4, true))] {
+            let (mut model, mut mixer, mut rule) = (Toy::default(), Damp::default(), PastLimit(Script(met, false)));
+            let strategy = ScfStrategy { accelerator: Accelerator::Fock(&mut mixer), rule: &mut rule, max_iter };
+            let out = run_scf(&mut model, strategy, 0.0, &mut Laps::new()).unwrap();
+            assert_eq!((out.stop, out.iterations, out.converged), want, "met {met}, limit {max_iter}");
+            assert_eq!(model.log.last().unwrap(), "evaluate 4 false");
+            assert_eq!(out.state, 0.5 * (23.0 / 64.0) + 0.25);
+        }
+        let (mut model, mut mixer, mut rule) = (Toy::default(), Damp::default(), PastLimit(Script(3, false)));
+        let strategy = ScfStrategy { accelerator: Accelerator::Fock(&mut mixer), rule: &mut rule, max_iter: 2 };
+        let out = run_scf(&mut model, strategy, 0.0, &mut Laps::new()).unwrap();
+        assert_eq!((out.stop, out.iterations, out.converged), (Stop::IterationLimit, 2, false));
     }
 
     /// At the iteration limit after its OneMore the rule has not converged; a vector mixer is

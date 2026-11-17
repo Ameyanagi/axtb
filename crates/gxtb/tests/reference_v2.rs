@@ -201,27 +201,30 @@ fn scf_matches_program() {
 }
 
 /// Default conventions (CODATA 2022 units, integer electron count, smooth cutoffs) against
-/// the program: same SCF, energies within a few 1e-11 Eh for these small molecules.
+/// the program: the program's SCF plus one unmixed iteration (exactly one iteration more for
+/// every molecule), energies within 1.4e-7 Eh for these small molecules. The conventions alone
+/// differ by a few 1e-10 Eh at most; the rest is the last step toward self-consistency (TmH3
+/// 1.34e-7, ErF3 6.5e-8, caffeine 6.6e-8 Eh).
 #[test]
 fn default_conventions_near_program() {
     let opts = ScfOptions { conventions: Conventions::Axtb, ..Default::default() };
     let mut worst: f64 = 0.0;
+    let mut bad_iter = Vec::new();
     for dir in molecules() {
         let mol = molecule(&dir, Conventions::Axtb);
         let r = Setup::new(&mol, axtb_gxtb::model::Model::v2_0_1(Conventions::Axtb)).unwrap().scf(&opts).unwrap();
         let summ = json(&dir.join("summary.json"));
         let de = r.energies.total - program_total(&dir);
-        println!(
-            "{:22} dE {:9.2e} iter {:3} / {:3}",
-            name(&dir),
-            de,
-            r.iterations,
-            summ["scf_iterations"].as_u64().unwrap()
-        );
+        let it = summ["scf_iterations"].as_u64().unwrap() as usize;
+        println!("{:22} dE {:9.2e} iter {:3} / {:3}", name(&dir), de, r.iterations, it);
+        if r.iterations != it + 1 {
+            bad_iter.push(name(&dir));
+        }
         worst = worst.max(de.abs());
     }
     println!("worst {worst:e}");
-    assert!(worst < 1e-8, "{worst:e}");
+    assert!(bad_iter.is_empty(), "not one iteration more than the program: {bad_iter:?}");
+    assert!(worst < 1.4e-7, "{worst:e}");
 }
 
 /// Molecules larger than the program's cutoffs (C50H102, 148 bohr long; (H2O)100): program mode

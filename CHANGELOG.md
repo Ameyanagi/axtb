@@ -5,6 +5,96 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
+- Driver calls for sessions and the Python binding: `Calculator::set_history` (with the new
+  `Method::set_history`) installs a wavefunction as the method's own previous one, so the restart
+  policy still decides whether the next SCF starts from it (`set_wavefunction` marks it given); a
+  session that keeps one wavefunction per lineage computes what one calculator per lineage
+  computes, bit for bit. `Request::restart` (`previous` or `fresh`) sets the restart policy beside
+  `guess`, which then names the start alone (GFN2-xTB `sad` with `previous`); the old `guess`
+  values keep working. `Calculator::set_scf_accuracy` (with `Method::set_scf_accuracy`, every part's
+  for the composite) sets the SCF thresholds of later calls; GFN2-xTB keeps the integral screening
+  it was built with. `Error::code()` gives a stable code for every error variant
+  (`invalid_input`, `unsupported_element`, `topology_failed`, `scf_not_converged`,
+  `numerical_failure`, `not_applicable`; the CLI's JSON keeps `kind`); `axtb_driver::canonical`
+  gives the canonical name of a method, a method's conventions or a solvent, and
+  `supported_elements` the elements a method has parameters for (GFN2-xTB H-Rn, GFN-FF and g-xTB
+  2.0.1 H-Lr, v1.1 H-Ce, Yb-Ac and U); `axtb_solvation::canonical_solvent`.
+- For the Python binding (in Rust and the driver's response, not in the CLI's JSON): the
+  orbitals with their basis, structured, without Molden text (`Task::orbitals`,
+  `Response::orbitals`); per atom the core electrons outside the valence-only orbitals, Z less
+  the reference shell occupations (`Electronic::core_electrons`; Zn: 28 in GFN2-xTB and g-xTB);
+  Mulliken shell populations Σ(P S) of the total density with each shell's atom, angular
+  momentum and reference occupation (`Electronic::shell_populations`, `shell_atoms`,
+  `shell_angular_momenta`, `reference_shell_occupations`); the traceless (Buckingham) molecular
+  quadrupole in every conventions beside the conventions' form (`quadrupole_traceless`); the
+  thermochemistry's average moment of inertia B_av (kg m²) and the imaginary frequencies it
+  inverts and leaves out (`Thermo::average_moment`, `inverted_frequencies`,
+  `dropped_frequencies`). `axtb_base::method::core_electrons`, `units::ELECTRON_MASS_KG`. No
+  number and no CLI output changes.
+- GFN2-xTB's energy terms partition the energy: a new piece `band`, the band energy Tr(H0 P),
+  which xtb reports only inside the electronic energy, so that the pieces (every term but the
+  subtotal `electronic`) add up to the energy, as g-xTB's and GFN-FF's do. `dispersion` and
+  `solvation` stay whole pieces (their charge-independent and self-consistent parts; the latter
+  are also inside `electronic`, a subtotal). The CLI's `terms` gain the key `band`; no number
+  changes. The driver's response names the subtotals for the Python binding
+  (`Response::subtotals`, not in the CLI's JSON).
+- Numerics epochs (afh-stack decision 29): every response names the identity of the code that
+  produced it, `numerics`, and `axtb_driver::numerics(method, composite)` gives it before a run.
+  The rule: each method has an epoch, `"<method>:<epoch>"` (`"gfn2:1"`, `"gxtb-v1.1:1"`,
+  `"gxtb-v2.0.1:1"`, `"gfnff:1"`), one epoch per method across all its conventions; the g-xTB
+  solvation composite joins its parts' (`"gxtb-v2.0.1:1+gfn2:1"`), and GFN2-xTB in solvent is
+  GFN2-xTB's. A method's epoch changes with every commit that may change its results for an
+  unchanged request (classed R, round-off, or M, a model or default change, below) and never
+  with one that keeps every result bit for bit (B). The vibrational analysis is part of every
+  method's numbers; the analysis of a given Hessian has its own identity, `"analysis:1"`. Thread
+  counts and a run-time LAPACK are not part of it (round-off). The history is in "Numerics
+  epochs" at the end of this file.
+- AO matrices on request: `overlap` (the SCF's S, with its screening; g-xTB: of the SCF basis)
+  and `hamiltonian` (the matrix whose generalized eigenvectors with S are the returned orbitals:
+  GFN2-xTB's last Fock matrix, one for both spins; g-xTB's unmixed last build per spin channel),
+  which brings the overlap. Request fields `overlap` and `hamiltonian` (CLI `--overlap`,
+  `--hamiltonian`), response fields of the same names, in Rust `Want::overlap`,
+  `Want::hamiltonian`, `Electronic::overlap`, `Electronic::hamiltonian`; axtb's AO order (atom by
+  atom, shell by shell, m = -l..l, p as y, z, x). Asking for them changes no other number.
+  g-xTB 2.0.1 in the program's conventions refuses the Hamiltonian (its SCF diagonalizes a
+  DIIS-mixed matrix last) and GFN-FF both, before anything runs, with the new error kind
+  `not_applicable` (`axtb_base::Error::NotApplicable`; Python: `axtb.InputError` with that kind).
+  GFN-FF's refusals of orbitals (a Molden file) and bond orders take the same kind (they were
+  `input`).
+- Every SCF result reports the Fermi levels of the alpha and beta electrons (`fermi_levels`, Eh;
+  `null` where the occupations are the Aufbau filling, the same level twice for a closed shell)
+  and the electronic temperature the occupations used (`electronic_temperature`, K; 0 for the
+  Aufbau filling, e.g. GFN2-xTB's program conventions up to 0.1 K). In Rust:
+  `Electronic::fermi_levels` and `Electronic::electronic_temperature`. New keys in the CLI's JSON
+  and Python's dict; nothing else changes.
+- g-xTB 2.0.1 in the axtb conventions ends its SCF with one unmixed iteration: once the
+  program's convergence test is met after iteration k, the Fock matrix of P_k's state is
+  diagonalized as built (not DIIS-mixed), and the resulting density P_{k+1} gives the charges,
+  moments, energy and gradient, as the g-xTB v1.1 programs end their SCFs (`Gxtb201Rule`). The
+  returned orbitals are then the fresh eigenvectors of one Fock build, and the results move toward
+  those of a tightly converged SCF: on water, caffeine, taxol, ferrocene, [Cu(NH3)4]²⁺, [ZnCl4]²⁻
+  and (H2O)100, energies by up to 9.7e-8 Eh (taxol), gradients by up to 3.4e-5 Eh/bohr, charges by
+  up to 2.4e-4, each closer to the `--acc 1e-4` result. One iteration more (9 → 10); an energy and
+  gradient takes 2-4 % more time on one thread and about 6 % more on eight (taxol, (H2O)200). It
+  applies wherever 2.0.1 runs in the axtb conventions (single points, Hessians and their
+  reference SCFs, restarts, the solvation composite's g-xTB part). The unmixed iteration is
+  axtb's, not the program's: it runs even when the program's test is met in the last iteration
+  `max_iter` allows (the reported iterations count it), so that the axtb conventions converge
+  where the program does. The program conventions (`gxtb`) keep the program's ending, bit for
+  bit.
+- Asking for an output changes no other number. In the axtb conventions GFN2-xTB's SCF
+  computed every eigenvector in every iteration when the orbitals (a Molden file), a Hessian's
+  response or open-shell bond orders were asked for, and the occupied ones alone otherwise; g-xTB
+  computed every orbital again after its SCF. So energies, gradients and charges with and without
+  a Molden file differed by round-off (GFN2-xTB), and g-xTB's gradients did. Now every SCF takes
+  the same path whatever is asked for, and the orbitals without occupation are computed once
+  after it, from its last Fock matrix (`GenEigSolver::solve_rest`, which replaces
+  `solve_all_with`); the occupied orbitals returned are those of the SCF, bit for bit. GFN2-xTB's
+  open-shell bond orders use the orbitals of the SCF's density. The program conventions, which use
+  the full eigensolver throughout, are unchanged. Results that kept every orbital move by
+  round-off: GFN2-xTB Hessians in the axtb conventions (energies ≤ 3e-14 Eh, gradients ≤ 2e-15
+  Eh/bohr, Hessians ≤ 3e-13 Eh/bohr², frequencies ≤ 1.5e-8 cm⁻¹) and g-xTB 2.0.1 Hessians
+  (≤ 5.7e-13 Eh/bohr², ≤ 4.7e-8 cm⁻¹).
 - License: every crate is LGPL-3.0-or-later, `axtb-gxtb` (g-xTB v1.1 and 2.0.1 with their
   parameters) included, and so are `axtb-driver`, the `axtb` program and the Python package and
   its wheels; in 0.1.x they were GPL-3.0-only as built by default. g-xTB itself stays GPL-3.0:
@@ -176,3 +266,17 @@ wrong; the program modes keep it.
 
 docs/validation.md lists the other program behaviours found on the way, which are documented
 but not reported.
+
+## Numerics epochs
+
+Each method's epoch (`axtb_driver::numerics`; the rule in the alpha 1 entry above) and the
+commits that changed it. All start at 1 with alpha 1 of 0.2, whose round-off and model changes
+before the epochs existed are listed in the entries above.
+
+| method | epoch | since | what changed |
+|---|---|---|---|
+| `gfn2` | 1 | 0.2.0 alpha 1 | start |
+| `gxtb-v1.1` | 1 | 0.2.0 alpha 1 | start |
+| `gxtb-v2.0.1` | 1 | 0.2.0 alpha 1 | start (includes the unmixed final iteration of the axtb conventions) |
+| `gfnff` | 1 | 0.2.0 alpha 1 | start |
+| `analysis` | 1 | 0.2.0 alpha 1 | start (the analysis of a given Hessian) |

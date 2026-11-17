@@ -411,6 +411,38 @@ impl Method for Composite {
             part.method.reset_wavefunction();
         }
     }
+
+    /// Every part's own previous wavefunction from `wf` (a part without one in `wf`: none);
+    /// `None`: none for every part.
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        let Some(wf) = wf else {
+            self.reset_wavefunction();
+            return Ok(());
+        };
+        wf.check(&self.fingerprint)?;
+        let WavefunctionData::Parts(given) = wf.data() else {
+            return Err(Error::Input("the wavefunction belongs to another kind of calculation".into()));
+        };
+        let mut parts = self.parts_mut();
+        if given.len() != parts.len() {
+            return Err(Error::Input("the wavefunction belongs to another kind of calculation".into()));
+        }
+        for (part, w) in parts.iter_mut().zip(given) {
+            part.method.set_history(w.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// The accuracy of every part's SCFs (every part checks it before any changes).
+    fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
+        if !(accuracy > 0.0 && accuracy.is_finite()) {
+            return Err(Error::Input(format!("SCF accuracy must be a positive number, got {accuracy}")));
+        }
+        for part in self.parts_mut() {
+            part.method.set_scf_accuracy(accuracy)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

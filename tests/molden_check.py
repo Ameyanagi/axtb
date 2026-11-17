@@ -69,7 +69,7 @@ import programs  # noqa: E402
 # docs/validation.md (Molden files) for 1 - |<i|i>| (non-degenerate orbitals and degenerate
 # blocks), the occupied space, the orbital energies (Eh), the orthonormality of axtb's files and
 # mepd's HOMO; chosen about 10x the measured values: the orbitals' values at the random points
-# (gfn2 1.5e-7, gxtb2 2.3e-8, gxtb11 8.7e-7, UF6 with g-xTB 1.1.0 5.3e-4) and the occupations
+# (gfn2 1.5e-7, gxtb2 2.3e-8, gxtb11 8.7e-7, UF6 with g-xTB 1.1.0 3.9e-3) and the occupations
 # (g-xTB 2.0.1 7e-10, the others 0), and the program files' orthonormality (5.5e-11, as axtb's).
 LIMITS = {
     "orthonormality axtb": 6e-11, "orthonormality program": 6e-11,
@@ -77,8 +77,12 @@ LIMITS = {
     "gxtb2 values": 3e-7, "gxtb2 occupations": 7e-9, "gxtb2 mepd HOMO": 2.2e-7,
     "gxtb11 1-|<i|i>|": 6.1e-11, "gxtb11 occupied space": 6.5e-11, "gxtb11 orbital energies": 6.4e-8,
     "gxtb11 values": 1e-5, "gxtb11 occupations": 1e-9,
-    "gxtb11 UF6 1-|<i|i>|": 1.1e-7, "gxtb11 UF6 occupied space": 1.1e-10, "gxtb11 UF6 orbital energies": 8.6e-6,
-    "gxtb11 UF6 values": 5e-3, "gxtb11 UF6 occupations": 1e-9,
+    # UF6 with g-xTB 1.1.0: the SCF path follows the eigensolver's choice within an exactly degenerate set
+    # (docs/validation.md, Molden files). The v1.1 merge onto the 2.0.1 engine moved axtb's path from 40
+    # to 36 iterations (the program: 50); the orbitals of near-degenerate pairs (gaps
+    # ~2e-5 Eh) then agree to 1.9e-5 instead of 1.1e-7; the occupied space still to 2e-11
+    "gxtb11 UF6 1-|<i|i>|": 1.9e-5, "gxtb11 UF6 occupied space": 1.1e-10, "gxtb11 UF6 orbital energies": 8.6e-6,
+    "gxtb11 UF6 values": 4e-2, "gxtb11 UF6 occupations": 1e-9,
     "gfn2 1-|<i|i>|": 1.1e-10, "gfn2 occupied space": 2.9e-11, "gfn2 orbital energies": 3.0e-10,
     "gfn2 values": 2e-6, "gfn2 occupations": 1e-9, "gfn2 mepd HOMO": 7e-7,
     "gfn2 acc 1e-4 1-|<i|i>|": 1.0e-10, "gfn2 acc 1e-4 occupied space": 1.7e-11, "gfn2 acc 1e-4 orbital energies": 7.0e-10,

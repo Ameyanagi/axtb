@@ -491,7 +491,7 @@ stationary and its analytic gradient needs no response term.
 - **Iteration k**: Fock matrix F_k from the current input (charges, multipoles, density of
   P_{k−1}); mixing → F̃_k; diagonalise F̃_k (generalized, S); occupations; P_k; Mulliken shell
   charges, atomic dipoles and quadrupoles of P_k; energy E_k = E[P_k]. **No extra unmixed final
-  iteration** (v1.1 had one).
+  iteration** (v1.1 had one; axtb's default conventions add one, §10 "Conventions").
 - **Mixing** on the full Fock matrix (nspin·nao² elements, both spin channels in one vector, so one
   set of DIIS coefficients for α and β):
   k = 1: F̃_1 = F_1; k = 2, 3: F̃_k = F̃_{k−1} + 0.2 (F_k − F̃_{k−1})
@@ -846,20 +846,30 @@ GFN2-only settings (solvation, dispersion off, the GFN2 mixer) are rejected. v1.
 | `v2/h0.rs` | self-energies, H0 with the new polynomial and per-element δ scaling, anisotropy, ACP |
 | `v2/coulomb.rs`, `v2/repulsion.rs`, `v2/disp.rs`, `v2/exchange.rs` | E(1)–E(4), AES with scaled dipoles, spin; self-consistent repulsion; revD4 with screened damping; MFX + bond-order correction + charge-dependent onsite exchange (energy, Fock, shell potential, dE/dS) |
 | `v2/scf.rs` | setup, energies and Fock matrices of a density, tblite's SCF (eeqbc guess, damping 0.2, DIIS 7 on the full Fock matrix, 0 K Aufbau with fractional remainder or Fermi smearing, sticky convergence flags) |
-| `v2/fermi.rs` | occupations at a finite electronic temperature per channel and the entropy term −TS, on the rules of `occupations.rs` (shared with v1.1; Aufbau and tblite's entropy from `axtb_base::occupations`): the program's filling (§4.17.1, `fill_gxtb201`) and the exact Fermi level of the default conventions (`fill_exact`) |
+| `v2/fermi.rs` | occupations at a finite electronic temperature per channel and the entropy term −TS, on the rules of `occupations.rs` (shared with v1.1; Aufbau, tblite's entropy and the exact filling from `axtb_base::occupations`): the program's filling (§4.17.1, `fill_gxtb201`) and the exact Fermi level of the default conventions (`fill_exact`) |
 | `v2/gradient.rs` | analytic gradient: explicit derivatives of every term plus chain rules; no response term |
 
 **Conventions.** `gxtb` (program mode): mctc-lib's Ångström factor (1.8897261246204404) for the
 XYZ input and every Ångström table, the fractional electron count Σ n⁰ − Q, the hard cutoffs
 (CNs 25, repulsion 25, revD4 CN 30 / two-body 50 / three-body 25 bohr, the integral pair
-cutoff), the program's gradient formula (§4.18). `axtb` (default): the same energy
-expression, Fock matrix and SCF with CODATA 2022 units (Å factor and the Ångström tables:
-D3 pair radii, Pyykkö radii; the unit literals autoaa/aatoau of k^x2, R0, K^bo and the EEQ-BC
-radii), an integer electron count Σ Z_l − Q, and each hard cutoff replaced by a quintic
-smoothstep from the program's radius to 1 bohr beyond it (no integral pair cutoff); its
-gradient takes every term from the final density. Parameter literals (0.666666666, the
-`pa_rvdw_scale` defaults, 1.889725949 of the H0 radii, the smoothed √CN) are the method's and
-kept in both.
+cutoff), the program's gradient formula (§4.18), and the program's SCF ending (§4.17: the
+density of the last, DIIS-mixed Fock matrix). `axtb` (default): the same energy expression and
+Fock matrix with CODATA 2022 units (Å factor and the Ångström tables: D3 pair radii, Pyykkö
+radii; the unit literals autoaa/aatoau of k^x2, R0, K^bo and the EEQ-BC radii), an integer
+electron count Σ Z_l − Q, and each hard cutoff replaced by a quintic smoothstep from the
+program's radius to 1 bohr beyond it (no integral pair cutoff); its gradient takes every term
+from the final density. Its SCF is the program's plus one iteration (since alpha 1): once the
+program's convergence test is met after iteration k, the Fock matrix of P_k's state (its charges,
+multipoles and density) is diagonalized as built, not mixed, giving P_{k+1}, whose charges,
+moments, energy and gradient are the result, as v1.1's programs end. The returned orbitals are
+then the fresh eigenvectors of one Fock build, and the result is closer to self-consistency: on
+water, caffeine, taxol, ferrocene, [Cu(NH3)4]²⁺, [ZnCl4]²⁻ and (H2O)100 the extra iteration
+moved energies by up to 9.7e-8 Eh (taxol), gradients by up to 3.4e-5 Eh/bohr and charges by up to
+2.4e-4, each toward the result of a tightly converged SCF (`--acc 1e-4`), for one more iteration
+(9 → 10; (H2O)100 8 → 9): +2-4 % time on one thread, about +6 % on eight (energy and gradient
+of taxol and (H2O)200). Parameter
+literals (0.666666666, the `pa_rvdw_scale` defaults, 1.889725949 of the H0 radii, the smoothed
+√CN) are the method's and kept in both.
 
 **Reproduction** (`tests/reference_v2.rs`, `tests/gradient_v2.rs`,
 `tests/gxtb2_reproduction.py` → `bench/results/gxtb2_reproduction.json`; program mode, 84
@@ -875,12 +885,17 @@ molecules H–Lr, 23 with lanthanides or actinides, two of them longer than 50 b
 | analytic gradient vs the program's, tight thresholds | ≤ 6e-11 Eh/bohr except CeCl3 4.0e-9 (f¹, seven near-degenerate f orbitals; 45 iterations: the summation order of the density matrix alone moves this gradient by up to 6e-8 Eh/bohr at the same energy and iterations) |
 | default conventions vs finite differences of their own energy (5-point, h = 5e-4 bohr) | ≤ 6e-10 Eh/bohr (water, O2, mesyl chloride, [CuCl4]²⁻, Ni(CO)4); smooth cutoffs 3e-11 |
 
-**Default vs program conventions**: total energies differ by ≤ 8.7e-10 Eh for the 82 small
-molecules ([Co(H2O)6]²⁺) with identical iteration counts; binding energies (iodobenzene···acetone,
-CF3Br···benzene from `tests/structures`) by ≤ 1.7e-11 Eh, 2 % expansions of eight molecules by
-≤ 8.7e-10 Eh (2.3e-8 Eh for C50H102); C50H102 −5.3e-8 Eh and (H2O)100 −1.9e-6 Eh, almost all from
-the revD4 three-body tail beyond 25 bohr, which the program cuts and the smooth switch keeps to
-26 bohr.
+**Default vs program conventions**: the conventions alone (units, electron count, cutoffs; measured
+before alpha 1 with the program's SCF in both) change total energies by ≤ 8.7e-10 Eh for the 82 small
+molecules ([Co(H2O)6]²⁺); binding energies (iodobenzene···acetone, CF3Br···benzene from
+`tests/structures`) by ≤ 1.7e-11 Eh, 2 % expansions of eight molecules by ≤ 8.7e-10 Eh (2.3e-8 Eh
+for C50H102); C50H102 −5.3e-8 Eh and (H2O)100 −1.9e-6 Eh, almost all from the revD4 three-body tail
+beyond 25 bohr, which the program cuts and the smooth switch keeps to 26 bohr. Since alpha 1 the
+default conventions' SCF takes exactly one iteration more (the unmixed one) for every molecule, and
+its step toward self-consistency adds to these: total energies ≤ 1.4e-7 Eh for the 82 small molecules
+(TmH3 1.34e-7, caffeine 6.6e-8), C50H102 −5.4e-8 Eh, (H2O)100 −1.9e-6 Eh; bindings ≤ 5.0e-9 Eh, 2 %
+expansions ≤ 2.3e-8 Eh (`tests/gxtb2_reproduction.py`). At the accuracy of `tests/gxtb_energy_differences.py`
+(1e-4) the default conventions still change energy differences by ≤ 3.7e-11 Eh.
 
 **Cost** (laptop, i9-11900H, whole processes, energy + gradient, 1 / 8 threads): C50H102 (152
 atoms) 0.34 / 0.13 s vs the program's 0.64 / 0.24 s; (H2O)100 2.3 / 0.65 s vs 3.9 / 1.1 s. What
@@ -1196,7 +1211,8 @@ ammine ions, halides, oxides, radicals), the program (`xtb --gxtb --grad`, defau
 - 155 agree: total energies ≤ 4.9e-11 Eh, the same SCF iterations, the printed terms (core
   increments, three-body dispersion, electronic energy) ≤ 1.1e-12 Eh, analytic gradients
   ≤ 2.3e-10 Eh/bohr (default; NdCl3, an open f shell, 2.5e-9) and ≤ 2.1e-10 (tight); the default
-  conventions are ≤ 9.0e-10 Eh from the program. This includes H2, which needed the early DIIS
+  conventions are ≤ 1.3e-7 Eh from the program, since they end with one unmixed iteration after
+  the program's convergence test (≤ 9.0e-10 before that iteration). This includes H2, which needed the early DIIS
   switch (§4.17; before it, 5 iterations against the program's 4).
 - 12 are rounding-sensitive, diagnosed by rerunning both programs on a translated copy with the
   atoms in reverse order and, for gradient mismatches, on a rotated copy (2.0.1 is rotation

@@ -110,13 +110,21 @@ fn json_errors_have_kinds() {
         serde_json::json!({"solvation_state": "gsolv"}),
         serde_json::json!({"temperature": 300.0}),
         serde_json::json!({"hessian": true, "hessian_method": "analytic", "hessian_step": 0.01}),
-        serde_json::json!({"method": "gfnff", "bond_orders": true}),
         serde_json::json!({"method": "gfnff", "accuracy": 1.0}),
         serde_json::json!({"method": "gfn1"}),
         serde_json::json!({"molden_cartesian": true}),
     ] {
         let (k, e) = kind(with(water(), extra.clone()));
         assert_eq!(k, "input", "{extra}: {e}");
+    }
+    // outputs the method does not have
+    for extra in [
+        serde_json::json!({"method": "gfnff", "bond_orders": true}),
+        serde_json::json!({"method": "gfnff", "molden": true}),
+        serde_json::json!({"method": "gfnff", "overlap": true}),
+    ] {
+        let (k, e) = kind(with(water(), extra.clone()));
+        assert_eq!(k, "not_applicable", "{extra}: {e}");
     }
     // an analysis of a given Hessian takes no calculation settings
     let h = vec![vec![0.0; 9]; 9];

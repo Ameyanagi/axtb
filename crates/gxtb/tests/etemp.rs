@@ -36,7 +36,13 @@ fn molecule(group: &str, name: &str) -> axtb::Molecule {
 }
 
 /// Program mode at 300, 1000, 3000 and 5000 K: total energies and SCF iterations as the
-/// program's (Fe4, whose SCF takes 45-941 iterations or fails, is reported only).
+/// program's. Reported only: Fe4, whose SCF takes 45-941 iterations or fails, and Ni(CO)4 at
+/// 5000 K. That structure is exactly tetrahedral, with Ni at the origin. In the program's
+/// conventions its SCF path follows the eigensolver's choice of vectors within degenerate
+/// levels, so the iteration count and the last ~1e-10 Eh depend on the CPU: 14 iterations and
+/// 3.7e-11 Eh on one machine, 13 and 2.2e-10 on another. The converged energies agree: shifting
+/// Ni by 1e-13 Å gives 14 iterations and 2e-13 Eh, and at acc 1e-4 the exact and shifted
+/// structures agree to 5e-13 Eh.
 #[test]
 fn etemp_matches_program() {
     let mut worst: f64 = 0.0;
@@ -48,7 +54,7 @@ fn etemp_matches_program() {
         let mol = molecule(group, name);
         let opts = ScfOptions { conventions: Conventions::Gxtb, etemp, ..Default::default() };
         let res = Setup::new(&mol, model(opts.conventions)).unwrap().scf(&opts);
-        let sensitive = name == "Fe4";
+        let sensitive = name == "Fe4" || (name == "nickel_tetracarbonyl" && etemp == 5000.0);
         if !row["converged"].as_bool().unwrap() {
             println!("{label:28} program SCF fails; ours: {}", if res.is_err() { "fails" } else { "converges" });
             continue;

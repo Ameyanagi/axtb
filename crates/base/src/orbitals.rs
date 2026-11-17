@@ -25,7 +25,7 @@ pub const fn ncart(l: usize) -> usize {
 
 /// A contracted Cartesian Gaussian shell; the coefficients include the normalization of
 /// the x^l component (the spherical transformation completes the normalization).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cgto {
     /// Angular momentum.
     pub l: usize,
@@ -63,7 +63,7 @@ impl Spin {
 }
 
 /// One set of molecular orbitals.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MoSet {
     pub spin: Spin,
     /// Orbital energies (Eh).
@@ -76,7 +76,7 @@ pub struct MoSet {
 }
 
 /// Converged molecular orbitals with the basis they are expanded in.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Orbitals {
     /// Atomic numbers and positions (bohr).
     pub numbers: Vec<usize>,
