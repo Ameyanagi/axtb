@@ -360,7 +360,7 @@ impl CompositeCalculator {
         };
         // the zero check: the first geometry's dG_solv must not vanish
         let (model_name, solvent) = (model.to_ascii_uppercase(), options.solvation.solvent.clone());
-        let guard: Guard = Box::new(move |dg: f64| {
+        let guard: Guard = std::sync::Arc::new(move |dg: f64| {
             if !dg.is_finite() || dg.abs() < 1e-9 {
                 return Err(Error::Numerical(format!(
                     "the {model_name} model for {solvent} did not change the GFN2-xTB energy (dG_solv = {dg:.3e} \
@@ -542,5 +542,17 @@ impl Method for CompositeCalculator {
     /// The g-xTB part's SCF from given densities (its wavefunction is the composite's).
     fn set_density(&mut self, densities: Vec<Vec<f64>>) -> Result<()> {
         self.inner.set_density(densities)
+    }
+
+    /// The composite with its three parts forked onto `threads` (one pool, as built).
+    fn fork(&self, threads: &Threads) -> Result<Box<dyn Method>> {
+        Ok(Box::new(Self {
+            options: CompositeOptions { threads: threads.count(), ..self.options.clone() },
+            inner: self.inner.forked(threads)?,
+            gxtb_base: self.gxtb_base,
+            gfn2_base: self.gfn2_base,
+            reuse_guess: self.reuse_guess,
+            gxtb_reuse_guess: self.gxtb_reuse_guess,
+        }))
     }
 }

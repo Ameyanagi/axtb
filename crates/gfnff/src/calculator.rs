@@ -21,6 +21,7 @@ use axtb_base::method::{
     Wavefunction,
 };
 use axtb_base::threads::Threads;
+use std::sync::Arc;
 
 /// Options of a calculator.
 #[derive(Clone, Debug)]
@@ -51,8 +52,10 @@ pub const NUMERICAL_STEP: f64 = 0.005;
 
 /// GFN-FF with a fixed topology.
 pub struct Calculator {
-    topo: Topology,
-    model: Model,
+    /// The topology and the model fixed with it: immutable, shared with forks
+    /// ([`Method::fork`]).
+    topo: Arc<Topology>,
+    model: Arc<Model>,
     threads: Threads,
     info: MethodInfo,
     fingerprint: Fingerprint,
@@ -73,10 +76,10 @@ impl Calculator {
         };
         let topo = threads.install(|| setup(numbers, positions, charge, &sopts))?;
         check_topology(&topo)?;
-        let model = Model::new(&topo);
+        let model = Arc::new(Model::new(&topo));
         let info = info(conventions);
         let fingerprint = Fingerprint::new(info.name, numbers, charge, None);
-        Ok(Calculator { topo, model, threads, info, fingerprint })
+        Ok(Calculator { topo: Arc::new(topo), model, threads, info, fingerprint })
     }
 
     /// The topology (set up once, used for every geometry).
@@ -233,6 +236,17 @@ impl Method for Calculator {
     /// GFN-FF has no SCF: no history but none.
     fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
         wf.map_or(Ok(()), |w| self.set_wavefunction(w))
+    }
+
+    /// The calculator on `threads`, sharing the topology and its model.
+    fn fork(&self, threads: &Threads) -> Result<Box<dyn Method>> {
+        Ok(Box::new(Calculator {
+            topo: self.topo.clone(),
+            model: self.model.clone(),
+            threads: threads.clone(),
+            info: self.info.clone(),
+            fingerprint: self.fingerprint.clone(),
+        }))
     }
 }
 

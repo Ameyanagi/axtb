@@ -13,7 +13,9 @@ use super::{
     HessianMethod, HessianOptions, Method, MethodInfo, RetryLadder, Rung, ScfReport, SinglePoint, Term, Want,
     Wavefunction,
 };
+use crate::threads::Threads;
 use crate::{Error, Result};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// A named value of a composite's description.
@@ -75,9 +77,23 @@ pub struct Part {
     pub method: Box<dyn Method>,
 }
 
+impl Part {
+    /// The part with its method forked onto `threads` ([`Method::fork`]).
+    pub fn fork(&self, threads: &Threads) -> Result<Part> {
+        Ok(Part {
+            key: self.key,
+            label: self.label.clone(),
+            conventions: self.conventions,
+            timing: self.timing,
+            method: self.method.fork(threads)?,
+        })
+    }
+}
+
 /// The check of a correction's first value (e.g. that a solvent model changed the energy); it
-/// runs until it has passed once.
-pub type Guard = Box<dyn FnMut(f64) -> Result<()> + Send + Sync>;
+/// runs until it has passed once (in a fork, [`Method::fork`], until it has passed once there,
+/// unless it had passed in the original).
+pub type Guard = Arc<dyn Fn(f64) -> Result<()> + Send + Sync>;
 
 /// A correction: weighted parts tried together on one ladder (every part at the same rung).
 pub struct Correction {
@@ -176,6 +192,36 @@ impl Composite {
         self
     }
 
+    /// The composite with every part forked onto `threads` ([`Method::fork`]): the same ladders,
+    /// description and guards (a guard that has passed stays passed), no pinned rungs and no
+    /// tries.
+    pub fn forked(&self, threads: &Threads) -> Result<Self> {
+        let corrections = self
+            .corrections
+            .iter()
+            .map(|c| {
+                Ok(Correction {
+                    name: c.name,
+                    parts: c.parts.iter().map(|(w, p)| Ok((*w, p.fork(threads)?))).collect::<Result<_>>()?,
+                    ladder: c.ladder.clone(),
+                    guard: c.guard.clone(),
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            info: self.info.clone(),
+            fingerprint: self.fingerprint.clone(),
+            base: self.base.fork(threads)?,
+            base_ladder: self.base_ladder.clone(),
+            corrections,
+            description: self.description.clone(),
+            report_order: self.report_order.clone(),
+            pin: self.pin,
+            pinned: None,
+            tries: Vec::new(),
+        })
+    }
+
     /// The base part.
     pub fn base(&self) -> &Part {
         &self.base
@@ -238,7 +284,7 @@ impl Composite {
             c.parts = weights.iter().copied().zip(parts).collect();
             let climbed = climbed?;
             let value = weighted(&weights, climbed.results.iter().map(|r| r.energy));
-            if let Some(guard) = c.guard.as_mut() {
+            if let Some(guard) = &c.guard {
                 guard(value)?;
                 c.guard = None;
             }
@@ -299,7 +345,7 @@ impl Composite {
             let climbed = climbed?;
             rungs.push(climbed.index);
             let value = weighted(&weights, climbed.results.iter().map(|r| r.energy));
-            if let Some(guard) = c.guard.as_mut() {
+            if let Some(guard) = &c.guard {
                 guard(value)?;
                 c.guard = None;
             }
@@ -540,6 +586,10 @@ impl Method for Composite {
         }
         Ok(())
     }
+    /// [`Composite::forked`].
+    fn fork(&self, threads: &Threads) -> Result<Box<dyn Method>> {
+        Ok(Box::new(self.forked(threads)?))
+    }
 }
 
 #[cfg(test)]
@@ -621,6 +671,10 @@ mod tests {
             self.scf = s;
             Ok(())
         }
+        fn fork(&self, _: &Threads) -> Result<Box<dyn Method>> {
+            let Toy { e, needs, hessian_needs, .. } = *self;
+            Ok(Box::new(Toy { e, needs, hessian_needs, scf: self.scf.clone(), info: self.info.clone(), tries: 0 }))
+        }
     }
 
     fn part(key: &'static str, method: Box<dyn Method>) -> Part {
@@ -642,7 +696,7 @@ mod tests {
             name: "delta",
             parts: vec![(-1.0, part("a", toy(ea, 0.0))), (1.0, part("b", toy(eb, 800.0)))],
             ladder,
-            guard: Some(Box::new(move |c| {
+            guard: Some(Arc::new(move |c| {
                 s2.lock().unwrap().push(c);
                 Ok(())
             })),
@@ -662,6 +716,38 @@ mod tests {
         for p in c.parts_mut() {
             assert_eq!(p.method.scf_settings().unwrap().etemp, Some(0.0));
         }
+    }
+
+    /// A fork computes what its composite computes; a guard that has passed stays passed in a
+    /// later fork, and one that has not runs in the fork too.
+    #[test]
+    fn forks() {
+        let info = toy(0.0, 0.0).info().clone();
+        let fingerprint = Fingerprint::new("toy", &[1], 0.0, None);
+        let seen = Arc::new(std::sync::Mutex::new(0));
+        let s2 = seen.clone();
+        let correction = Correction {
+            name: "delta",
+            parts: vec![(-1.0, part("a", toy(0.1, 0.0))), (1.0, part("b", toy(0.4, 0.0)))],
+            ladder: RetryLadder::once(),
+            guard: Some(Arc::new(move |_| {
+                *s2.lock().unwrap() += 1;
+                Ok(())
+            })),
+        };
+        let base = part("base", toy(-1.5, 0.0));
+        let mut c = Composite::new(info, fingerprint, base, RetryLadder::once(), vec![correction]);
+        let threads = Threads::sequential();
+        let x = [[0.0; 3]];
+        let mut before = c.fork(&threads).unwrap();
+        let want = c.singlepoint(&x, &Want::GRADIENT).unwrap();
+        let mut after = c.fork(&threads).unwrap();
+        for f in [&mut before, &mut after] {
+            let sp = f.singlepoint(&x, &Want::GRADIENT).unwrap();
+            assert_eq!(sp.energy.to_bits(), want.energy.to_bits());
+            assert_eq!(sp.gradient, want.gradient);
+        }
+        assert_eq!(*seen.lock().unwrap(), 2);
     }
 
     /// The tries of a composite's ladders are logged; with pinned rungs, the single point after a

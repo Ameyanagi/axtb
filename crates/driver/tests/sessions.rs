@@ -116,6 +116,83 @@ fn interleaved_lineages_equal_sequential_calculators() {
     }
 }
 
+/// A fork computes what its calculator computes from the same start, bit for bit, on 1 and 2
+/// threads: lineage b on a fork made after lineage a's first step (each fork's SCF accuracy that
+/// of its calculator when forked), the forks of one calculator side by side on their own threads,
+/// and a Hessian (every method, the composite included); GFN-FF shares its topology.
+#[test]
+fn forks_compute_what_their_calculator_computes() {
+    let task = Task { gradient: true, ..Task::default() };
+    let gfnff = Request { method: Some("gfnff".into()), ..structure("caffeine.xyz") };
+    let mut requests = lineage_requests();
+    requests.push(("gfnff caffeine".into(), gfnff));
+    for (label, base) in requests {
+        for threads in [1, 2] {
+            let req = Request { threads: Some(threads), ..base.clone() };
+            let label = format!("{label}, {threads} threads");
+            let (a, b) = (trajectory(&req.positions, 1.0), trajectory(&req.positions, -1.0));
+            let sequential = |traj: &[Vec<[f64; 3]>]| {
+                let mut calc = Calculator::new(&req).unwrap();
+                traj.iter().map(|x| bits(&calc.compute(x, &task).unwrap())).collect::<Vec<_>>()
+            };
+            let (want_a, want_b) = (sequential(&a), sequential(&b));
+            let mut calc = Calculator::new(&req).unwrap();
+            assert!(bits(&calc.compute(&a[0], &task).unwrap()) == want_a[0], "{label}");
+            let mut fork = calc.fork(threads).unwrap();
+            assert_eq!(fork.threads(), threads);
+            for k in 0..3 {
+                assert!(bits(&fork.compute(&b[k], &task).unwrap()) == want_b[k], "{label}: fork, b step {k}");
+            }
+            for k in 1..3 {
+                assert!(bits(&calc.compute(&a[k], &task).unwrap()) == want_a[k], "{label}: calculator, a step {k}");
+            }
+            // two forks side by side, each a lineage
+            let mut forks = [calc.fork(threads).unwrap(), calc.fork(threads).unwrap()];
+            let [fa, fb] = &mut forks;
+            let (ra, rb) = std::thread::scope(|s| {
+                let ta = s.spawn(|| a.iter().map(|x| bits(&fa.compute(x, &task).unwrap())).collect::<Vec<_>>());
+                let tb = s.spawn(|| b.iter().map(|x| bits(&fb.compute(x, &task).unwrap())).collect::<Vec<_>>());
+                (ta.join().unwrap(), tb.join().unwrap())
+            });
+            assert!(ra == want_a && rb == want_b, "{label}: forks side by side");
+        }
+        // a fork keeps its calculator's SCF accuracy as set
+        if base.method.as_deref() != Some("gfnff") {
+            let x = &base.positions;
+            let mut calc = Calculator::new(&base).unwrap();
+            calc.set_scf_accuracy(0.1).unwrap();
+            let want = bits(&calc.compute(x, &task).unwrap());
+            let mut fork = calc.fork(1).unwrap();
+            assert!(bits(&fork.compute(x, &task).unwrap()) == want, "{label}: accuracy");
+        }
+    }
+    let water = structure("water.xyz");
+    let hessian = Task::from_request(&Request { hessian: true, ..water.clone() }).unwrap();
+    let composite = Request {
+        method: Some("gxtb-v2.0.1".into()),
+        alpb: Some("water".into()),
+        solvation_correction: Some("gfn2".into()),
+        ..water.clone()
+    };
+    for req in [
+        Request { method: Some("gfn2".into()), ..water.clone() },
+        Request { method: Some("gxtb-v2.0.1".into()), ..water.clone() },
+        Request { method: Some("gxtb-v1.1".into()), ..water.clone() },
+        Request { method: Some("gfnff".into()), ..water.clone() },
+        composite,
+    ] {
+        let hessian_bits = |r: &Response| {
+            let mut v = bits(r).0;
+            v.extend(r.hessian.as_ref().unwrap().hessian.data.iter().map(|x| x.to_bits()));
+            v
+        };
+        let want = hessian_bits(&Calculator::new(&req).unwrap().compute(&req.positions, &hessian).unwrap());
+        let calc = Calculator::new(&req).unwrap();
+        let got = hessian_bits(&calc.fork(1).unwrap().compute(&req.positions, &hessian).unwrap());
+        assert!(got == want, "{:?}: Hessian", req.method);
+    }
+}
+
 /// `restart: fresh` starts every SCF as a new calculator would; `restart` and a named start go
 /// together (GFN2-xTB from neutral atoms, then from the previous state); `guess` with `previous`
 /// or `fresh` beside `restart` and `restart` for GFN-FF are refused.
