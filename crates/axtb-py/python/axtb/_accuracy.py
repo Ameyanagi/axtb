@@ -8,15 +8,15 @@ g-xTB 2.0.1's energy change 1e-6 acc Eh and Fock residual 2e-5 acc, v1.1's energ
 an error model fitted to measurements (tests/accuracy_calibration.py, bench/results/accuracy.json):
 per method, conventions kind (axtb or the reference program's) and shell (closed or open), the
 upper envelope err_q <= k_q acc^p_q over molecules, fresh and warm starts, for the energy (Eh) and
-the largest gradient component (Eh/bohr). Then, with a safety factor of 2,
-
-    acc_q = (t_q / (2 k_q))^(1 / p_q),   acc = clamp(min_q acc_q, ACC_FLOOR, ACC_MAX),
-
-and an explicit ``accuracy_scale`` is a floor: ``acc = min(acc, accuracy_scale)``. g-xTB v1.1's
-open shells do not fall monotonically with ``acc``: they use a table of the worst error at each
-measured factor instead. The composite takes the smallest factor of its own fit and of its
-methods'. A Hessian target sets ``hessian.accuracy_scale`` the same way (its own model per method
-and Hessian method), never looser than the method's default or an explicit value.
+the largest gradient component (Eh/bohr). A target's factor is the largest measured factor
+(``CALIBRATION["accs"]``, ``ACC_MAX`` down to ``ACC_FLOOR``) whose bound times the safety factor
+2 meets every target in every model that applies (the composite: its own fit and its methods';
+an open shell: its fit and the closed shells'), so an estimate rests on a measurement at its
+factor or above (between measured factors the errors plateau); an explicit ``accuracy_scale``
+is a floor: ``acc = min(acc, accuracy_scale)``. g-xTB v1.1's open shells do not fall
+monotonically with ``acc``: they use a table of the worst error at each measured factor. A
+Hessian target sets ``hessian.accuracy_scale`` the same way (its own model per method and
+Hessian method), never looser than the method's default or an explicit value.
 
 ``estimate`` is the model's error at the factor used: a bound fitted to measurements, not a
 measurement of the run. A target below what the floor reaches runs at the floor, records an

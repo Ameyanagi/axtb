@@ -16,8 +16,6 @@ Result = dict[str, Any]
 """A response: the driver response's fields (``energy``, ``gradient``, ``charges``, ``scf``,
 ``hessian``, ``vibrations``, ``composite``, ``orbitals``, ...), arrays as numpy arrays."""
 
-
-
 ANALYSIS_NUMERICS: str
 
 class Error(Exception):

@@ -1,8 +1,12 @@
 # Checks on every push and pull request (Linux x86-64; no reference programs needed), on the
 # newest stable Rust: scripts/check.sh fast (rustfmt, clippy and rustdoc with warnings as errors,
-# the workspace tests, a wheel with the Python tests in a fresh venv, the privacy grep, the
-# license-file copies, the SPDX headers), a build check on the minimum supported Rust (1.89, the
-# workspace's rust-version), then `cargo package` of the crates.io packages.
+# the workspace tests, the Python tier: a wheel in a fresh venv with the qc* pre-releases from
+# PyPI, the Python tests with check_program and the qccompute runner and worker, the quick Python
+# golden check, ruff and mypy, the generated docs; then the privacy grep, the license-file copies,
+# the SPDX headers), a build check on the minimum supported Rust (1.89, the workspace's
+# rust-version), then `cargo package` of the crates.io packages. The Python tier runs again on
+# the oldest and the newest supported Python (check.sh fast uses 3.12), and the sdist is built,
+# installed in a fresh venv and smoke-tested (.github/smoke.py).
 #
 # The privacy grep adds the repository secret AXTB_PRIVATE_PATTERN (a regular expression of the
 # site's host names) to its built-in patterns; without the secret (forks, or not set up) that
@@ -46,3 +50,38 @@ jobs:
         run: >-
           cargo package -p axtb-base -p axtb-d4 -p axtb-solvation -p axtb -p axtb-gfnff -p axtb-gxtb
           -p axtb-driver -p axtb-cli
+
+  python:
+    name: check.sh python (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: Swatinem/rust-cache@v2
+      - name: scripts/check.sh python
+        env:
+          AXTB_CHECK_PYTHON: ${{ matrix.python }}
+        run: scripts/check.sh python
+
+  sdist:
+    name: sdist (build, install, smoke test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: build the sdist, install it in a fresh venv outside the repository, run a calculation
+        run: |
+          set -eu
+          venv=$RUNNER_TEMP/venv
+          uv venv -q -p 3.12 "$venv"
+          uv pip install -q --python "$venv/bin/python" maturin
+          "$venv/bin/maturin" sdist -m crates/axtb-py/Cargo.toml --out dist
+          uv pip install -q --python "$venv/bin/python" dist/axtb-*.tar.gz
+          cd "$RUNNER_TEMP"
+          "$venv/bin/python" "$GITHUB_WORKSPACE/.github/smoke.py"

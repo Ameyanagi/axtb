@@ -4,20 +4,20 @@ build-backend = "maturin"
 
 [project]
 name = "axtb"
-description = "Extended tight binding (GFN2-xTB, g-xTB) and the GFN-FF force field: energies, gradients, Hessians, vibrational analysis"
+description = "Extended tight binding (GFN2-xTB, g-xTB) and the GFN-FF force field as a program of the qc* stack: energies, gradients, Hessians, vibrational analysis"
 readme = "README.md"
 requires-python = ">=3.11"
 # every part, g-xTB included (LICENSE, NOTICE)
 license = "LGPL-3.0-or-later"
 license-files = ["COPYING", "COPYING.LESSER", "LICENSE", "NOTICE"]
 authors = [{ name = "Colton Hicks" }]
-keywords = ["quantum chemistry", "tight binding", "xtb", "g-xtb", "gfn-ff"]
+keywords = ["quantum chemistry", "tight binding", "xtb", "g-xtb", "gfn-ff", "qcdata", "qccompute"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -63,4 +63,17 @@ test = ["pytest", "qccompute[testing]>=0.23.0a4,<0.24"]
 # run time: the protocol is structural
 [project.entry-points."qccompute.programs"]
 axtb = "axtb:program"
+
+# python/axtb (scripts/check.sh fast: ruff check, ruff format --check, mypy)
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "BLE", "UP", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["python/axtb"]
+warn_unused_ignores = true
 

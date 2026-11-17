@@ -22,6 +22,8 @@ from qcdata import (
     Accuracy,
     AOConvention,
     BasisSet,
+    EnthalpyModel,
+    EntropyModel,
     ExecutionInfo,
     OrbitalKind,
     Orbitals,
@@ -34,6 +36,7 @@ from qcdata import (
     Resolved,
     Shell,
     SinglePointData,
+    SphericalOrder,
     Thermochemistry,
     ThermoTerm,
     VibrationalAnalysis,
@@ -42,8 +45,8 @@ from qcdata import (
 
 from . import _accuracy, _axtb
 from ._errors import from_driver
-from ._models import build
 from ._keywords import Planned, plan_input, plan_threads
+from ._models import build
 
 __all__ = ["COMMIT", "VERSION", "compute", "provenance", "record", "results", "static_results", "task", "threads"]
 
@@ -158,7 +161,11 @@ def task(p: Planned, calctype: str, outputs: frozenset[str], hessian_accuracy: f
 
 
 # the default hessian.accuracy_scale of each method and Hessian method (the driver's MethodInfo)
-_HESSIAN_DEFAULT = {"numerical": 0.01, "analytic": {"gfn2": 1e-3}, "response": {"gfn2": 1e-3}}
+_HESSIAN_DEFAULT: dict[str, float | dict[str, float]] = {
+    "numerical": 0.01,
+    "analytic": {"gfn2": 1e-3},
+    "response": {"gfn2": 1e-3},
+}
 
 
 def accuracy(
@@ -250,8 +257,8 @@ def _thermo(r: Mapping[str, Any], p: Planned) -> tuple[dict[str, Any], list[Ther
                 ),
                 symmetry_number=t["symmetry_number"],
                 electronic_degeneracy=1.0,
-                entropy_model="qrrho_grimme",
-                enthalpy_model="rrho",
+                entropy_model=EntropyModel.qrrho_grimme,
+                enthalpy_model=EnthalpyModel.rrho,
                 qrrho_frequency=t["rotor_cutoff"],
                 qrrho_alpha=4.0,
                 qrrho_bav=t["average_moment"],
@@ -279,13 +286,13 @@ def static_results(r: Mapping[str, Any], p: Planned) -> dict[str, Any]:
         for spin, name in (("alpha", "calcinfo_nalpha"), ("beta", "calcinfo_nbeta")):
             n = float(np.sum(scf[f"occupations_{spin}"]))
             if abs(n - round(n)) <= 1e-6:
-                d[name] = int(round(n))
+                d[name] = round(n)
     return d
 
 
 #: axtb's AO order: atom by atom, shell by shell, m = -l..l for every l (p as y, z, x); every shell
 #: spherical, each function normalized as qcdata's default says (the x^l component's norm)
-AO_CONVENTION = AOConvention(spherical_order="increasing_m")
+AO_CONVENTION = AOConvention(spherical_order=SphericalOrder.increasing_m)
 
 
 def basis(o: Mapping[str, Any]) -> BasisSet:
@@ -398,6 +405,7 @@ def results(
             **fields,
         }
         if "ir_intensities" in v:
+            assert h is not None  # a vibrational analysis comes with its Hessian
             va["ir_intensities"] = v["ir_intensities"]
             va["dipole_derivatives"] = h["dipole_derivatives"]
         d["vibrational_analysis"] = VibrationalAnalysis(**va)

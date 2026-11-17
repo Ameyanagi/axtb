@@ -26,6 +26,7 @@ from qcdata import (
     ProgramError,
     ProgramErrors,
     ProgramInput,
+    ProgramWarning,
     Request,
     SinglePointData,
     Structure,
@@ -117,7 +118,7 @@ class Session:
         self._threads = (n, used, why)
         self._warnings = warnings
         self._lock = threading.Lock()
-        self._tasks: dict[tuple[str, frozenset[str]], str] = {}
+        self._tasks: dict[tuple[str, frozenset[str], float | None], str] = {}
         self._static: dict[str, Any] | None = None
         self._geometry = np.asarray(self._structure.geometry, dtype=float).reshape(-1, 3)
         self._default_outputs = _qc.implied(p.outputs)
@@ -327,6 +328,7 @@ class Session:
                 )
             wanted = self._outputs(outputs, calctype)
             target = Accuracy.of(accuracy, calctype) if accuracy is not None else p.accuracy
+            acc_warnings: list[ProgramWarning]
             if target is None:
                 factor, h, acc_record, acc_warnings = self._scale, None, None, []
             else:

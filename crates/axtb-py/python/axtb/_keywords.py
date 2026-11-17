@@ -1033,6 +1033,7 @@ def plan_input(
             key = None
     if key is not None and key in _CACHE:
         p = _CACHE[key]
+        assert inp.structure is not None  # the key includes it
         positions = np.asarray(inp.structure.geometry, dtype=float).reshape(-1, 3)
         if not np.all(np.isfinite(positions)):
             raise refuse("input", "invalid_structure", "structure.geometry: positions must be finite numbers")
@@ -1251,7 +1252,7 @@ def _plan_input(
     for path, value in v.items():
         key = _BY_PATH[path]
         if key.unsupported is not None:
-            if path.startswith("output.") and value is False or value == "off":
+            if (path.startswith("output.") and value is False) or value == "off":
                 raise refuse("input", "no_effect", f"{path}: {key.unsupported}; leave it out")
             code = "not_applicable" if path == "output.core_hamiltonian" else "unsupported_setting"
             raise refuse("unsupported", code, f"{path}: {key.unsupported}")
@@ -1288,17 +1289,20 @@ def given_start(inp: ProgramInput, method: str, conventions: str, composite: boo
     ``input``, code ``not_applicable``) when nothing is usable, or when a used field does not fit:
     shells of another layout, another basis set (centers, angular momenta, exponents), other spin
     channels."""
-    from qcdata import AOConvention
+    from qcdata import AOConvention, SphericalOrder
 
     def not_applicable(path: str, why: str) -> ProgramError:
         return refuse("input", "not_applicable", f"{path}: {why}")
 
     g = inp.given
+    assert g is not None  # called with a given
     structure = inp.require_structure()
     numbers = list(structure.atomic_numbers)
     if method == "gfnff":
         raise not_applicable("given", "GFN-FF has no SCF to start from given results")
     layout = _axtb.shell_layout(method, numbers)
+    if layout is None:  # elements without parameters are refused before
+        raise not_applicable("given", f"{method} has no shells for these elements")
     if method == "gfn2":
         if g.shell_populations is None or g.atomic_dipoles is None or g.atomic_quadrupoles is None:
             raise not_applicable(
@@ -1306,7 +1310,7 @@ def given_start(inp: ProgramInput, method: str, conventions: str, composite: boo
                 "GFN2-xTB starts from given shell populations and atomic multipoles (shell_populations with "
                 "shell_atoms and shell_angular_momenta, atomic_dipoles, atomic_quadrupoles), which this given lacks",
             )
-        if list(g.shell_atoms) != [a for a, *_ in layout] or list(g.shell_angular_momenta) != [
+        if list(g.shell_atoms or ()) != [a for a, *_ in layout] or list(g.shell_angular_momenta or ()) != [
             ell for _, ell, *_ in layout
         ]:
             raise not_applicable("given.shell_populations", "indexed by other shells than GFN2-xTB's for these atoms")
@@ -1329,9 +1333,10 @@ def given_start(inp: ProgramInput, method: str, conventions: str, composite: boo
             f"{'closed' if structure.multiplicity == 1 else 'open'}-shell g-xTB SCF (one channel per spin of the "
             "molecule)",
         )
-    ours = AOConvention(spherical_order="increasing_m")
+    ours = AOConvention(spherical_order=SphericalOrder.increasing_m)
     if wf.basis.ao_convention != ours:
         wf = wf.with_convention(ours)
+    assert wf.basis is not None  # checked above; with_convention keeps it
     shells = wf.basis.shells
     fits = len(shells) == len(layout) and all(
         sh.center == a and sh.angular_momentum == ell and sh.pure and np.array_equal(np.asarray(sh.exponents), e)
@@ -1556,6 +1561,7 @@ def _resolve(
             default_guess = "eeq-bc" if gxtb else ("sad" if conventions == "tblite-0.8.0" else "eeq")
             put("scf.guess", v.get("scf.guess", default_guess))
         # the restart policy per part (the composite: g-xTB, then the GFN2 parts)
+        restart: tuple[bool, ...]
         if composite:
             restart = (_restart_default(method, conventions), gfn2_conventions == "axtb")
         else:
