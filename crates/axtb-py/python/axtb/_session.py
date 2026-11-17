@@ -6,7 +6,9 @@ The input pins the atoms, charge, multiplicity, method and keywords; its geometr
 are a request's defaults. The engine (`axtb._axtb.Engine`) builds the method once (GFN-FF its
 topology too) and keeps one committed wavefunction per lineage: a request starts from its
 lineage's history, else from the first of its seeds with one, else fresh, as the method's restart
-policy says; a success with ``commit`` becomes the lineage's history.
+policy says; a success with ``commit`` becomes the lineage's history. A request runs on the
+threads of its calctype and size, on the engine's calculator or a fork of it on those threads;
+``compute_many`` runs different lineages side by side as their threads fit into the session's.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import json
 import threading
 import time
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from qcdata import (
@@ -73,9 +75,29 @@ def session_calctypes(calctypes: Iterable[Any] | None) -> frozenset[str]:
     return frozenset(allowed)
 
 
+class _Prepared(NamedTuple):
+    """A checked request: what the engine runs (``args``: positions, task, lineage key, seed
+    keys, commit, SCF accuracy, orbitals, threads) and what its frame needs."""
+
+    args: tuple[Any, ...]
+    x: np.ndarray
+    calctype: str
+    wanted: frozenset[str]
+    lineage: Any
+    key: str
+    seeds: list[Any]
+    acc_record: dict[str, Any] | None
+    acc_warnings: list[Any]
+
+
 class Session:
     """A session of axtb: the protocol's ``Session`` (``axtb.program.open_session``) and axtb's
     own way to run one molecule at many geometries.
+
+    Every calculation runs on its own threads: the ``threads`` keyword, else the plan's for its
+    calctype and size, at most the grant. ``compute_many`` runs different lineages side by side as
+    long as their threads fit into the session's threads in all: the grant, and without one (a
+    direct call) this process's CPUs.
 
     Args:
         inp: The atoms, charge, multiplicity, method and keywords, pinned for the session's
@@ -95,11 +117,15 @@ class Session:
             raise TypeError(f"axtb.Session opens from a qcdata.ProgramInput, not {type(inp).__name__}")
         allowed = session_calctypes(calctypes)
         p = plan_input(inp, calctypes=allowed, session=True)
-        top = largest(allowed)
-        n, warnings, why = _qc.threads(p, top, ctx)
-        # small molecules run on one thread (the same bits), as compute does by the calculation
-        used = 1 if len(p.numbers) <= _axtb.single_thread_atoms(p.method, top == "hessian") else n
-        request = json.dumps({**p.request, "threads": used}, separators=(",", ":"))
+        per, total, warnings = _qc.session_threads(p, allowed, ctx)
+        # small molecules run on one thread (the same bits), as compute does
+        used = {
+            c: 1 if len(p.numbers) <= _axtb.single_thread_atoms(p.method, c == "hessian") else n
+            for c, (n, _) in per.items()
+        }
+        # the engine's own calculator runs on the input calctype's threads
+        own = inp.calctype.value if inp.calctype.value in allowed else largest(allowed)
+        request = json.dumps({**p.request, "threads": used[own]}, separators=(",", ":"))
         try:
             self._engine = _axtb.Engine(request, p.numbers, p.positions)
             if p.start is not None:
@@ -115,7 +141,12 @@ class Session:
         self._p = p
         self._structure = inp.require_structure()
         self._natoms = len(p.numbers)
-        self._threads = (n, used, why)
+        # each calctype's threads (and why), the threads it runs on, the input's calctype and the
+        # session's threads in all
+        self._threads = per
+        self._used = used
+        self._own = own
+        self._total = total
         self._warnings = warnings
         self._lock = threading.Lock()
         self._tasks: dict[tuple[str, frozenset[str], float | None], str] = {}
@@ -167,11 +198,21 @@ class Session:
         """
         start = time.perf_counter()
         with self._lock:
-            return self._compute(start, positions, calctype, accuracy, lineage, outputs, seed, commit)
+            q = self._prepare(positions, calctype, accuracy, lineage, outputs, seed, commit)
+            r: dict[str, Any] | _axtb.Error
+            try:
+                r = self._engine.compute(*q.args)
+            except _axtb.Error as e:
+                r = e
+            return self._finish(q, r, start)
 
     def compute_many(self, requests: Sequence[Request]) -> list[Frame]:
-        """Evaluate many requests in order on the one engine, each reading its lineage's history
-        as it stands at its place; failures in place.
+        """Evaluate many requests: each lineage's in order, each reading its lineage's history as
+        it stands at its place, and different lineages side by side as long as their threads fit
+        into the session's threads in all (`Session`), taken in request order. A request whose
+        lineage has no history waits for its seeds' earlier requests. The frames are what
+        one-at-a-time ``compute`` calls in request order give, bit for bit; failures stay in
+        place.
 
         Returns:
             One frame per request, in order, all successful.
@@ -179,18 +220,28 @@ class Session:
         Raises:
             ProgramErrors: Some requests failed; ``results`` holds every frame.
         """
-        frames: list[Frame] = []
+        frames: list[Frame | None] = [None] * len(requests)
         with self._lock:
-            for r in requests:
+            ready: list[tuple[int, float, _Prepared]] = []
+            for i, req in enumerate(requests):
                 start = time.perf_counter()
                 try:
-                    frames.append(
-                        self._compute(
-                            start, r.positions, r.calctype, r.accuracy, r.lineage, r.outputs, r.seed, r.commit
-                        )
+                    q = self._prepare(
+                        req.positions, req.calctype, req.accuracy, req.lineage, req.outputs, req.seed, req.commit
                     )
                 except ProgramError as e:
-                    frames.append(e.frame if e.frame is not None else self._failed(r.positions, e, None))
+                    frames[i] = e.frame if e.frame is not None else self._failed(req.positions, e, None)
+                    continue
+                ready.append((i, time.perf_counter() - start, q))
+            if ready:
+                out = self._engine.compute_many([q.args for *_, q in ready], self._total)
+                for (i, checks, q), r in zip(ready, out, strict=True):
+                    # the request's own time: its checks, its calculation and its frame
+                    took = checks + (r["wall"] if isinstance(r, dict) else 0.0)
+                    try:
+                        frames[i] = self._finish(q, r, time.perf_counter() - took)
+                    except ProgramError as e:
+                        frames[i] = e.frame
         return ProgramErrors.check(frames)
 
     def reset(self, lineage: Lineage = ...) -> None:
@@ -201,18 +252,27 @@ class Session:
                 self._engine.reset(None if lineage is ... else lineage_key(lineage))
 
     def plan(self) -> dict[str, Any]:
-        """The settings pinned at opening (with the threads), the resources, the warnings and the
-        record (method, conventions, calctypes, numerics)."""
-        n, used, why = self._threads
+        """The settings pinned at opening (with the threads of the input's calctype), the
+        resources (the most threads a calculation takes), the warnings and the record (method,
+        conventions, calctypes, numerics; ``threads_used`` by the input's calctype,
+        ``threads_by_calctype``, and ``lineages_at_once``: how many requests of the input's
+        calctype ``compute_many`` runs side by side)."""
+        n, why = self._threads[self._own]
+        used = self._used[self._own]
         return {
             "resolved": {
                 "settings": {**self._p.settings, "threads": n},
                 "reasons": {**self._p.reasons, "threads": why},
                 "deferred": [],
             },
-            "resources": {"threads": n},
+            "resources": {"threads": max(m for m, _ in self._threads.values())},
             "warnings": [w.model_dump() for w in self._warnings],
-            "record": {**self._p.record, "threads_used": used},
+            "record": {
+                **self._p.record,
+                "threads_used": used,
+                "threads_by_calctype": {c: self._used[c] for c in CALCTYPES if c in self._used},
+                "lineages_at_once": max(1, self._total // used),
+            },
         }
 
     def close(self) -> None:
@@ -243,8 +303,16 @@ class Session:
         """The session's structure at positions `x` (its other fields shared, as model_copy does)."""
         return build(Structure, **{**self._structure.__dict__, "geometry": x})
 
-    def _failed(self, positions: Any, e: ProgramError, x: np.ndarray | None, record: dict | None = None) -> Frame:
-        """The failed frame of a request: the structure evaluated, empty results, the error."""
+    def _failed(
+        self,
+        positions: Any,
+        e: ProgramError,
+        x: np.ndarray | None,
+        record: dict | None = None,
+        threads: int | None = None,
+    ) -> Frame:
+        """The failed frame of a request: the structure evaluated, empty results, the error, the
+        threads it ran on (default: the input calctype's)."""
         if x is None:
             x = np.asarray(self._structure.geometry if positions is None else positions, dtype=float)
             if x.size != 3 * self._natoms:
@@ -258,7 +326,7 @@ class Session:
             traceback=e.error.message,
             error=e.error,
             record=record or {},
-            execution=build(ExecutionInfo, threads=self._threads[1]),
+            execution=build(ExecutionInfo, threads=self._used[self._own] if threads is None else threads),
         )
 
     def _positions(self, positions: Any) -> np.ndarray:
@@ -301,9 +369,8 @@ class Session:
             )
         return _qc.implied(wanted | p.outputs)
 
-    def _compute(
+    def _prepare(
         self,
-        start: float,
         positions: Any,
         calctype: Any,
         accuracy: Any,
@@ -311,7 +378,9 @@ class Session:
         outputs: Iterable[str],
         seed: Iterable[Any],
         commit: bool,
-    ) -> Frame:
+    ) -> _Prepared:
+        """Check a request and resolve what the engine runs; a refusal raises `ProgramError`
+        with its failed frame."""
         p = self._p
         x = None
         try:
@@ -338,46 +407,35 @@ class Session:
             task = self._tasks.get((calctype, wanted, h))
             if task is None:
                 task = self._tasks[(calctype, wanted, h)] = _qc.task(p, calctype, wanted, h)
-            try:
-                r = self._engine.compute(
-                    x,
-                    task,
-                    key,
-                    [_key(s) for s in seeds],
-                    commit,
-                    factor if p.scf else None,
-                    _qc.needs_orbitals(wanted),
-                )
-            except _axtb.Error as e:
-                error, fields = from_driver(e)
-                if e.kind in ("panic", "closed"):
-                    self._closed = True
-                exc = ProgramError(error)
-                rec: dict[str, Any] = {"error": fields}
-                if e.attempts:
-                    rec["scf"] = {"attempts": e.attempts}
-                exc.frame = self._failed(None, exc, x, rec)
-                raise exc from None
         except ProgramError as e:
             if e.frame is None:
                 e.frame = self._failed(positions, e, x if x is not None and x.shape == (self._natoms, 3) else None)
             raise
-        return self._frame(start, r, x, calctype, wanted, lineage, key, seeds, acc_record, acc_warnings)
+        orbitals = _qc.needs_orbitals(wanted)
+        threads = self._used[calctype]
+        args = (x, task, key, [_key(s) for s in seeds], commit, factor if p.scf else None, orbitals, threads)
+        return _Prepared(args, x, calctype, wanted, lineage, key, seeds, acc_record, acc_warnings)
 
-    def _frame(
-        self,
-        start: float,
-        r: dict[str, Any],
-        x: np.ndarray,
-        calctype: str,
-        wanted: frozenset[str],
-        lineage: Any,
-        key: str,
-        seeds: list[Any],
-        acc_record: dict[str, Any] | None,
-        acc_warnings: list[Any],
-    ) -> Frame:
+    def _finish(self, q: _Prepared, r: dict[str, Any] | _axtb.Error, start: float) -> Frame:
+        """The frame of a request from its engine response; an engine error raises its
+        `ProgramError`, with the failed frame."""
+        if isinstance(r, _axtb.Error):
+            error, fields = from_driver(r)
+            if r.kind in ("panic", "closed"):
+                self._closed = True
+            exc = ProgramError(error)
+            rec: dict[str, Any] = {"error": fields}
+            if r.attempts:
+                rec["scf"] = {"attempts": r.attempts}
+            exc.frame = self._failed(None, exc, q.x, rec, q.args[-1])
+            raise exc from None
+        return self._frame(start, r, q)
+
+    def _frame(self, start: float, r: dict[str, Any], q: _Prepared) -> Frame:
+        """The frame of a request's engine response `r`; `start`: when the request began."""
         p = self._p
+        x, calctype, wanted, lineage, key, seeds = q.x, q.calctype, q.wanted, q.lineage, q.key, q.seeds
+        acc_record, acc_warnings = q.acc_record, q.acc_warnings
         if self._static is None:
             self._static = _qc.static_results(r, p)
         res = _qc.results(r, p, calctype, wanted, static=self._static)

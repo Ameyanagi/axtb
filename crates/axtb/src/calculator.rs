@@ -31,7 +31,9 @@ pub const METHOD: &str = "gfn2";
 pub struct Calculator {
     hamiltonian: Hamiltonian,
     mol: Molecule,
-    model: XtbModel,
+    /// The method's setup for the molecule (basis, Hamiltonian parameters, electrostatics):
+    /// immutable, shared with forks ([`Method::fork`]).
+    model: std::sync::Arc<XtbModel>,
     /// The terms added to the model, in order: dispersion, solvation, the user's
     /// ([`Calculator::push_term`]).
     extra: Vec<std::sync::Arc<dyn AnyMomentTerm>>,
@@ -121,6 +123,7 @@ impl Calculator {
         let (model, extra) = crate::build_method(hamiltonian, &mol, &options)?;
         let info = info(options.conventions);
         let fingerprint = Fingerprint::of(METHOD, &mol);
+        let model = std::sync::Arc::new(model);
         Ok(Self { hamiltonian, mol, model, extra, options, start: None, given: false, threads, info, fingerprint })
     }
 
@@ -453,6 +456,24 @@ impl Method for Calculator {
         check_scf_options(&o.run(self.threads.count(), &Want::ENERGY))?;
         self.options.scf = o.scf;
         Ok(())
+    }
+
+    /// The calculator on `threads`, sharing the model and its terms (dispersion, solvation,
+    /// added terms), with the settings as they are now and no start.
+    fn fork(&self, threads: &Threads) -> Result<Box<dyn Method>> {
+        let options = Options { threads: threads.count(), ..self.options.clone() };
+        Ok(Box::new(Self {
+            hamiltonian: self.hamiltonian,
+            mol: self.mol.clone(),
+            model: self.model.clone(),
+            extra: self.extra.clone(),
+            options,
+            start: None,
+            given: false,
+            threads: threads.clone(),
+            info: self.info.clone(),
+            fingerprint: self.fingerprint.clone(),
+        }))
     }
 }
 

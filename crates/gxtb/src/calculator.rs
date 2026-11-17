@@ -673,6 +673,25 @@ impl Method for Calculator {
         self.options = o;
         Ok(())
     }
+
+    /// The calculator on `threads`, with the settings as they are now and no start. The
+    /// parameters are the version's shared tables; the setup of a geometry (basis, integrals) is
+    /// the fork's own, built at the first geometry it computes.
+    fn fork(&self, threads: &Threads) -> Result<Box<dyn Method>> {
+        let options = Options { threads: threads.count(), ..self.options.clone() };
+        options.check(self.version)?;
+        Ok(Box::new(Self {
+            mol: self.mol.clone(),
+            options,
+            version: self.version,
+            threads: threads.clone(),
+            setup: None,
+            state: None,
+            given: false,
+            info: self.info.clone(),
+            fingerprint: self.fingerprint.clone(),
+        }))
+    }
 }
 
 impl Calculator {

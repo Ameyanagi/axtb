@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -93,27 +93,53 @@ def _cpus() -> int:
         return os.cpu_count() or 1
 
 
-def threads(p: Planned, largest: str, ctx: Any) -> tuple[int, list[ProgramWarning], str]:
-    """The threads of a calculation (or a session, by its largest calctype), the warnings and
-    the reason: the ``threads`` keyword, at most the grant (``resource_capped`` above it); without
-    the keyword the grant; without a grant (a direct call) the plan's threads (None: this
-    machine's CPUs)."""
+def _keyword_threads(p: Planned, grant: int | None) -> tuple[int, list[ProgramWarning], str]:
+    """The ``threads`` keyword, at most the grant (``resource_capped`` above it)."""
+    assert p.threads is not None
+    if grant is not None and p.threads > grant:
+        w = ProgramWarning(
+            code="resource_capped",
+            message=f"threads {p.threads} capped to the {grant} granted",
+            path="threads",
+        )
+        return grant, [w], f"the keyword ({p.threads}) capped to the grant"
+    return p.threads, [], "the keyword"
+
+
+def threads(p: Planned, calctype: str, ctx: Any) -> tuple[int, list[ProgramWarning], str]:
+    """The threads of one calculation, the warnings and the reason: the ``threads`` keyword, at
+    most the grant (``resource_capped`` above it); without the keyword the grant; without a
+    grant (a direct call) the plan's threads."""
     grant = getattr(ctx, "threads", None) if ctx is not None else None
     if p.threads is not None:
-        if grant is not None and p.threads > grant:
-            w = ProgramWarning(
-                code="resource_capped",
-                message=f"threads {p.threads} capped to the {grant} granted",
-                path="threads",
-            )
-            return grant, [w], f"the keyword ({p.threads}) capped to the grant"
-        return p.threads, [], "the keyword"
+        return _keyword_threads(p, grant)
     if grant is not None:
         return grant, [], "the runner's grant"
-    planned = plan_threads(p, largest)
-    if planned is None:
-        return _cpus(), [], "a direct call: this machine's CPUs (the plan asks for all)"
+    planned = plan_threads(p, calctype)
     return planned, [], f"a direct call: the plan's {planned}"
+
+
+def session_threads(
+    p: Planned, calctypes: Iterable[str], ctx: Any
+) -> tuple[dict[str, tuple[int, str]], int, list[ProgramWarning]]:
+    """A session's threads per calculation of each calctype (with the reason), its threads in all,
+    and the warnings. Per calculation: the ``threads`` keyword, at most the grant
+    (``resource_capped`` above it), else the plan's threads for the calctype and size, at most
+    the grant. In all (what ``compute_many`` fills with the lineages it runs side by side): the
+    grant, and without one (a direct call) this process's CPUs."""
+    grant = getattr(ctx, "threads", None) if ctx is not None else None
+    total = grant if grant is not None else _cpus()
+    if p.threads is not None:
+        n, warnings, why = _keyword_threads(p, grant)
+        return {c: (n, why) for c in calctypes}, total, warnings
+    out = {}
+    for c in calctypes:
+        planned = plan_threads(p, c)
+        if grant is not None and planned > grant:
+            out[c] = (grant, f"the plan's {planned} for a {c}, capped to the {grant} granted")
+        else:
+            out[c] = (planned, f"the plan's {planned} for a {c}")
+    return out, total, []
 
 
 def implied(outputs: frozenset[str] | set[str]) -> frozenset[str]:

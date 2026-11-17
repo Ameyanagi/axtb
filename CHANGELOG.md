@@ -5,7 +5,44 @@ Rust crates, the CLI and the Python package share one version.
 
 ## Unreleased
 
-### SCF retries
+### Sessions run lineages side by side
+
+- `axtb.Session.compute_many` runs different lineages side by side on forks of the session's
+  calculator, as long as their threads fit into the session's threads in all (the grant; a direct
+  call: this process's CPUs), taken in request order; `plan()["record"]` gives
+  `lineages_at_once` for the input's calctype. Each lineage's requests run in request order; a
+  request whose lineage has no history waits for its seeds' earlier requests in the batch. The
+  frames are what one-at-a-time `compute` calls in request order give, bit for bit, failures in
+  place. The forks share the method's immutable setup, run on one thread count each, have their
+  own SCF state and work buffers, and are kept until the session closes (one calculation's working memory each: 1.9 MiB for a caffeine g-xTB 2.0.1
+  gradient, 24 MiB for taxol's). Measured on the laptop, 12 caffeine g-xTB 2.0.1 gradient
+  lineages per call in a session of 8 threads: 31 ms per call, against 160 ms one request at a
+  time on 1 thread (5.1x) and 93 ms one at a time on 8 threads, as 0.2.0a1 ran them.
+- A session's requests, single `compute` calls included, run on their own threads (the
+  `threads` keyword, else the plan's for the request's calctype and the molecule's size, at most
+  the grant), no longer on the whole grant: a gradient on the gradient's threads, a Hessian on
+  the Hessian's, each on a fork on those threads. `plan()` gives the input calctype's threads,
+  the most a calculation takes as `resources.threads`, and `record.threads_by_calctype`. A single
+  `compute` stays serialized by the session's lock.
+- Rust: `Method::fork` (axtb-base; GFN2-xTB, both g-xTB versions, the composite and GFN-FF
+  implement it), `Composite::forked`, `Part::fork`, axtb-driver `Calculator::fork`. Breaking:
+  `method::Guard` is an `Arc<dyn Fn>` (was a `Box<dyn FnMut>`), so that forks share it.
+- Numerics epochs unchanged: no result changes (golden set 188 of 188).
+
+### Plan threads from measurements
+
+- The plan states a thread count for every calculation by method, calctype and size, never the
+  whole grant (`resources.threads` is no longer None for a Hessian): the largest count whose
+  parallel efficiency stayed at least 0.5 in thread-scaling runs (1-16 threads on an AMD
+  Threadripper PRO 9985WX node, 3-300 atoms; larger energies and gradients on a laptop).
+  Energies and gradients: 1 below 100 atoms, then 2, and 4 from 600 (g-xTB v1.1: from 300;
+  GFN-FF: 1 below 600, then 2), where the plan said 8 from 300 (GFN-FF from 1000). Hessians:
+  g-xTB 2.0.1 2/4/8/16 from 0/10/20/60 atoms, v1.1 4/16 from 0/10, GFN2-xTB 1/4/8 from 0/60/150,
+  GFN-FF 1/2 from 0/100. The `threads` keyword still wins; a direct `axtb.compute` runs on the
+  plan's threads, under a runner on the grant. The table is `axtb_driver::THREAD_BANDS`
+  (`planned_threads`), and docs/python.md's Threads section is generated from it.
+- The CLI keeps its default of 1 thread and its `task_threads` (a request's threads, 1 for a
+  molecule so small that threads only cost): the golden set's cases depend on both.
 
 - `scf.retries` (Python), `scf_retries` (the JSON request), `--scf-retry etemp=K,max_iter=N` (the
   CLI, repeated): an opt-in ladder of rungs `{etemp, max_iter}` (either key optional; a missing one

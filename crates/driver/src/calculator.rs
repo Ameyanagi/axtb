@@ -255,6 +255,27 @@ impl Calculator {
         self.threads
     }
 
+    /// A copy of the calculator on a pool of its own of `threads` threads, to compute beside
+    /// this one (`axtb.Session.compute_many`'s lineages side by side): the same settings (the
+    /// SCF accuracy as it is now) and the method's setup shared where it is immutable
+    /// (`Method::fork`), with its own SCF state and work buffers and no wavefunction. On as many
+    /// threads as this calculator and from the same start, it computes what this one computes,
+    /// bit for bit.
+    pub fn fork(&self, threads: usize) -> Result<Self> {
+        let pool = axtb::Threads::new(threads)?;
+        Ok(Self {
+            method: self.method.fork(&pool)?,
+            kind: self.kind,
+            numerics: self.numerics.clone(),
+            numbers: self.numbers.clone(),
+            charge: self.charge,
+            uhf: self.uhf,
+            threads,
+            retries: self.retries.clone(),
+            given_retries: self.given_retries,
+        })
+    }
+
     /// Run `task` at `positions` (bohr). With a Hessian, the response is that of the single
     /// point at `positions` (energy, gradient, charges, orbitals; g-xTB's SCF from its own
     /// start, as without the Hessian) plus the Hessian, its dipole derivatives and its

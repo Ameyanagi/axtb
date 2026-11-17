@@ -141,6 +141,16 @@ pub trait Method: Send + Sync {
         s.accuracy = accuracy;
         self.set_scf_settings(s)
     }
+
+    /// A copy of the method that runs on `threads`, to compute beside this one (a session's
+    /// lineages side by side): the same molecule, settings (the SCF settings as they are now)
+    /// and setup, the setup shared where it is immutable (parameters, basis, topology); its own
+    /// SCF state and work buffers, and no wavefunction. On as many threads as this method and
+    /// from the same start, it computes what this method computes, bit for bit. A composite
+    /// forks every part onto `threads`. Default: refused.
+    fn fork(&self, _threads: &crate::threads::Threads) -> Result<Box<dyn Method>> {
+        Err(Error::Input(format!("{} cannot be forked", self.info().name)))
+    }
 }
 
 /// What a method is and offers.

@@ -1829,22 +1829,31 @@ _TASK_FIELDS = {
 # --------------------------------------------------------------------------- threads
 
 
-def plan_threads(p: Planned, calctype_or_largest: str) -> int | None:
-    """The threads a plan states (`Plan.resources.threads`) for its largest calctype: 1 for a
-    molecule at or below the size where threads only cost, 1 for SCF energies and gradients up
-    to 300 atoms and 8 from 300, 1 for GFN-FF up to 1000 atoms and 8 from 1000, None (the whole
-    grant) for a Hessian above the one-thread size; the ``threads`` keyword when given."""
+def plan_threads(p: Planned, calctype_or_largest: str) -> int:
+    """The threads a plan states (`Plan.resources.threads`) for its largest calctype: the
+    ``threads`` keyword when given, else the band of the method, calctype and size
+    (``axtb_driver::THREAD_BANDS``, `thread_bands`; the composite by its g-xTB method)."""
     if p.threads is not None:
         return p.threads
-    nat = len(p.numbers)
-    hessian = calctype_or_largest == "hessian"
-    if nat <= _axtb.single_thread_atoms(p.method, hessian):
-        return 1
-    if hessian:
-        return None
-    if p.method == "gfnff":
-        return 8 if nat >= 1000 else 1
-    return 8 if nat >= 300 else 1
+    return _axtb.planned_threads(p.method, calctype_or_largest == "hessian", len(p.numbers))
+
+
+def thread_bands() -> str:
+    """The plan's thread bands as a Markdown table (``docs/python.md``, generated)."""
+    names = {"gfn2": "GFN2-xTB", "gxtb-v2.0.1": "g-xTB 2.0.1", "gxtb-v1.1": "g-xTB v1.1", "gfnff": "GFN-FF"}
+    rows = ["| method | calculation | threads by size (atoms) |", "|---|---|---|"]
+    for hessian in (False, True):
+        for method, h, bands in _axtb.thread_bands():
+            if h != hessian:
+                continue
+            cells = []
+            for i, (start, n) in enumerate(bands):
+                end = bands[i + 1][0] if i + 1 < len(bands) else None
+                span = f"from {start}" if end is None else (f"below {end}" if start == 0 else f"{start}-{end - 1}")
+                cells.append(f"{n} ({span})" if len(bands) > 1 else f"{n} (every size)")
+            kind = "Hessian" if hessian else "energy, gradient"
+            rows.append(f"| {names[method]} | {kind} | {', '.join(cells)} |")
+    return "\n".join(rows) + "\n"
 
 
 def largest(calctypes: Iterable[str]) -> str:

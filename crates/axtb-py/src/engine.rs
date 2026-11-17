@@ -12,7 +12,11 @@
 //!   `qcdata.lineage_key`), the seeds to start from when the lineage has no history, and whether
 //!   a success becomes the lineage's history. The history is installed with
 //!   `Calculator::set_history` (the restart policy decides, as for one calculator per lineage),
-//!   and only when the method does not already hold it.
+//!   and only when the method does not already hold it. Each call runs on the threads it names,
+//!   on the calculator or a fork of it on those threads (`Calculator::fork`, made when first
+//!   needed and kept). `compute_many` runs a batch's lineages side by side as their threads fit
+//!   into the threads it is given, each lineage's requests in order, and gives what one call at
+//!   a time in request order gives, bit for bit.
 //!
 //! Every call releases the GIL while it runs. A driver error raises [`Error`] with the driver's
 //! `kind` and `code`, its message, its fields (`z`; `iterations`, `energy_change`, `residual`)
@@ -25,7 +29,8 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 pyo3::create_exception!(
     axtb,
@@ -251,31 +256,411 @@ pub(crate) fn compute_once<'py>(
     Ok(d)
 }
 
-/// Which committed state the method holds.
-#[derive(Clone, Debug, PartialEq)]
+/// Which committed state a calculator's method holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Holds {
     /// None: a fresh start (after building, a reset or an error).
     Nothing,
-    /// The committed history of this lineage.
-    Lineage(String),
-    /// A state that is no lineage's history (after a request with `commit=False`).
+    /// The committed history with this id.
+    Commit(u64),
+    /// A state that is no lineage's history (after a request with `commit=False`, or the given
+    /// start).
     Other,
 }
 
-struct State {
-    calc: Option<Calculator>,
-    history: HashMap<String, Wavefunction>,
+/// A lineage's committed history: its id (unique in the engine) and the wavefunction. It does
+/// not depend on the threads of the calculator that made it.
+type Commit = (u64, Arc<Wavefunction>);
+
+/// A calculator of the engine, what its method holds, and the SCF accuracy it runs at now.
+struct Worker {
+    calc: Calculator,
     holds: Holds,
-    /// The SCF accuracy the method runs at now.
     accuracy: f64,
+}
+
+impl Worker {
+    /// The threads of its pool.
+    fn threads(&self) -> usize {
+        self.calc.threads()
+    }
+}
+
+struct State {
+    /// The engine's calculator, then its forks on the threads requests asked for (forked when
+    /// first needed and kept until the engine closes); empty once closed.
+    workers: Vec<Worker>,
+    history: HashMap<String, Commit>,
+    /// The id of the next commit.
+    next: u64,
     /// Parsed tasks by their JSON.
     tasks: HashMap<(String, bool), Task>,
     /// The given start of every request without history (`set_given`), as the method holds it.
     given: Option<Wavefunction>,
 }
 
+impl State {
+    /// Drop the calculators and every lineage's history.
+    fn close(&mut self) {
+        self.workers.clear();
+        self.history.clear();
+    }
+
+    /// The task of `json` (parsed once).
+    fn task(&mut self, json: String, orbitals: bool) -> Result<Task, Failure> {
+        let key = (json, orbitals);
+        if let Some(t) = self.tasks.get(&key) {
+            return Ok(t.clone());
+        }
+        let t = parse_task(&key.0, orbitals)?;
+        self.tasks.insert(key, t.clone());
+        Ok(t)
+    }
+
+    /// One more calculator: a fork of the engine's on `threads` threads, at its SCF accuracy.
+    fn fork(&mut self, threads: usize) -> Result<usize, Failure> {
+        let first = &self.workers[0];
+        let worker = Worker { calc: first.calc.fork(threads)?, holds: Holds::Nothing, accuracy: first.accuracy };
+        self.workers.push(worker);
+        Ok(self.workers.len() - 1)
+    }
+
+    /// The calculator on `threads` threads for a call that starts from `want`: one that holds it,
+    /// else the first on those threads, else a new fork.
+    fn worker_for(&mut self, threads: usize, want: Holds) -> Result<usize, Failure> {
+        let mut on = self.workers.iter().enumerate().filter(|(_, w)| w.threads() == threads);
+        let first = on.next();
+        match first.into_iter().chain(on).find(|(_, w)| w.holds == want).or(first) {
+            Some((i, _)) => Ok(i),
+            None => self.fork(threads),
+        }
+    }
+}
+
+/// One request: positions (bohr), task, the keys of its lineage and seeds, whether a success
+/// becomes the lineage's history, its SCF accuracy and its threads.
+struct Job {
+    positions: Vec<[f64; 3]>,
+    task: Task,
+    lineage: String,
+    seeds: Vec<String>,
+    commit: bool,
+    accuracy: Option<f64>,
+    threads: usize,
+}
+
+/// A request's response, the key of the lineage whose history it started from, whether it
+/// started from the given start, and its wall time on its calculator (s).
+struct Done {
+    response: Response,
+    from: Option<String>,
+    given: bool,
+    seconds: f64,
+}
+
+/// Run `job` on `w`, starting from `from` (a lineage's history), else from `given`, else from
+/// the method's own start, as the restart policy says. Returns the response and, for a commit,
+/// the wavefunction to commit (its id in `w.holds` is the caller's to set).
+fn run(
+    w: &mut Worker,
+    job: &Job,
+    from: Option<&Commit>,
+    given: Option<&Wavefunction>,
+) -> Result<(Response, Option<Wavefunction>), Failure> {
+    let calc = &mut w.calc;
+    match (from, given) {
+        (None, Some(g)) => {
+            // the given start replaces the method's own one for every request without history
+            calc.set_wavefunction(g)?;
+            w.holds = Holds::Other;
+        }
+        _ => {
+            let want = from.map_or(Holds::Nothing, |c| Holds::Commit(c.0));
+            if want != w.holds {
+                calc.set_history(from.map(|c| &*c.1))?;
+                w.holds = want;
+            }
+        }
+    }
+    if let Some(a) = job.accuracy.filter(|&a| a != w.accuracy) {
+        calc.set_scf_accuracy(a)?;
+        w.accuracy = a;
+    }
+    match calc.compute(&job.positions, &job.task) {
+        Ok(r) => {
+            let wf = if job.commit { calc.wavefunction() } else { None };
+            w.holds = if job.commit { Holds::Nothing } else { Holds::Other };
+            Ok((r, wf))
+        }
+        Err(e) => {
+            // the method holds no wavefunction after an error
+            w.holds = Holds::Nothing;
+            Err(e.into())
+        }
+    }
+}
+
+/// The lineages of a batch: each request's lineage and seeds (indices into `keys`), and each
+/// lineage's requests in order.
+struct Lineages {
+    keys: Vec<String>,
+    lineage: Vec<usize>,
+    seeds: Vec<Vec<usize>>,
+    requests: Vec<Vec<usize>>,
+}
+
+/// Where a request starts: a lineage (its index) and its history, or nothing.
+type Start = Option<(usize, Commit)>;
+
+impl Lineages {
+    fn new(jobs: &[Job]) -> Self {
+        let mut ids: HashMap<String, usize> = HashMap::new();
+        let mut keys = Vec::new();
+        let mut id = |k: &str| {
+            *ids.entry(k.to_string()).or_insert_with(|| {
+                keys.push(k.to_string());
+                keys.len() - 1
+            })
+        };
+        let lineage: Vec<usize> = jobs.iter().map(|j| id(&j.lineage)).collect();
+        let seeds: Vec<Vec<usize>> = jobs.iter().map(|j| j.seeds.iter().map(|k| id(k)).collect()).collect();
+        let mut requests = vec![Vec::new(); keys.len()];
+        for (i, &l) in lineage.iter().enumerate() {
+            requests[l].push(i);
+        }
+        Self { keys, lineage, seeds, requests }
+    }
+
+    /// The requests of lineage `l` before request `i`.
+    fn before(&self, l: usize, i: usize) -> &[usize] {
+        let r = &self.requests[l];
+        &r[..r.partition_point(|&j| j < i)]
+    }
+
+    /// Where request `i` starts, as one request at a time in request order would start it, once
+    /// that is settled (`None` until then): its lineage's latest commit before it, else the
+    /// first of its seeds with one (each seed's history as its requests before `i` leave it:
+    /// those must have run), else nothing. A lineage's requests run in order, so a request of a
+    /// lineage with history never waits for its seeds.
+    fn start(&self, i: usize, p: &Progress, history: &HashMap<String, Commit>) -> Option<Start> {
+        let ran = |l: usize| self.before(l, i).last().is_none_or(|&j| p.state[j] == Run::Done);
+        // the latest commit of lineage `l` before request `i` (its earlier requests have run)
+        let latest = |l: usize| {
+            let committed = self.before(l, i).iter().rev().find_map(|&j| p.commits[j].clone());
+            committed.or_else(|| history.get(&self.keys[l]).cloned())
+        };
+        let own = self.lineage[i];
+        if !ran(own) {
+            return None;
+        }
+        if let Some(c) = latest(own) {
+            return Some(Some((own, c)));
+        }
+        for &s in &self.seeds[i] {
+            if !ran(s) {
+                return None;
+            }
+            if let Some(c) = latest(s) {
+                return Some(Some((s, c)));
+            }
+        }
+        Some(None)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Run {
+    Waiting,
+    Running,
+    Done,
+}
+
+/// A batch in progress: each request's state, commit and outcome, and the threads in use.
+struct Progress {
+    state: Vec<Run>,
+    commits: Vec<Option<Commit>>,
+    out: Vec<Option<Result<Done, Failure>>>,
+    /// The threads of the requests running, and the most that may run at once.
+    busy: usize,
+    total: usize,
+    /// The id of the next commit.
+    next: u64,
+    /// A calculation panicked: the requests not yet started fail (`closed`), and the engine
+    /// closes.
+    panicked: bool,
+}
+
+impl Progress {
+    /// Whether a request on `threads` threads fits beside the ones running (alone, it always
+    /// does).
+    fn fits(&self, threads: usize) -> bool {
+        self.busy == 0 || self.busy + threads <= self.total
+    }
+}
+
+/// The stack of a thread that runs a calculator of `compute_many` (a main thread's).
+const WORKER_STACK: usize = 8 << 20;
+
+/// One calculator's part of a batch: until every request on its threads has started, take one
+/// that can start and fits into the threads in all (one that starts from the history `w` holds,
+/// else the first in request order), run it and publish its outcome and commit.
+fn work(
+    w: &mut Worker,
+    jobs: &[Job],
+    lineages: &Lineages,
+    history: &HashMap<String, Commit>,
+    given: Option<&Wavefunction>,
+    sync: &(Mutex<Progress>, Condvar),
+) {
+    let (lock, ready) = sync;
+    let threads = w.threads();
+    let mine = |i: &usize| jobs[*i].threads == threads;
+    loop {
+        let (i, start, panicked) = {
+            let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                let mut waiting = (0..jobs.len()).filter(mine).filter(|&i| p.state[i] == Run::Waiting).peekable();
+                if waiting.peek().is_none() {
+                    return;
+                }
+                let mut pick: Option<(usize, Start)> = None;
+                if p.fits(threads) {
+                    for i in waiting {
+                        let Some(start) = lineages.start(i, &p, history) else { continue };
+                        let here = start.as_ref().map_or(Holds::Nothing, |(_, c)| Holds::Commit(c.0)) == w.holds;
+                        if pick.is_none() || here {
+                            pick = Some((i, start));
+                        }
+                        if here {
+                            break;
+                        }
+                    }
+                }
+                if let Some((i, start)) = pick {
+                    p.state[i] = Run::Running;
+                    p.busy += threads;
+                    break (i, start, p.panicked);
+                }
+                p = ready.wait(p).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        let t0 = Instant::now();
+        let from = start.as_ref().map(|(_, c)| c);
+        let given = if start.is_none() { given } else { None };
+        let (out, panic) = if panicked {
+            (Err(closed()), false)
+        } else {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(w, &jobs[i], from, given))) {
+                Ok(r) => (r, false),
+                Err(payload) => (Err(Failure::panic(payload)), true),
+            }
+        };
+        let seconds = t0.elapsed().as_secs_f64();
+        let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let out = out.map(|(response, wf)| {
+            if let Some(wf) = wf {
+                let id = p.next;
+                p.next += 1;
+                p.commits[i] = Some((id, Arc::new(wf)));
+                w.holds = Holds::Commit(id);
+            }
+            let from = start.as_ref().map(|(l, _)| lineages.keys[*l].clone());
+            Done { response, from, given: given.is_some(), seconds }
+        });
+        p.out[i] = Some(out);
+        p.state[i] = Run::Done;
+        p.busy -= threads;
+        p.panicked |= panic;
+        drop(p);
+        ready.notify_all();
+    }
+}
+
+/// Run `jobs` as `compute` runs them one at a time in their order, each on its own threads
+/// (`Job::threads`), different lineages side by side as long as their threads fit into `total`
+/// (taken greedily in request order), one lineage on one calculator at a time; the outcomes in
+/// order. The calculators are the engine's and its forks on each request's threads, forked
+/// when first needed: per thread count as many as fit into `total` at once and its requests'
+/// lineages need. Afterwards each lineage's history is its last commit; a panic closes the
+/// engine.
+fn batch(s: &mut State, jobs: Vec<Job>, total: usize) -> Vec<Result<Done, Failure>> {
+    let lineages = Lineages::new(&jobs);
+    let n = jobs.len();
+    let mut progress = Progress {
+        state: vec![Run::Waiting; n],
+        commits: vec![None; n],
+        out: (0..n).map(|_| None).collect(),
+        busy: 0,
+        total,
+        next: s.next,
+        panicked: false,
+    };
+    // the lineages of each thread count's requests
+    let mut counts: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (i, j) in jobs.iter().enumerate() {
+        let k = counts.iter().position(|(t, _)| *t == j.threads).unwrap_or_else(|| {
+            counts.push((j.threads, Vec::new()));
+            counts.len() - 1
+        });
+        if !counts[k].1.contains(&lineages.lineage[i]) {
+            counts[k].1.push(lineages.lineage[i]);
+        }
+    }
+    let mut chosen = Vec::new();
+    for (threads, of) in &counts {
+        let want = (total / threads).min(of.len()).max(1);
+        let mut have: Vec<usize> =
+            (0..s.workers.len()).filter(|&i| s.workers[i].threads() == *threads).take(want).collect();
+        while have.len() < want {
+            match s.fork(*threads) {
+                Ok(i) => have.push(i),
+                Err(f) => {
+                    // no calculator on these threads: their requests fail with the reason
+                    if have.is_empty() {
+                        for i in (0..n).filter(|&i| jobs[i].threads == *threads) {
+                            progress.out[i] = Some(Err(Failure::of(f.kind, f.code, f.message.clone())));
+                            progress.state[i] = Run::Done;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        chosen.extend(have);
+    }
+    let sync = (Mutex::new(progress), Condvar::new());
+    let (history, given) = (&s.history, s.given.as_ref());
+    let mut used: Vec<&mut Worker> =
+        s.workers.iter_mut().enumerate().filter(|(i, _)| chosen.contains(i)).map(|(_, w)| w).collect();
+    if let Some((first, rest)) = used.split_first_mut() {
+        std::thread::scope(|scope| {
+            for w in rest {
+                let (jobs, lineages, sync) = (&jobs, &lineages, &sync);
+                // a thread that cannot start leaves its share to the calculators on the same threads
+                let _ = std::thread::Builder::new()
+                    .stack_size(WORKER_STACK)
+                    .spawn_scoped(scope, move || work(w, jobs, lineages, history, given, sync));
+            }
+            work(first, &jobs, &lineages, history, given, &sync);
+        });
+    }
+    let p = sync.0.into_inner().unwrap_or_else(|e| e.into_inner());
+    s.next = p.next;
+    if p.panicked {
+        s.close();
+    } else {
+        for (job, c) in jobs.iter().zip(p.commits) {
+            if let Some(c) = c {
+                s.history.insert(job.lineage.clone(), c);
+            }
+        }
+    }
+    p.out.into_iter().map(|o| o.expect("every request ran")).collect()
+}
+
 /// A session's calculator (private to `axtb`): the driver calculator of one request, built
-/// once, and the committed wavefunction of each lineage.
+/// once, forks of it on the threads requests ask for and to run lineages side by side, and the
+/// committed wavefunction of each lineage.
 #[pyclass(module = "axtb._axtb", frozen)]
 pub(crate) struct Engine {
     state: Mutex<State>,
@@ -299,20 +684,43 @@ impl Engine {
             match out {
                 Ok(r) => r,
                 Err(p) => {
-                    s.calc = None;
-                    s.history.clear();
-                    s.holds = Holds::Nothing;
+                    s.close();
                     Err(Failure::panic(p))
                 }
             }
         })
         .map_err(|f| f.into_py(py))
     }
+
+    /// The response dict of a request: the response with `history` (the key whose history it
+    /// started from, or None), `given` and `threads`.
+    fn response<'py>(
+        &self,
+        py: Python<'py>,
+        r: Response,
+        from: Option<String>,
+        given: bool,
+        threads: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let d = response_dict(py, r)?;
+        d.set_item("history", from)?;
+        d.set_item("given", given)?;
+        d.set_item("threads", threads)?;
+        Ok(d)
+    }
 }
 
 fn closed() -> Failure {
     Failure::of("closed", "session_closed", "the session is closed")
 }
+
+/// A request of `Engine.compute_many`: positions, task, lineage, seeds, commit, accuracy,
+/// orbitals, threads (as `Engine.compute` takes them).
+type ManyRequest<'py> =
+    (PyArrayLike2<'py, f64, AllowTypeChange>, String, String, Vec<String>, bool, Option<f64>, bool, Option<usize>);
+
+/// A request of `Engine.compute_many` with checked positions, by its index.
+type Checked = (usize, Vec<[f64; 3]>, String, String, Vec<String>, bool, Option<f64>, bool, usize);
 
 #[pymethods]
 impl Engine {
@@ -334,10 +742,9 @@ impl Engine {
             natoms: req.numbers.len(),
             threads: calc.threads(),
             state: Mutex::new(State {
-                calc: Some(calc),
+                workers: vec![Worker { calc, holds: Holds::Nothing, accuracy: req.accuracy.unwrap_or(1.0) }],
                 history: HashMap::new(),
-                holds: Holds::Nothing,
-                accuracy: req.accuracy.unwrap_or(1.0),
+                next: 0,
                 tasks: HashMap::new(),
                 given: None,
             }),
@@ -362,20 +769,29 @@ impl Engine {
         &self.numerics
     }
 
-    /// The threads of the calculator's pool.
+    /// The threads of the engine's own calculator (a call's default).
     #[getter]
     fn threads(&self) -> usize {
         self.threads
     }
 
+    /// The threads of each calculator the engine holds: its own, then the forks made for calls
+    /// on other threads and for `compute_many` (empty once closed).
+    #[getter]
+    fn calculators(&self, py: Python<'_>) -> PyResult<Vec<usize>> {
+        self.with_state(py, |s| Ok(s.workers.iter().map(Worker::threads).collect()))
+    }
+
     /// Run `task` (JSON of the driver request's task fields) at `positions` (bohr, N x 3) in the
-    /// lineage `lineage` (its key). The SCF starts from the lineage's committed history, else
-    /// from the first of `seeds` (keys) with one, else fresh, as the restart policy says.
-    /// `accuracy`: the SCF accuracy of this call (set only when it differs from the last call's);
-    /// `orbitals`: the structured orbitals in the response. On success with `commit`, the
-    /// method's wavefunction after the call becomes the lineage's history. Returns the response
-    /// dict with `history`: the key whose history was installed, or None.
-    #[pyo3(signature = (positions, task, lineage, seeds=Vec::new(), commit=true, accuracy=None, orbitals=false))]
+    /// lineage `lineage` (its key) on `threads` threads (None: the engine's), on a calculator
+    /// on those threads (a fork made when first needed). The SCF starts from the lineage's
+    /// committed history, else from the first of `seeds` (keys) with one, else fresh, as the
+    /// restart policy says. `accuracy`: the SCF accuracy of this call (set only when it differs
+    /// from the calculator's last); `orbitals`: the structured orbitals in the response. On
+    /// success with `commit`, the method's wavefunction after the call becomes the lineage's
+    /// history. Returns the response dict with `history`: the key whose history was installed,
+    /// or None, and `threads`.
+    #[pyo3(signature = (positions, task, lineage, seeds=Vec::new(), commit=true, accuracy=None, orbitals=false, threads=None))]
     #[allow(clippy::too_many_arguments)]
     fn compute<'py>(
         &self,
@@ -387,63 +803,95 @@ impl Engine {
         commit: bool,
         accuracy: Option<f64>,
         orbitals: bool,
+        threads: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let pos = rows3(&positions, self.natoms, "positions").map_err(|f| f.into_py(py))?;
+        let positions = rows3(&positions, self.natoms, "positions").map_err(|f| f.into_py(py))?;
+        let threads = threads.unwrap_or(self.threads);
         let (r, from, given) = self.with_state(py, move |s| {
-            let calc = s.calc.as_mut().ok_or_else(closed)?;
-            let key = (task, orbitals);
-            let task = match s.tasks.get(&key) {
-                Some(t) => t.clone(),
-                None => {
-                    let t = parse_task(&key.0, orbitals)?;
-                    s.tasks.insert(key, t.clone());
-                    t
-                }
-            };
+            if s.workers.is_empty() {
+                return Err(closed());
+            }
+            let task = s.task(task, orbitals)?;
+            let job = Job { positions, task, lineage, seeds, commit, accuracy, threads };
             // the history to start from: the lineage's own, else the first seed's
-            let from =
-                std::iter::once(&lineage).chain(seeds.iter()).find(|k| s.history.contains_key(k.as_str())).cloned();
-            let want = from.clone().map_or(Holds::Nothing, Holds::Lineage);
-            let given = from.is_none() && s.given.is_some();
-            if given {
-                // the given start replaces the method's own one for every request without history
-                calc.set_wavefunction(s.given.as_ref().expect("a given start"))?;
-                s.holds = Holds::Other;
-            } else if want != s.holds {
-                calc.set_history(from.as_ref().map(|k| &s.history[k]))?;
-                s.holds = want;
+            let from = std::iter::once(&job.lineage)
+                .chain(job.seeds.iter())
+                .find(|k| s.history.contains_key(k.as_str()))
+                .cloned();
+            let start = from.as_ref().map(|k| s.history[k].clone());
+            let given = start.is_none() && s.given.is_some();
+            let i = s.worker_for(threads, start.as_ref().map_or(Holds::Nothing, |c| Holds::Commit(c.0)))?;
+            let (r, wf) = run(&mut s.workers[i], &job, start.as_ref(), s.given.as_ref())?;
+            if let Some(wf) = wf {
+                let id = s.next;
+                s.next += 1;
+                s.history.insert(job.lineage, (id, Arc::new(wf)));
+                s.workers[i].holds = Holds::Commit(id);
             }
-            if let Some(a) = accuracy.filter(|&a| a != s.accuracy) {
-                calc.set_scf_accuracy(a)?;
-                s.accuracy = a;
-            }
-            match calc.compute(&pos, &task) {
-                Ok(r) => {
-                    if commit {
-                        match calc.wavefunction() {
-                            Some(wf) => {
-                                s.history.insert(lineage.clone(), wf);
-                                s.holds = Holds::Lineage(lineage);
-                            }
-                            None => s.holds = Holds::Nothing,
-                        }
-                    } else {
-                        s.holds = Holds::Other;
-                    }
-                    Ok((r, from, given))
-                }
-                Err(e) => {
-                    // the method holds no wavefunction after an error
-                    s.holds = Holds::Nothing;
-                    Err(e.into())
-                }
-            }
+            Ok((r, from, given))
         })?;
-        let d = response_dict(py, r)?;
-        d.set_item("history", from)?;
-        d.set_item("given", given)?;
-        d.set_item("threads", self.threads)?;
-        Ok(d)
+        self.response(py, r, from, given, threads)
+    }
+
+    /// Run `requests` (each `compute`'s arguments in order: positions, task, lineage, seeds,
+    /// commit, accuracy, orbitals, threads) as `compute` runs them one at a time in their order,
+    /// the same bits, with different lineages side by side as long as their threads fit into
+    /// `threads` in all (taken greedily in request order), on the engine's calculator and forks
+    /// of it on each request's threads (kept for later calls). Each lineage's requests run in
+    /// order; a request of a lineage without history waits for its seeds' earlier requests.
+    /// Returns, in order, each request's response dict (as `compute`'s, with `wall`: its time on
+    /// its calculator, s) or its `Error`.
+    #[pyo3(signature = (requests, threads))]
+    fn compute_many<'py>(
+        &self,
+        py: Python<'py>,
+        requests: Vec<ManyRequest<'py>>,
+        threads: usize,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let n = requests.len();
+        let mut out: Vec<Option<(Result<Done, Failure>, usize)>> = (0..n).map(|_| None).collect();
+        let mut checked: Vec<Checked> = Vec::new();
+        for (i, (positions, task, lineage, seeds, commit, accuracy, orbitals, t)) in requests.into_iter().enumerate() {
+            let t = t.unwrap_or(self.threads);
+            match rows3(&positions, self.natoms, "positions") {
+                Ok(x) => checked.push((i, x, task, lineage, seeds, commit, accuracy, orbitals, t)),
+                Err(f) => out[i] = Some((Err(f), t)),
+            }
+        }
+        let ran = self.with_state(py, move |s| {
+            if s.workers.is_empty() {
+                return Ok(checked.into_iter().map(|c| (c.0, Err(closed()), c.8)).collect::<Vec<_>>());
+            }
+            let (mut index, mut jobs, mut ran) = (Vec::new(), Vec::new(), Vec::new());
+            for (i, positions, task, lineage, seeds, commit, accuracy, orbitals, t) in checked {
+                match s.task(task, orbitals) {
+                    Ok(task) => {
+                        index.push((i, t));
+                        jobs.push(Job { positions, task, lineage, seeds, commit, accuracy, threads: t });
+                    }
+                    Err(f) => ran.push((i, Err(f), t)),
+                }
+            }
+            if !jobs.is_empty() {
+                ran.extend(index.into_iter().zip(batch(s, jobs, threads.max(1))).map(|((i, t), r)| (i, r, t)));
+            }
+            Ok(ran)
+        })?;
+        for (i, r, t) in ran {
+            out[i] = Some((r, t));
+        }
+        let list = PyList::empty(py);
+        for r in out {
+            match r.expect("every request has an outcome") {
+                (Ok(d), t) => {
+                    let x = self.response(py, d.response, d.from, d.given, t)?;
+                    x.set_item("wall", d.seconds)?;
+                    list.append(x)?;
+                }
+                (Err(f), _) => list.append(f.into_py(py).into_value(py))?,
+            }
+        }
+        Ok(list)
     }
 
     /// Start every request without history from a given start: densities (g-xTB, one n x n per
@@ -461,11 +909,13 @@ impl Engine {
         let d = densities.as_deref().map(self::densities);
         let m = moments.as_ref().map(|m| self::moments(m, self.natoms)).transpose().map_err(|f| f.into_py(py))?;
         self.with_state(py, move |s| {
-            let calc = s.calc.as_mut().ok_or_else(closed)?;
-            install_given(calc, d, m)?;
-            s.given = calc.wavefunction();
-            calc.set_history(None)?;
-            s.holds = Holds::Nothing;
+            let w = s.workers.first_mut().ok_or_else(closed)?;
+            install_given(&mut w.calc, d, m)?;
+            s.given = w.calc.wavefunction();
+            for w in &mut s.workers {
+                w.calc.set_history(None)?;
+                w.holds = Holds::Nothing;
+            }
             Ok(())
         })
     }
@@ -489,12 +939,10 @@ impl Engine {
         self.with_state(py, |s| Ok(s.history.keys().cloned().collect()))
     }
 
-    /// Drop the calculator and every lineage's history; later calls raise kind `closed`.
+    /// Drop the calculators and every lineage's history; later calls raise kind `closed`.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         self.with_state(py, |s| {
-            s.calc = None;
-            s.history.clear();
-            s.holds = Holds::Nothing;
+            s.close();
             Ok(())
         })
     }
@@ -502,7 +950,7 @@ impl Engine {
     /// Whether the engine is closed (by `close` or a panic).
     #[getter]
     fn closed(&self, py: Python<'_>) -> PyResult<bool> {
-        self.with_state(py, |s| Ok(s.calc.is_none()))
+        self.with_state(py, |s| Ok(s.workers.is_empty()))
     }
 }
 
@@ -745,6 +1193,22 @@ pub(crate) fn shell_layout(
 pub(crate) fn single_thread_atoms(py: Python<'_>, method: &str, hessian: bool) -> PyResult<usize> {
     let m = axtb_driver::Method::parse(method).map_err(|e| Failure::from(e).into_py(py))?;
     Ok(axtb_driver::single_thread_atoms(m, hessian))
+}
+
+/// The threads a plan states for one energy or gradient (`hessian` false) or Hessian of `method`
+/// for `atoms` atoms (`axtb_driver::planned_threads`).
+#[pyfunction]
+pub(crate) fn planned_threads(py: Python<'_>, method: &str, hessian: bool, atoms: usize) -> PyResult<usize> {
+    let m = axtb_driver::Method::parse(method).map_err(|e| Failure::from(e).into_py(py))?;
+    Ok(axtb_driver::planned_threads(m, hessian, atoms))
+}
+
+/// The plan's thread bands (`axtb_driver::THREAD_BANDS`): (method, hessian, [(from atoms,
+/// threads)]), for the generated docs.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+pub(crate) fn thread_bands() -> Vec<(&'static str, bool, Vec<(usize, usize)>)> {
+    axtb_driver::THREAD_BANDS.iter().map(|(m, h, b)| (m.name(), *h, b.to_vec())).collect()
 }
 
 /// The solvent names of the implicit-solvent model `model` (`alpb` or `gbsa`), as its

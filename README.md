@@ -294,12 +294,16 @@ them, but more is not always faster. One exception: a one-off calculation (the C
 one thread, with the same results (GFN2-xTB single points up to 10 atoms and Hessians up to 6,
 g-xTB 2.0.1 single points up to 9 atoms, v1.1 up to 6, GFN-FF single points up to 100 atoms and
 Hessians up to 10; g-xTB's Hessians always use the threads; `axtb_driver::task_threads`).
-A session (Python's `axtb.Session`, Rust's `axtb_driver::Calculator`) keeps the threads it was
-opened with. In Python the threads are the `threads` keyword, at most a runner's grant (above it:
-the grant and the warning `resource_capped`); without the keyword the grant, and in a direct
-call the plan's choice (docs/python.md, "Threads"). Measured on a whole 64-core AMD Threadripper PRO 9985WX
-node with axtb 0.1.0 (`bench/results/cluster-9985wx`, the release run of 2026-11-07: energy +
-gradient in one Python process, xtb conventions, seconds):
+Rust's `axtb_driver::Calculator` keeps the threads it was built with. In Python a calculation's
+threads are the `threads` keyword, at most a runner's grant (above it: the grant and the warning
+`resource_capped`). Without the keyword `axtb.compute` takes the grant, a session's request
+the plan's threads for its calctype at most the grant (`axtb.Session` runs it on a calculator
+on those threads), and a direct call the plan's: by method, calculation and size, the largest
+count that kept a parallel efficiency of at least 0.5 when measured
+(`axtb_driver::planned_threads`; docs/python.md, "Threads"). The CLI's default stays 1 thread.
+Measured on a whole 64-core AMD Threadripper PRO 9985WX node with axtb 0.1.0
+(`bench/results/cluster-9985wx`, the release run of 2026-11-07: energy + gradient in one Python
+process, xtb conventions, seconds):
 
 | molecule (atoms) | 1 thread | 8 threads | 32 threads | 64 threads |
 |---|---|---|---|---|
@@ -311,12 +315,13 @@ gradient in one Python process, xtb conventions, seconds):
   slower with every library we measured (faer, OpenBLAS, MKL, AOCL), and axtb warns about a
   single point of an SCF method (GFN2-xTB, g-xTB) on more threads (CLI: stderr;
   `axtb_driver::threads_warning` and `axtb::threads` in Rust). Python warns of nothing: without
-  the `threads` keyword it plans at most 8 threads for an SCF energy or gradient. GFN-FF has no
+  the `threads` keyword it plans at most 4 threads for an SCF energy or gradient. GFN-FF has no
   SCF and gets no warning.
 - **Many calculations** (conformers, path images, batches): run them in parallel with 1
-  thread each. This always gives the most work per node; small molecules gain little from
-  threads at all (taxol in the release run: 1.1× on 8 threads, node; 1.5× on the laptop with
-  faer).
+  thread each (Python's `Session.compute_many` runs a session's lineages, e.g. path images,
+  side by side this way). This always gives the most work per node; small molecules gain
+  little from threads at all (taxol in the release run: 1.1× on 8 threads, node; 1.5× on the
+  laptop with faer).
 - **Hessians** run their perturbations or displacements in parallel and do use many threads
   well, with no warning (taxol, GFN2-xTB: analytic 2.89 s on 1 thread, 0.87 s on 8 on the
   laptop; numerical 39.7 s on 1 thread and 5.2 s on 8 on the node, `bench/results/hessian.json`;

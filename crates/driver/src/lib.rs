@@ -8,7 +8,8 @@
 //! returns it as a dict). A stateful [`Calculator`] (under Python's `axtb.Session`) builds the
 //! request's method behind axtb-base's `Method` trait and runs a [`Task`] at one geometry
 //! after another, each SCF from the previous geometry's [`Wavefunction`] as the method's
-//! restart policy says.
+//! restart policy says; its forks ([`Calculator::fork`]) share the method's setup and compute
+//! beside it (a session's lineages side by side).
 //!
 //! Rules every front end gets from here:
 //! - one alias rule for names ([`names`]): case and anything but letters and digits are
@@ -18,7 +19,9 @@
 //! - one error type with kinds (input, unsupported element, topology, SCF not converged,
 //!   numerical), [`Error::kind`];
 //! - at least one thread, no clamps; a one-off task ([`run`]) of a molecule small enough that
-//!   threads only cost runs on one ([`task_threads`]: the same results); warnings about more
+//!   threads only cost runs on one ([`task_threads`]: the same results); the threads a plan
+//!   states for a calculation by method, calculation and size ([`planned_threads`], Python's
+//!   when nothing asks for others; the CLI's default is 1); warnings about more
 //!   than 8 threads for an SCF method's single point ([`threads_warning`]), about unpaired
 //!   electrons for GFN-FF ([`uhf_warning`]) and about a run-time LAPACK that was not used
 //!   ([`eigensolver_warning`]) are the front ends' to print;
@@ -140,6 +143,41 @@ pub fn single_thread_atoms(method: Method, hessian: bool) -> usize {
         (Method::Gfnff, false) => 100,
         (Method::Gfnff, true) => 10,
     }
+}
+
+/// Thread bands ([`THREAD_BANDS`]): (from this many atoms, threads), from 0 atoms on.
+pub type Bands = &'static [(usize, usize)];
+
+/// The thread counts a plan states for one calculation when nothing asks for others (Python's
+/// `Plan.resources.threads`, [`planned_threads`]): per method and calculation (`true`: a Hessian,
+/// `false`: an energy or gradient), bands of (from this many atoms, threads). Each band's count
+/// is the largest whose parallel efficiency T1/(n Tn) stayed at least 0.5 in the measurements:
+/// the release CLI 0.2.0a1 on an AMD Threadripper PRO 9985WX node, 1 to 16 threads (water,
+/// SN2, mb33, beni-acetone, caffeine, gh106, taxol, (H2O)100, 3 to 300 atoms, by method and
+/// calculation; the CLI's whole process), and for energies and gradients above 300 atoms on an
+/// Intel i9-11900H laptop (GFN2-xTB and g-xTB 2.0.1: (H2O)200; GFN-FF: crambin, (H2O)333).
+pub const THREAD_BANDS: [(Method, bool, Bands); 8] = [
+    (Method::Gfn2, false, &[(0, 1), (100, 2), (600, 4)]),
+    (Method::GxtbV2_0_1, false, &[(0, 1), (100, 2), (600, 4)]),
+    (Method::GxtbV1_1, false, &[(0, 1), (100, 2), (300, 4)]),
+    (Method::Gfnff, false, &[(0, 1), (600, 2)]),
+    (Method::Gfn2, true, &[(0, 1), (60, 4), (150, 8)]),
+    (Method::GxtbV2_0_1, true, &[(0, 2), (10, 4), (20, 8), (60, 16)]),
+    (Method::GxtbV1_1, true, &[(0, 4), (10, 16)]),
+    (Method::Gfnff, true, &[(0, 1), (100, 2)]),
+];
+
+/// The threads a plan states for one energy or gradient (`hessian` false) or Hessian of
+/// `method` for a molecule of `atoms` atoms: its band in [`THREAD_BANDS`], and 1 at or below
+/// [`single_thread_atoms`]. The CLI does not use it: its default is 1 thread, and a request's
+/// `threads` are what it runs on ([`task_threads`]).
+pub fn planned_threads(method: Method, hessian: bool, atoms: usize) -> usize {
+    if atoms <= single_thread_atoms(method, hessian) {
+        return 1;
+    }
+    let (_, _, bands) =
+        THREAD_BANDS.iter().find(|(m, h, _)| *m == method && *h == hessian).expect("every method has thread bands");
+    bands.iter().rev().find(|(from, _)| atoms >= *from).map_or(1, |&(_, n)| n)
 }
 
 /// The vibrational analysis of a given Hessian (`analyze_hessian`, 3N x 3N, Eh/bohr²) at
