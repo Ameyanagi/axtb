@@ -6,9 +6,11 @@ The input pins the atoms, charge, multiplicity, method and keywords; its geometr
 are a request's defaults. The engine (`axtb._axtb.Engine`) builds the method once (GFN-FF its
 topology too) and keeps one committed wavefunction per lineage: a request starts from its
 lineage's history, else from the first of its seeds with one, else fresh, as the method's restart
-policy says; a success with ``commit`` becomes the lineage's history. A request runs on the
-threads of its calctype and size, on the engine's calculator or a fork of it on those threads;
-``compute_many`` runs different lineages side by side as their threads fit into the session's.
+policy says; a success with ``commit`` becomes the lineage's history. The session's thread
+count is shared by the requests running at once: a single ``compute`` (one at a time) gets all of
+it, a ``compute_many`` that runs k lineages side by side gives each ``count // k``, and axtb's
+internal cap applies within that. Each request runs on the engine's calculator or a fork of it
+on its threads.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from qcdata import (
 
 from . import _axtb, _qc
 from ._errors import from_driver, refuse
-from ._keywords import CALCTYPES, largest, plan_input
+from ._keywords import CALCTYPES, largest, plan_input, thread_cap
 from ._models import build
 
 __all__ = ["Session"]
@@ -77,9 +79,10 @@ def session_calctypes(calctypes: Iterable[Any] | None) -> frozenset[str]:
 
 class _Prepared(NamedTuple):
     """A checked request: what the engine runs (``args``: positions, task, lineage key, seed
-    keys, commit, SCF accuracy, orbitals, threads) and what its frame needs."""
+    keys, commit, SCF accuracy, orbitals; the threads come with the call) and what its frame
+    needs."""
 
-    args: tuple[Any, ...]
+    args: tuple[np.ndarray, str, str, list[str], bool, float | None, bool]
     x: np.ndarray
     calctype: str
     wanted: frozenset[str]
@@ -94,10 +97,11 @@ class Session:
     """A session of axtb: the protocol's ``Session`` (``axtb.program.open_session``) and axtb's
     own way to run one molecule at many geometries.
 
-    Every calculation runs on its own threads: the ``threads`` keyword, else the plan's for its
-    calctype and size, at most the grant. ``compute_many`` runs different lineages side by side as
-    long as their threads fit into the session's threads in all: the grant, and without one (a
-    direct call) this process's CPUs.
+    The session's thread count is the ``threads`` keyword (at most the grant), else the grant,
+    else (a direct call) this process's CPUs. The requests running at once share it: single
+    ``compute`` calls run one at a time (concurrent callers wait their turn) on the whole count,
+    and ``compute_many`` runs min(lineages, count) at once on ``count // k`` each. Within its share
+    a request uses at most axtb's internal cap for its calctype and size.
 
     Args:
         inp: The atoms, charge, multiplicity, method and keywords, pinned for the session's
@@ -117,15 +121,11 @@ class Session:
             raise TypeError(f"axtb.Session opens from a qcdata.ProgramInput, not {type(inp).__name__}")
         allowed = session_calctypes(calctypes)
         p = plan_input(inp, calctypes=allowed, session=True)
-        per, total, warnings = _qc.session_threads(p, allowed, ctx)
-        # small molecules run on one thread (the same bits), as compute does
-        used = {
-            c: 1 if len(p.numbers) <= _axtb.single_thread_atoms(p.method, c == "hessian") else n
-            for c, (n, _) in per.items()
-        }
-        # the engine's own calculator runs on the input calctype's threads
+        n, warnings, why = _qc.count(p, ctx)
+        # the engine's own calculator runs on the threads of a single request of the input's
+        # calctype (the others get forks on theirs)
         own = inp.calctype.value if inp.calctype.value in allowed else largest(allowed)
-        request = json.dumps({**p.request, "threads": used[own]}, separators=(",", ":"))
+        request = json.dumps({**p.request, "threads": _qc.capped(p, own, n)}, separators=(",", ":"))
         try:
             self._engine = _axtb.Engine(request, p.numbers, p.positions)
             if p.start is not None:
@@ -141,12 +141,10 @@ class Session:
         self._p = p
         self._structure = inp.require_structure()
         self._natoms = len(p.numbers)
-        # each calctype's threads (and why), the threads it runs on, the input's calctype and the
-        # session's threads in all
-        self._threads = per
-        self._used = used
+        # the session's count (and why) and the input's calctype
+        self._count = n
+        self._why = why
         self._own = own
-        self._total = total
         self._warnings = warnings
         self._lock = threading.Lock()
         self._tasks: dict[tuple[str, frozenset[str], float | None], str] = {}
@@ -199,20 +197,21 @@ class Session:
         start = time.perf_counter()
         with self._lock:
             q = self._prepare(positions, calctype, accuracy, lineage, outputs, seed, commit)
+            # one at a time: the whole count, at most the cap
+            threads = self._threads_of(q.calctype)
             r: dict[str, Any] | _axtb.Error
             try:
-                r = self._engine.compute(*q.args)
+                r = self._engine.compute(*q.args, threads)
             except _axtb.Error as e:
                 r = e
-            return self._finish(q, r, start)
+            return self._finish(q, r, start, threads)
 
     def compute_many(self, requests: Sequence[Request]) -> list[Frame]:
         """Evaluate many requests: each lineage's in order, each reading its lineage's history as
-        it stands at its place, and different lineages side by side as long as their threads fit
-        into the session's threads in all (`Session`), taken in request order. A request whose
-        lineage has no history waits for its seeds' earlier requests. The frames are what
-        one-at-a-time ``compute`` calls in request order give, bit for bit; failures stay in
-        place.
+        it stands at its place, and min(lineages, count) lineages side by side, each request on
+        ``count // k`` threads at most axtb's cap (`Session`). A request whose lineage has no
+        history waits for its seeds' earlier requests. A frame is what a one-at-a-time ``compute``
+        in request order on the same thread count gives, bit for bit; failures stay in place.
 
         Returns:
             One frame per request, in order, all successful.
@@ -234,12 +233,17 @@ class Session:
                     continue
                 ready.append((i, time.perf_counter() - start, q))
             if ready:
-                out = self._engine.compute_many([q.args for *_, q in ready], self._total)
-                for (i, checks, q), r in zip(ready, out, strict=True):
+                # min(lineages, count) at once, each on count // k at most its cap
+                k = min(len({q.key for *_, q in ready}), self._count)
+                share = max(1, self._count // k)
+                threads = [_qc.capped(self._p, q.calctype, share) for *_, q in ready]
+                args = [(*q.args, t) for (*_, q), t in zip(ready, threads, strict=True)]
+                out = self._engine.compute_many(args, self._count)
+                for (i, checks, q), t, r in zip(ready, threads, out, strict=True):
                     # the request's own time: its checks, its calculation and its frame
                     took = checks + (r["wall"] if isinstance(r, dict) else 0.0)
                     try:
-                        frames[i] = self._finish(q, r, time.perf_counter() - took)
+                        frames[i] = self._finish(q, r, time.perf_counter() - took, t)
                     except ProgramError as e:
                         frames[i] = e.frame
         return ProgramErrors.check(frames)
@@ -252,27 +256,17 @@ class Session:
                 self._engine.reset(None if lineage is ... else lineage_key(lineage))
 
     def plan(self) -> dict[str, Any]:
-        """The settings pinned at opening (with the threads of the input's calctype), the
-        resources (the most threads a calculation takes), the warnings and the record (method,
-        conventions, calctypes, numerics; ``threads_used`` by the input's calctype,
-        ``threads_by_calctype``, and ``lineages_at_once``: how many requests of the input's
-        calctype ``compute_many`` runs side by side)."""
-        n, why = self._threads[self._own]
-        used = self._used[self._own]
+        """The settings pinned at opening (with the session's thread count), the warnings and the
+        record (method, conventions, calctypes, numerics; ``thread_cap``: the most threads a
+        request of the input's calctype uses, None for no cap)."""
         return {
             "resolved": {
-                "settings": {**self._p.settings, "threads": n},
-                "reasons": {**self._p.reasons, "threads": why},
+                "settings": {**self._p.settings, "threads": self._count},
+                "reasons": {**self._p.reasons, "threads": self._why},
                 "deferred": [],
             },
-            "resources": {"threads": max(m for m, _ in self._threads.values())},
             "warnings": [w.model_dump() for w in self._warnings],
-            "record": {
-                **self._p.record,
-                "threads_used": used,
-                "threads_by_calctype": {c: self._used[c] for c in CALCTYPES if c in self._used},
-                "lineages_at_once": max(1, self._total // used),
-            },
+            "record": {**self._p.record, "thread_cap": thread_cap(self._p, self._own)},
         }
 
     def close(self) -> None:
@@ -298,6 +292,10 @@ class Session:
         return f"axtb.Session({self._p.method}, {self._natoms} atoms, {state})"
 
     # ------------------------------------------------------------------ one request
+
+    def _threads_of(self, calctype: str) -> int:
+        """The threads a single request of `calctype` runs on: the count, at most the cap."""
+        return _qc.capped(self._p, calctype, self._count)
 
     def _structure_at(self, x: np.ndarray) -> Any:
         """The session's structure at positions `x` (its other fields shared, as model_copy does)."""
@@ -326,7 +324,7 @@ class Session:
             traceback=e.error.message,
             error=e.error,
             record=record or {},
-            execution=build(ExecutionInfo, threads=self._used[self._own] if threads is None else threads),
+            execution=build(ExecutionInfo, threads=self._threads_of(self._own) if threads is None else threads),
         )
 
     def _positions(self, positions: Any) -> np.ndarray:
@@ -412,13 +410,12 @@ class Session:
                 e.frame = self._failed(positions, e, x if x is not None and x.shape == (self._natoms, 3) else None)
             raise
         orbitals = _qc.needs_orbitals(wanted)
-        threads = self._used[calctype]
-        args = (x, task, key, [_key(s) for s in seeds], commit, factor if p.scf else None, orbitals, threads)
+        args = (x, task, key, [_key(s) for s in seeds], commit, factor if p.scf else None, orbitals)
         return _Prepared(args, x, calctype, wanted, lineage, key, seeds, acc_record, acc_warnings)
 
-    def _finish(self, q: _Prepared, r: dict[str, Any] | _axtb.Error, start: float) -> Frame:
-        """The frame of a request from its engine response; an engine error raises its
-        `ProgramError`, with the failed frame."""
+    def _finish(self, q: _Prepared, r: dict[str, Any] | _axtb.Error, start: float, threads: int) -> Frame:
+        """The frame of a request from its engine response (it ran on `threads`); an engine error
+        raises its `ProgramError`, with the failed frame."""
         if isinstance(r, _axtb.Error):
             error, fields = from_driver(r)
             if r.kind in ("panic", "closed"):
@@ -427,7 +424,7 @@ class Session:
             rec: dict[str, Any] = {"error": fields}
             if r.attempts:
                 rec["scf"] = {"attempts": r.attempts}
-            exc.frame = self._failed(None, exc, q.x, rec, q.args[-1])
+            exc.frame = self._failed(None, exc, q.x, rec, threads)
             raise exc from None
         return self._frame(start, r, q)
 

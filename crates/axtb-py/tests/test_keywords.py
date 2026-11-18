@@ -387,23 +387,24 @@ def test_gfnff_topology_and_accuracy():
     assert refused(inp("gfnff", keywords={"topology": {"fragment_charges": [1]}}))[1] == "invalid_value"
 
 
-def test_plan_threads():
-    p = plan(inp("gfn2", "gradient"))
-    assert K.plan_threads(p, "gradient") == 1
-    assert K.plan_threads(plan(inp("gfn2", "gradient", {"threads": 6})), "gradient") == 6
+def test_thread_cap():
+    """axtb's internal cap (axtb_driver::THREAD_CAPS): energies and gradients by size, at most
+    8; Hessians uncapped above the one-thread size; the plan has no resources.threads and records
+    the cap."""
     big = Structure(symbols=["H", "H"] * 160, geometry=[[0, 0, 3.0 * i + 1.4 * (j % 2)] for i in range(160)
                                                         for j in range(2)])
-    pb = plan(inp("gfn2", "gradient", structure=big))
-    # 320 atoms: the bands of axtb_driver::THREAD_BANDS
-    assert K.plan_threads(pb, "gradient") == 2
-    assert K.plan_threads(pb, "hessian") == 8
-    assert K.plan_threads(plan(inp("gfnff", "gradient", structure=big)), "gradient") == 1
-    assert K.plan_threads(plan(inp("gfnff", "hessian", structure=big)), "hessian") == 2
-    assert K.plan_threads(plan(inp("gfn2", "hessian")), "hessian") == 1  # water: below the one-thread size
-    assert K.plan_threads(plan(inp("gxtb-v2.0.1", "hessian")), "hessian") == 2
-    assert K.plan_threads(plan(inp("gxtb-v1.1", "hessian", structure=big)), "hessian") == 16
-    table = K.thread_bands()
-    assert "| g-xTB 2.0.1 | Hessian | 2 (below 10), 4 (10-19), 8 (20-59), 16 (from 60) |" in table
+    assert K.thread_cap(plan(inp("gfn2", "gradient")), "gradient") == 1  # water
+    assert K.thread_cap(plan(inp("gfn2", "gradient", structure=big)), "gradient") == 8  # 320 atoms
+    assert K.thread_cap(plan(inp("gfn2", "hessian", structure=big)), "hessian") is None
+    assert K.thread_cap(plan(inp("gfnff", "gradient", structure=big)), "gradient") == 1
+    assert K.thread_cap(plan(inp("gfn2", "hessian")), "hessian") == 1  # water: below the one-thread size
+    assert K.thread_cap(plan(inp("gxtb-v2.0.1", "hessian")), "hessian") is None
+    assert "| g-xTB 2.0.1 | 1 (below 60), 4 (60-299), 8 (from 300) |" in K.thread_caps()
+    from axtb import program
+
+    out = program.plan(inp("gfn2", "gradient", {"threads": 6}))
+    assert "resources" not in out and out["record"]["thread_cap"] == 1
+    assert out["resolved"]["settings"]["threads"] == 6
 
 
 # ----------------------------------------------------------------------------- schema and docs

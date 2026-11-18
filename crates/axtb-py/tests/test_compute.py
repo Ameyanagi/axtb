@@ -158,8 +158,16 @@ def test_threads_and_grants():
     assert out.execution.threads == 1
     out = axtb.compute(inp(keywords={}), RunContext(threads=6))
     assert out.resolved.settings["threads"] == 6 and not out.warnings
-    big = axtb.compute(inp("gfn2", "gradient", {"threads": 3}, structure=CAFFEINE))
-    assert big.execution.threads == 3
+    # the keyword is a maximum: a caffeine gradient uses 1 of 3 (axtb's cap), its Hessian all 3
+    grad = axtb.compute(inp("gfn2", "gradient", {"threads": 3}, structure=CAFFEINE))
+    assert grad.resolved.settings["threads"] == 3 and grad.execution.threads == 1
+    hess = axtb.compute(inp("gfn2", "hessian", {"threads": 3}, structure=CAFFEINE))
+    assert hess.execution.threads == 3
+    # a direct call without the keyword: this process's CPUs, at most the cap
+    import os
+
+    direct = axtb.compute(inp("gfn2", "gradient", {}, structure=CAFFEINE))
+    assert direct.resolved.settings["threads"] == len(os.sched_getaffinity(0)) and direct.execution.threads == 1
 
 
 def test_refusals_carry_the_failed_output():

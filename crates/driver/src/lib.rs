@@ -19,9 +19,10 @@
 //! - one error type with kinds (input, unsupported element, topology, SCF not converged,
 //!   numerical), [`Error::kind`];
 //! - at least one thread, no clamps; a one-off task ([`run`]) of a molecule small enough that
-//!   threads only cost runs on one ([`task_threads`]: the same results); the threads a plan
-//!   states for a calculation by method, calculation and size ([`planned_threads`], Python's
-//!   when nothing asks for others; the CLI's default is 1); warnings about more
+//!   threads only cost runs on one ([`task_threads`]: the same results); axtb's internal cap
+//!   on the threads one calculation uses by method, calculation and size ([`thread_cap`],
+//!   applied by Python; the CLI runs on the threads a request gives, default 1); warnings about
+//!   more
 //!   than 8 threads for an SCF method's single point ([`threads_warning`]), about unpaired
 //!   electrons for GFN-FF ([`uhf_warning`]) and about a run-time LAPACK that was not used
 //!   ([`eigensolver_warning`]) are the front ends' to print;
@@ -145,39 +146,42 @@ pub fn single_thread_atoms(method: Method, hessian: bool) -> usize {
     }
 }
 
-/// Thread bands ([`THREAD_BANDS`]): (from this many atoms, threads), from 0 atoms on.
-pub type Bands = &'static [(usize, usize)];
+/// Thread caps ([`THREAD_CAPS`]): (from this many atoms, at most this many threads), from 0
+/// atoms on.
+pub type Caps = &'static [(usize, usize)];
 
-/// The thread counts a plan states for one calculation when nothing asks for others (Python's
-/// `Plan.resources.threads`, [`planned_threads`]): per method and calculation (`true`: a Hessian,
-/// `false`: an energy or gradient), bands of (from this many atoms, threads). Each band's count
-/// is the largest whose parallel efficiency T1/(n Tn) stayed at least 0.5 in the measurements:
-/// the release CLI 0.2.0a1 on an AMD Threadripper PRO 9985WX node, 1 to 16 threads (water,
-/// SN2, mb33, beni-acetone, caffeine, gh106, taxol, (H2O)100, 3 to 300 atoms, by method and
-/// calculation; the CLI's whole process), and for energies and gradients above 300 atoms on an
-/// Intel i9-11900H laptop (GFN2-xTB and g-xTB 2.0.1: (H2O)200; GFN-FF: crambin, (H2O)333).
-pub const THREAD_BANDS: [(Method, bool, Bands); 8] = [
-    (Method::Gfn2, false, &[(0, 1), (100, 2), (600, 4)]),
-    (Method::GxtbV2_0_1, false, &[(0, 1), (100, 2), (600, 4)]),
-    (Method::GxtbV1_1, false, &[(0, 1), (100, 2), (300, 4)]),
-    (Method::Gfnff, false, &[(0, 1), (600, 2)]),
-    (Method::Gfn2, true, &[(0, 1), (60, 4), (150, 8)]),
-    (Method::GxtbV2_0_1, true, &[(0, 2), (10, 4), (20, 8), (60, 16)]),
-    (Method::GxtbV1_1, true, &[(0, 4), (10, 16)]),
-    (Method::Gfnff, true, &[(0, 1), (100, 2)]),
+/// axtb's internal cap on the threads of one energy or gradient, per method, by size: at most
+/// this many of the threads a calculation is given, where more do not make it faster (the
+/// plateau: the fewest threads within about 10 % of the fastest wall time measured), and never
+/// more than 8, since beyond 8 the SCF eigensolver only gets slower ([`thread_cap`]). Measured
+/// with the release CLI 0.2.0a1 on an AMD Threadripper PRO 9985WX node, 1 to 16 threads (mb33,
+/// beni-acetone, caffeine, gh106, taxol, (H2O)100: 16 to 300 atoms; the CLI's whole process): 1
+/// thread up to about 40 atoms (more were slower, or gained within the noise of a few
+/// milliseconds), 4 at taxol (113 atoms: g-xTB 2.0.1 218 ms on 1 thread, 126 ms on 4, 134 ms on
+/// 8; a 119-atom gradient 245 ms on 1, 140 ms on 8, 187 ms on 64), 8 from (H2O)100 (300 atoms:
+/// g-xTB 2.0.1 912 ms on 1, 408 ms on 8). GFN-FF on an Intel i9-11900H laptop: no gain to 300
+/// atoms, 4 from crambin (640 atoms: 79 ms on 1, 58 ms on 4, 57 ms on 8, 78 ms on 16).
+pub const THREAD_CAPS: [(Method, Caps); 4] = [
+    (Method::Gfn2, &[(0, 1), (60, 4), (300, 8)]),
+    (Method::GxtbV2_0_1, &[(0, 1), (60, 4), (300, 8)]),
+    (Method::GxtbV1_1, &[(0, 1), (60, 4), (300, 8)]),
+    (Method::Gfnff, &[(0, 1), (600, 4)]),
 ];
 
-/// The threads a plan states for one energy or gradient (`hessian` false) or Hessian of
-/// `method` for a molecule of `atoms` atoms: its band in [`THREAD_BANDS`], and 1 at or below
-/// [`single_thread_atoms`]. The CLI does not use it: its default is 1 thread, and a request's
-/// `threads` are what it runs on ([`task_threads`]).
-pub fn planned_threads(method: Method, hessian: bool, atoms: usize) -> usize {
+/// The most threads one energy or gradient (`hessian` false) or Hessian of `method` for a
+/// molecule of `atoms` atoms uses of the threads it is given (`None`: all of them): 1 at or
+/// below [`single_thread_atoms`]; an energy or gradient its [`THREAD_CAPS`] band; a Hessian, whose
+/// displacements and perturbations run side by side, no cap. Python's `axtb.compute` and
+/// `axtb.Session` apply it; the CLI runs on the threads a request gives ([`task_threads`]).
+pub fn thread_cap(method: Method, hessian: bool, atoms: usize) -> Option<usize> {
     if atoms <= single_thread_atoms(method, hessian) {
-        return 1;
+        return Some(1);
     }
-    let (_, _, bands) =
-        THREAD_BANDS.iter().find(|(m, h, _)| *m == method && *h == hessian).expect("every method has thread bands");
-    bands.iter().rev().find(|(from, _)| atoms >= *from).map_or(1, |&(_, n)| n)
+    if hessian {
+        return None;
+    }
+    let (_, caps) = THREAD_CAPS.iter().find(|(m, _)| *m == method).expect("every method has thread caps");
+    caps.iter().rev().find(|(from, _)| atoms >= *from).map(|&(_, n)| n)
 }
 
 /// The vibrational analysis of a given Hessian (`analyze_hessian`, 3N x 3N, Eh/bohr²) at

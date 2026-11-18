@@ -1195,20 +1195,19 @@ pub(crate) fn single_thread_atoms(py: Python<'_>, method: &str, hessian: bool) -
     Ok(axtb_driver::single_thread_atoms(m, hessian))
 }
 
-/// The threads a plan states for one energy or gradient (`hessian` false) or Hessian of `method`
-/// for `atoms` atoms (`axtb_driver::planned_threads`).
+/// axtb's internal cap on the threads of one energy or gradient (`hessian` false) or Hessian of
+/// `method` for `atoms` atoms, or None (`axtb_driver::thread_cap`).
 #[pyfunction]
-pub(crate) fn planned_threads(py: Python<'_>, method: &str, hessian: bool, atoms: usize) -> PyResult<usize> {
+pub(crate) fn thread_cap(py: Python<'_>, method: &str, hessian: bool, atoms: usize) -> PyResult<Option<usize>> {
     let m = axtb_driver::Method::parse(method).map_err(|e| Failure::from(e).into_py(py))?;
-    Ok(axtb_driver::planned_threads(m, hessian, atoms))
+    Ok(axtb_driver::thread_cap(m, hessian, atoms))
 }
 
-/// The plan's thread bands (`axtb_driver::THREAD_BANDS`): (method, hessian, [(from atoms,
+/// The caps of energies and gradients (`axtb_driver::THREAD_CAPS`): (method, [(from atoms,
 /// threads)]), for the generated docs.
 #[pyfunction]
-#[allow(clippy::type_complexity)]
-pub(crate) fn thread_bands() -> Vec<(&'static str, bool, Vec<(usize, usize)>)> {
-    axtb_driver::THREAD_BANDS.iter().map(|(m, h, b)| (m.name(), *h, b.to_vec())).collect()
+pub(crate) fn thread_caps() -> Vec<(&'static str, Vec<(usize, usize)>)> {
+    axtb_driver::THREAD_CAPS.iter().map(|(m, c)| (m.name(), c.to_vec())).collect()
 }
 
 /// The solvent names of the implicit-solvent model `model` (`alpb` or `gbsa`), as its

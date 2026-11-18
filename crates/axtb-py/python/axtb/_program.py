@@ -9,7 +9,7 @@ from typing import Any
 from qcdata import CalcType, ProgramInput, ProgramOutput, SinglePointData
 
 from . import _axtb
-from ._keywords import CALCTYPES, METHODS, alias, canonical_method, plan_input, plan_threads, settings_schema
+from ._keywords import CALCTYPES, METHODS, alias, canonical_method, plan_input, settings_schema, thread_cap
 from ._qc import VERSION, compute
 from ._session import Session
 
@@ -134,8 +134,9 @@ class Axtb:
 
     def plan(self, inp: ProgramInput) -> dict[str, Any]:
         """Check an input and resolve its settings, without running it: ``resolved`` (threads
-        deferred to the run unless the keyword gives them), ``resources`` (the threads the
-        calculation asks for: see ``docs/python.md``), ``warnings`` and ``record``.
+        deferred to the run unless the keyword gives them), ``warnings`` and ``record`` (with
+        ``thread_cap``: the most threads the calculation uses of those it is given, None for no
+        cap; ``docs/python.md``, Threads). No ``resources``: the count is the caller's.
 
         Raises:
             ProgramError: The input is refused (kind ``input`` or ``unsupported``).
@@ -149,9 +150,8 @@ class Axtb:
             deferred.append("threads")
         return {
             "resolved": {"settings": settings, "reasons": p.reasons, "deferred": deferred},
-            "resources": {"threads": plan_threads(p, inp.calctype.value)},
             "warnings": [],
-            "record": p.record,
+            "record": {**p.record, "thread_cap": thread_cap(p, inp.calctype.value)},
         }
 
     def compute(self, inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, SinglePointData]:
