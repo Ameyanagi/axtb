@@ -3,6 +3,34 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
+## Unreleased
+
+### Threads: one count per calculation, axtb's internal cap within it
+
+- Python runs a calculation on the count it is given: the `threads` keyword (at most the grant,
+  with `resource_capped`), else the runner's grant, else (a direct call) this process's CPUs.
+  Within it axtb uses at most its internal cap, where more threads stop making a calculation
+  faster: SCF energies and gradients at most 8 threads at any size and fewer for small molecules
+  (GFN2-xTB, g-xTB 2.0.1 and v1.1: 1 below 60 atoms, 4 from 60, 8 from 300; GFN-FF: 1 below 600,
+  4 from 600); Hessians all they are given; at or below the one-thread size 1, as before. The
+  `threads` keyword is a maximum too. Before, a direct call without the keyword ran on the plan's
+  bands and a grant was used whole.
+- The plan states no thread count: `axtb.program.plan` and `Session.plan` no longer set
+  `resources.threads` (qccompute chooses the count; a runner that still reads the field takes 1).
+  Their record gives `thread_cap`, the most threads the calculation uses (None: no cap).
+- Sessions share their count like a list: a single `compute` runs alone (concurrent callers wait
+  their turn) on the whole count, and `compute_many` runs min(lineages, count) lineages at once,
+  each request on `count // k` at most its cap, instead of per-calctype bands packed into the
+  grant. A session's count is its `threads` keyword, else the grant, else this process's CPUs. A
+  frame equals a one-at-a-time `compute` on the same thread count, bit for bit; a large molecule's
+  bits can depend on k (round-off), and the `threads` keyword fixes them.
+- `Session.plan()`'s `resources`, `record.threads_used`, `threads_by_calctype` and
+  `lineages_at_once` are gone; `resolved.settings.threads` is the session's count.
+- Rust: axtb-driver's `THREAD_BANDS` and `planned_threads` are `THREAD_CAPS` (energies and
+  gradients) and `thread_cap(method, hessian, atoms) -> Option<usize>`. The CLI is unchanged: it
+  runs on a request's threads (default 1) with the one-thread rule.
+- Numerics epochs unchanged: no result of a given thread count changes (golden set 188 of 188).
+
 ## 0.2.0-alpha.2 (2026-11-17)
 
 ### Sessions run lineages side by side

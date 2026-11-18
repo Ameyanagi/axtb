@@ -245,9 +245,9 @@ The response, for every front end (a field is present when it applies):
 
 ## Design rules
 
-- **No implicit threading.** Every calculation runs on exactly the number of threads you
-  pass (the CLI's default 1, at least 1; never clamped; under a qccompute runner the threads it
-  grants, see [Threads](#threads)) inside its own pool; outer-level parallelism (Hessian displacements)
+- **No implicit threading.** Every calculation runs on at most the number of threads it is
+  given (the CLI's default 1, at least 1; Python's count and internal cap, see
+  [Threads](#threads)) inside its own pool; outer-level parallelism (Hessian displacements)
   runs inner work sequentially, so thread counts never multiply. No `OMP_NUM_THREADS`
   needed, ever. All of axtb's own reductions use fixed chunks summed in a fixed order, so
   results repeat bit for bit on a given thread count. Between thread counts they may differ
@@ -288,19 +288,16 @@ The response, for every front end (a field is present when it applies):
 
 ## Threads
 
-axtb runs every calculation on the threads you ask for (the CLI's default 1) and never caps
-them, but more is not always faster. One exception: a one-off calculation (the CLI, Python's
-`axtb.compute`) of a molecule so small that threads only cost runs on
-one thread, with the same results (GFN2-xTB single points up to 10 atoms and Hessians up to 6,
-g-xTB 2.0.1 single points up to 9 atoms, v1.1 up to 6, GFN-FF single points up to 100 atoms and
-Hessians up to 10; g-xTB's Hessians always use the threads; `axtb_driver::task_threads`).
-Rust's `axtb_driver::Calculator` keeps the threads it was built with. In Python a calculation's
-threads are the `threads` keyword, at most a runner's grant (above it: the grant and the warning
-`resource_capped`). Without the keyword `axtb.compute` takes the grant, a session's request
-the plan's threads for its calctype at most the grant (`axtb.Session` runs it on a calculator
-on those threads), and a direct call the plan's: by method, calculation and size, the largest
-count that kept a parallel efficiency of at least 0.5 when measured
-(`axtb_driver::planned_threads`; docs/python.md, "Threads"). The CLI's default stays 1 thread.
+The CLI runs every calculation on the threads you ask for (default 1), but more is not always
+faster. One exception: a molecule so small that threads only cost runs on one thread, with the
+same results (GFN2-xTB single points up to 10 atoms and Hessians up to 6, g-xTB 2.0.1 single
+points up to 9 atoms, v1.1 up to 6, GFN-FF single points up to 100 atoms and Hessians up to 10;
+g-xTB's Hessians always use the threads; `axtb_driver::task_threads`). Rust's
+`axtb_driver::Calculator` keeps the threads it was built with. Python runs a calculation on the
+count it is given (the `threads` keyword, else a runner's grant, else this process's CPUs; a
+session's running requests share it) and within that at most axtb's internal cap, where more
+threads stop helping: an SCF energy or gradient at most 8 threads, fewer for small molecules;
+Hessians use all they are given (`axtb_driver::thread_cap`; docs/python.md, "Threads").
 Measured on a whole 64-core AMD Threadripper PRO 9985WX node with axtb 0.1.0
 (`bench/results/cluster-9985wx`, the release run of 2026-11-07: energy + gradient in one Python
 process, xtb conventions, seconds):
@@ -314,9 +311,9 @@ process, xtb conventions, seconds):
 - **One calculation:** use at most about 8 threads. Beyond that the SCF eigensolver gets
   slower with every library we measured (faer, OpenBLAS, MKL, AOCL), and axtb warns about a
   single point of an SCF method (GFN2-xTB, g-xTB) on more threads (CLI: stderr;
-  `axtb_driver::threads_warning` and `axtb::threads` in Rust). Python warns of nothing: without
-  the `threads` keyword it plans at most 4 threads for an SCF energy or gradient. GFN-FF has no
-  SCF and gets no warning.
+  `axtb_driver::threads_warning` and `axtb::threads` in Rust). Python warns of nothing: it caps
+  an SCF energy or gradient at 8 threads, whatever it is given. GFN-FF has no SCF and gets no
+  warning.
 - **Many calculations** (conformers, path images, batches): run them in parallel with 1
   thread each (Python's `Session.compute_many` runs a session's lineages, e.g. path images,
   side by side this way). This always gives the most work per node; small molecules gain

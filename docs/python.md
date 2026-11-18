@@ -86,12 +86,11 @@ seed=(), commit=True)` evaluates one geometry and returns a `qcdata.Frame` (`str
   committed by the lineage's requests before it. A request whose lineage has no history waits for
   its `seed` lineages' earlier requests in the batch and reads their history as those leave it,
   so no result depends on the scheduling.
-- **Side by side.** Each request runs on its own threads, those of its calctype and size
-  ([Threads](#threads)), and different lineages run at once on forks of the session's calculator
-  as long as their threads fit into the session's threads in all, taken in request order. A
-  session of 8 threads runs 8 caffeine g-xTB 2.0.1 gradients at once (1 thread each), and a
-  caffeine Hessian (8 threads) alone. `plan()["record"]["lineages_at_once"]` says how many
-  requests of the input's calctype run at once. The method's setup is built once and shared
+- **Side by side.** The session's thread count ([Threads](#threads)) is shared like a list's:
+  min(lineages, count) lineages run at once on forks of the session's calculator, each request
+  on `count // k` threads (at least 1), at most axtb's cap for its calctype and size. A session
+  of 8 threads runs 12 caffeine g-xTB 2.0.1 gradient lineages 8 at once on 1 thread each, and 2
+  lineages of Hessians 2 at once on 4 threads each. The method's setup is built once and shared
   where it is immutable (parameters, basis, GFN-FF's topology); each fork runs on one thread
   count and has its own SCF state and work buffers. A lineage's history does not depend on the
   threads, so its requests may run on different forks. The forks are made when a call first
@@ -102,20 +101,22 @@ seed=(), commit=True)` evaluates one geometry and returns a `qcdata.Frame` (`str
   lineages per call in a session of 8 threads, 8 at once on 1 thread each: caffeine 31 ms per
   call against 160 ms one request at a time (5.1x) and 93 ms one at a time on 8 threads each;
   taxol 0.73 s against 3.6 s (4.9x).
-- **Results.** The frames are what one-at-a-time `compute` calls in request order give, bit for
-  bit (`crates/axtb-py/tests/test_session.py`, with interleaved and seeded lineages and mixed
-  calctypes): every request runs on its calctype's threads, side by side or not. They are not
-  bit for bit what the same calls on all of the session's threads would give: a calculation's
-  round-off depends on its thread count.
+- **Results.** A frame is what a one-at-a-time `compute` of its request, in request order, on the
+  same thread count gives, bit for bit (`crates/axtb-py/tests/test_session.py`, with interleaved
+  and seeded lineages and mixed calctypes). Its thread count depends on k, the lineages of the
+  batch, and for a large molecule (above about 150 atoms) the round-off of a calculation
+  depends on its thread count: the same request in batches of different sizes can differ in
+  the last bits. Setting the `threads` keyword fixes the count, and with it the bits.
 - **Failures** stay in place and raise `qcdata.ProgramErrors` at the end, with every frame in
   request order.
 
-A single `compute` runs on its calctype's threads too, serialized with the session's other
-calls by its lock; only `compute_many` runs lineages side by side. `reset(lineage=...)` forgets
-every lineage's history (no argument) or one lineage's; `lineages()` lists those with history;
-`plan()` returns the settings pinned at opening (the threads of the input's calctype), the
-resources (the most threads one calculation takes) and the record's static part, with
-`threads_by_calctype`.
+A single `compute` runs on the session's whole count, at most axtb's cap. The session's calls
+are serialized by its lock: concurrent callers on several threads wait their turn, so one
+request runs at a time and gets the whole count; only `compute_many` runs lineages side by side.
+`reset(lineage=...)` forgets every lineage's history (no argument) or one lineage's;
+`lineages()` lists those with history; `plan()` returns the settings pinned at opening (with the
+session's thread count) and the record's static part, with `thread_cap`, the cap of a request of
+the input's calctype.
 
 Interleaved lineages give what separate sequential sessions give, bit for bit, and a session's
 frames equal the CLI's trajectory cases of the golden set bit for bit. A session's methods are
@@ -384,52 +385,62 @@ the driver's:
 
 ## Threads
 
-A calculation runs on exactly its threads and never spawns more. Its threads are:
+A calculation runs on the thread count it is given and never on more. The count is the
+`threads` keyword, else the runner's grant (`ctx.threads`), else (a direct call) this process's
+CPUs (`os.sched_getaffinity`); a keyword above the grant runs on the grant, with the warning
+`resource_capped`. How a runner chooses the count, and how lists and sessions share it, is
+qccompute's, described on its Threads page ([qccompute's documentation](https://qccompute.docs.afh.org)).
 
-- **`compute` under a runner:** the `threads` keyword, at most the grant (above it: the grant
-  and the warning `resource_capped`), or else the grant.
-- **A direct `compute`:** the keyword, or else the threads the plan states.
-- **A session's requests** (`compute` and `compute_many` alike): the keyword, at most the grant
-  (`resource_capped` above it), or else the plan's threads for the request's calctype and the
-  molecule's size, at most the grant. `compute_many` runs lineages side by side as long as
-  their threads fit into the session's threads in all: the grant, and without one (a direct
-  call) this process's CPUs (`os.sched_getaffinity`). So `axtb.Session(inp).compute_many(...)`
-  uses the whole machine when it has many lineages to run; a program that runs several sessions
-  at once passes each a `ctx` with its share of the threads (or `threads` to qccompute's
-  `Runner.session`), or they oversubscribe the CPUs.
+Within the count axtb uses at most its internal cap, where more threads make a calculation no
+faster (the plateau, where the wall time stops falling). The `threads` keyword is a maximum too:
+a caffeine gradient given 8 threads, or asked for 8, runs on 1.
 
-A molecule at or below the size where threads only cost runs on one thread whatever it asked
-for, with the same bits (GFN2-xTB single points up to 10 atoms, Hessians up to 6; g-xTB 2.0.1
-single points up to 9, v1.1 up to 6; GFN-FF single points up to 100 and Hessians up to 10).
+- **Energies and gradients:** at most 8 threads at any size, since beyond 8 the SCF eigensolver
+  only gets slower, and fewer for smaller molecules (the table).
+- **Hessians** run their displacements and perturbations side by side and use all the threads
+  they are given.
+- **Small molecules,** at or below the size where threads only cost, run on one thread, with the
+  same bits (GFN2-xTB single points up to 10 atoms, Hessians up to 6; g-xTB 2.0.1 single points
+  up to 9, v1.1 up to 6; GFN-FF single points up to 100 and Hessians up to 10).
 
-The plan (`axtb.program.plan(inp)` gives it as `resources.threads`; a session's `plan()` per
-calctype) states a thread count for every calculation, never the whole grant: the
-largest count whose parallel efficiency T1/(n Tn) stayed at least 0.5 when measured, by method,
-calctype and size (atoms). The bands, from `axtb_driver::THREAD_BANDS`:
+The caps of energies and gradients, from `axtb_driver::THREAD_CAPS`:
 
 <!-- threads: generated by scripts/gen_python_docs.py -->
 
-| method | calculation | threads by size (atoms) |
-|---|---|---|
-| GFN2-xTB | energy, gradient | 1 (below 100), 2 (100-599), 4 (from 600) |
-| g-xTB 2.0.1 | energy, gradient | 1 (below 100), 2 (100-599), 4 (from 600) |
-| g-xTB v1.1 | energy, gradient | 1 (below 100), 2 (100-299), 4 (from 300) |
-| GFN-FF | energy, gradient | 1 (below 600), 2 (from 600) |
-| GFN2-xTB | Hessian | 1 (below 60), 4 (60-149), 8 (from 150) |
-| g-xTB 2.0.1 | Hessian | 2 (below 10), 4 (10-19), 8 (20-59), 16 (from 60) |
-| g-xTB v1.1 | Hessian | 4 (below 10), 16 (from 10) |
-| GFN-FF | Hessian | 1 (below 100), 2 (from 100) |
+| method | energy, gradient: at most this many threads, by size (atoms) |
+|---|---|
+| GFN2-xTB | 1 (below 60), 4 (60-299), 8 (from 300) |
+| g-xTB 2.0.1 | 1 (below 60), 4 (60-299), 8 (from 300) |
+| g-xTB v1.1 | 1 (below 60), 4 (60-299), 8 (from 300) |
+| GFN-FF | 1 (below 600), 4 (from 600) |
 
 <!-- end threads -->
 
-Measured with the release CLI 0.2.0a1 on an AMD Threadripper PRO 9985WX node, 1 to 16 threads,
-on water, an SN2 complex, mb33, beni-acetone, caffeine, gh106, taxol and (H2O)100 (3 to 300
-atoms), the whole process timed; energies and gradients above 300 atoms on an Intel i9-11900H
-laptop ((H2O)200; GFN-FF: crambin, (H2O)333). Energies and gradients gain little from threads
-below about 100 atoms: a caffeine g-xTB 2.0.1 gradient takes 13.2 ms on 1 thread and 11.9 ms on
-8; taxol's 218 ms on 1 and 156 ms on 2. Hessians parallelize over their displacements and
-perturbations: a taxol g-xTB 2.0.1 Hessian takes 36 s on 1 thread and 3.6 s on 16. A calculation
-that should use more threads asks with the `threads` keyword.
+Measured with the release CLI 0.2.0a1 on an AMD Threadripper PRO 9985WX node, 1 to 16 threads
+(mb33, beni-acetone, caffeine, gh106, taxol and (H2O)100, 16 to 300 atoms; the whole process
+timed), and GFN-FF above 300 atoms on an Intel i9-11900H laptop (crambin, (H2O)333). A caffeine
+g-xTB 2.0.1 gradient takes 13.2 ms on 1 thread and 11.9 ms on 8; taxol's 218 ms on 1, 126 ms
+on 4 and 134 ms on 8; (H2O)100's 912 ms on 1 and 408 ms on 8. A 119-atom gradient took 0.245 s
+on 1 thread, 0.140 s on 8 and 0.187 s on 64. Hessians keep gaining: a taxol g-xTB 2.0.1 Hessian
+takes 36 s on 1 thread and 3.6 s on 16.
+
+**Sessions** share their count like a list: a session's count is its `threads` keyword, else
+the grant, else this process's CPUs, and the requests running at once divide it. A single
+`compute` runs alone (concurrent callers wait their turn) on the whole count; a `compute_many`
+runs min(lineages, count) lineages at once, each request on `count // k`. Within its share, a
+request uses at most axtb's cap. So `axtb.Session(inp).compute_many(...)` without a `ctx` uses
+the whole machine when it has many lineages; a program that runs several sessions at once
+gives each its share (`ctx`, or the `threads` keyword).
+
+**Bits.** A calculation's bits repeat on one machine and thread count. Up to about 150 atoms
+they are the same on 1, 2, 4 and 8 threads; above that, round-off depends on the thread count,
+so a large molecule's bits can depend on the count it is given (the grant, a list's or a
+session's share). Set the `threads` keyword for bit-reproducible large systems.
+
+**The plan** states no thread count: `axtb.program.plan(inp)` has no `resources.threads` (the
+runner chooses the count), and its record gives `thread_cap`, the most threads the calculation
+uses of those it is given (None: no cap). The CLI runs on the threads a request gives (default
+1) with the one-thread rule above, and no other cap.
 
 ## Accuracy
 
@@ -538,12 +549,13 @@ with session(inp) as s:                               # qccompute's session prot
     frame = s.compute(positions)
 ```
 
-**A session's threads under qccompute.** qccompute grants a session what its input asks
-for (the plan's threads for the input's calctype: 1 for a small molecule's gradient), unless
-`session(inp, threads=N)` says more. So `compute_many` fans lineages out only when the session
-is opened with `threads`. A NEB step of 12 caffeine images (g-xTB 2.0.1 gradients, warm) took
-130 ms with `session(inp)` and 20 ms with `session(inp, threads=8)` on an 8-core laptop, with
-the same frames bit for bit.
+**A session's threads under qccompute.** qccompute gives a session its count
+([Threads](#threads)): its `threads` keyword, else the runner's whole count, or for a
+subprogram's session its parent's. qccompute 0.23.0a7 and earlier grant a session the plan's
+threads instead, and axtb's plan states none, which those runners read as 1: there, open the
+session with `session(inp, threads=N)` for `compute_many` to fan out. A NEB step of 12 caffeine
+images (g-xTB 2.0.1 gradients, warm) took 130 ms on 1 thread and 20 ms with 8 on an 8-core
+laptop, with the same frames bit for bit.
 
 `axtb.program` declares energies, gradients and Hessians of every method, sessions, in-process
 and thread-safe; `python -m qccompute.serve axtb` serves it to workers. `capabilities()`,

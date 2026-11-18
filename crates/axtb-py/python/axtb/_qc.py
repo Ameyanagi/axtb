@@ -2,11 +2,12 @@
 """``axtb.compute``: one calculation of a `qcdata.ProgramInput`, and the mapping of the
 driver's response onto qcdata (`SinglePointData`, ``record``, ``execution``).
 
-The input is planned (`axtb._keywords.plan_input`), its threads chosen (`threads`), and the
-driver runs it as the CLI does (`axtb._axtb.compute_once`: the same calculator, threads rule and
-numbers, bit for bit). The response becomes qcdata's typed fields (`results`), axtb's own detail
-goes in ``record`` (`record`), phase timings in ``execution.timings``. A refused input or a
-failed calculation raises `qcdata.ProgramError` with the whole failed output attached.
+The input is planned (`axtb._keywords.plan_input`), its threads chosen (`count`, at most axtb's
+cap: `capped`), and the driver runs it as the CLI does (`axtb._axtb.compute_once`: the same
+calculator, threads rule and numbers, bit for bit). The response becomes qcdata's typed fields
+(`results`), axtb's own detail goes in ``record`` (`record`), phase timings in
+``execution.timings``. A refused input or a failed calculation raises `qcdata.ProgramError` with
+the whole failed output attached.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -45,10 +46,21 @@ from qcdata import (
 
 from . import _accuracy, _axtb
 from ._errors import from_driver
-from ._keywords import Planned, plan_input, plan_threads
+from ._keywords import Planned, plan_input, thread_cap
 from ._models import build
 
-__all__ = ["COMMIT", "VERSION", "compute", "provenance", "record", "results", "static_results", "task", "threads"]
+__all__ = [
+    "COMMIT",
+    "VERSION",
+    "capped",
+    "compute",
+    "count",
+    "provenance",
+    "record",
+    "results",
+    "static_results",
+    "task",
+]
 
 
 def _version() -> str:
@@ -106,40 +118,24 @@ def _keyword_threads(p: Planned, grant: int | None) -> tuple[int, list[ProgramWa
     return p.threads, [], "the keyword"
 
 
-def threads(p: Planned, calctype: str, ctx: Any) -> tuple[int, list[ProgramWarning], str]:
-    """The threads of one calculation, the warnings and the reason: the ``threads`` keyword, at
-    most the grant (``resource_capped`` above it); without the keyword the grant; without a
-    grant (a direct call) the plan's threads."""
+def count(p: Planned, ctx: Any) -> tuple[int, list[ProgramWarning], str]:
+    """The thread count of a calculation or a session, the warnings and the reason: the
+    ``threads`` keyword, at most the grant (``resource_capped`` above it); without the keyword
+    the grant; without a grant (a direct call) this process's CPUs."""
     grant = getattr(ctx, "threads", None) if ctx is not None else None
     if p.threads is not None:
         return _keyword_threads(p, grant)
     if grant is not None:
         return grant, [], "the runner's grant"
-    planned = plan_threads(p, calctype)
-    return planned, [], f"a direct call: the plan's {planned}"
+    n = _cpus()
+    return n, [], f"a direct call: this process's {n} CPUs"
 
 
-def session_threads(
-    p: Planned, calctypes: Iterable[str], ctx: Any
-) -> tuple[dict[str, tuple[int, str]], int, list[ProgramWarning]]:
-    """A session's threads per calculation of each calctype (with the reason), its threads in all,
-    and the warnings. Per calculation: the ``threads`` keyword, at most the grant
-    (``resource_capped`` above it), else the plan's threads for the calctype and size, at most
-    the grant. In all (what ``compute_many`` fills with the lineages it runs side by side): the
-    grant, and without one (a direct call) this process's CPUs."""
-    grant = getattr(ctx, "threads", None) if ctx is not None else None
-    total = grant if grant is not None else _cpus()
-    if p.threads is not None:
-        n, warnings, why = _keyword_threads(p, grant)
-        return {c: (n, why) for c in calctypes}, total, warnings
-    out = {}
-    for c in calctypes:
-        planned = plan_threads(p, c)
-        if grant is not None and planned > grant:
-            out[c] = (grant, f"the plan's {planned} for a {c}, capped to the {grant} granted")
-        else:
-            out[c] = (planned, f"the plan's {planned} for a {c}")
-    return out, total, []
+def capped(p: Planned, calctype: str, n: int) -> int:
+    """The threads a calculation of `calctype` runs on when given `n`: at most axtb's internal
+    cap for its method and size (`axtb._keywords.thread_cap`)."""
+    cap = thread_cap(p, calctype)
+    return n if cap is None else min(n, cap)
 
 
 def implied(outputs: frozenset[str] | set[str]) -> frozenset[str]:
@@ -579,9 +575,9 @@ def compute(inp: ProgramInput, ctx: Any = None) -> ProgramOutput[ProgramInput, S
         e.output = failed_output(inp, e)
         raise
     calctype = inp.calctype.value
-    n, warnings, why = threads(p, calctype, ctx)
+    n, warnings, why = count(p, ctx)
     resolved = _build(Resolved, settings={**p.settings, "threads": n}, reasons={**p.reasons, "threads": why})
-    request = json.dumps({**p.request, "threads": n}, separators=(",", ":"))
+    request = json.dumps({**p.request, "threads": capped(p, calctype, n)}, separators=(",", ":"))
     factor, h, acc_record, acc_warnings = accuracy(p, p.accuracy, calctype)
     warnings = warnings + acc_warnings
     try:

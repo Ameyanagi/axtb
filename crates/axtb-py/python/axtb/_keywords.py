@@ -1829,30 +1829,24 @@ _TASK_FIELDS = {
 # --------------------------------------------------------------------------- threads
 
 
-def plan_threads(p: Planned, calctype_or_largest: str) -> int:
-    """The threads a plan states (`Plan.resources.threads`) for its largest calctype: the
-    ``threads`` keyword when given, else the band of the method, calctype and size
-    (``axtb_driver::THREAD_BANDS``, `thread_bands`; the composite by its g-xTB method)."""
-    if p.threads is not None:
-        return p.threads
-    return _axtb.planned_threads(p.method, calctype_or_largest == "hessian", len(p.numbers))
+def thread_cap(p: Planned, calctype: str) -> int | None:
+    """axtb's internal cap on the threads of one calculation of `calctype` (None: no cap), by
+    method and size (``axtb_driver::thread_cap``; the composite by its g-xTB method)."""
+    return _axtb.thread_cap(p.method, calctype == "hessian", len(p.numbers))
 
 
-def thread_bands() -> str:
-    """The plan's thread bands as a Markdown table (``docs/python.md``, generated)."""
+def thread_caps() -> str:
+    """The internal caps of energies and gradients as a Markdown table (``docs/python.md``,
+    generated)."""
     names = {"gfn2": "GFN2-xTB", "gxtb-v2.0.1": "g-xTB 2.0.1", "gxtb-v1.1": "g-xTB v1.1", "gfnff": "GFN-FF"}
-    rows = ["| method | calculation | threads by size (atoms) |", "|---|---|---|"]
-    for hessian in (False, True):
-        for method, h, bands in _axtb.thread_bands():
-            if h != hessian:
-                continue
-            cells = []
-            for i, (start, n) in enumerate(bands):
-                end = bands[i + 1][0] if i + 1 < len(bands) else None
-                span = f"from {start}" if end is None else (f"below {end}" if start == 0 else f"{start}-{end - 1}")
-                cells.append(f"{n} ({span})" if len(bands) > 1 else f"{n} (every size)")
-            kind = "Hessian" if hessian else "energy, gradient"
-            rows.append(f"| {names[method]} | {kind} | {', '.join(cells)} |")
+    rows = ["| method | energy, gradient: at most this many threads, by size (atoms) |", "|---|---|"]
+    for method, caps in _axtb.thread_caps():
+        cells = []
+        for i, (start, n) in enumerate(caps):
+            end = caps[i + 1][0] if i + 1 < len(caps) else None
+            span = f"from {start}" if end is None else (f"below {end}" if start == 0 else f"{start}-{end - 1}")
+            cells.append(f"{n} ({span})")
+        rows.append(f"| {names[method]} | {', '.join(cells)} |")
     return "\n".join(rows) + "\n"
 
 

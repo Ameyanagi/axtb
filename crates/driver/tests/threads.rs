@@ -72,31 +72,33 @@ fn tiny_one_off_tasks_run_on_one_thread() {
     assert_eq!(out[0], out[1]);
 }
 
-/// The plan's thread bands: every method and calculation has bands from 0 atoms on, in order,
-/// with at least one thread and never fewer for more atoms; one thread at or below the one-thread
-/// size; a few sizes.
+/// axtb's internal caps: every method has caps from 0 atoms on, in order, at least one thread,
+/// never fewer for more atoms and never more than 8; one thread at or below the one-thread size;
+/// Hessians uncapped above it; a few sizes.
 #[test]
-fn planned_threads_by_size() {
-    use axtb_driver::{planned_threads, single_thread_atoms, Method, THREAD_BANDS};
+fn thread_caps_by_size() {
+    use axtb_driver::{single_thread_atoms, thread_cap, Method, THREAD_CAPS};
     for method in [Method::Gfn2, Method::GxtbV2_0_1, Method::GxtbV1_1, Method::Gfnff] {
+        let caps: Vec<_> = THREAD_CAPS.iter().filter(|(m, _)| *m == method).collect();
+        assert_eq!(caps.len(), 1, "{method}");
+        let c = caps[0].1;
+        assert_eq!(c[0].0, 0, "{method}");
+        assert!(c.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 <= w[1].1), "{method}");
+        assert!(c.iter().all(|&(_, n)| (1..=8).contains(&n)));
         for hessian in [false, true] {
-            let bands: Vec<_> = THREAD_BANDS.iter().filter(|(m, h, _)| *m == method && *h == hessian).collect();
-            assert_eq!(bands.len(), 1, "{method} {hessian}");
-            let b = bands[0].2;
-            assert_eq!(b[0].0, 0, "{method} {hessian}");
-            assert!(b.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 <= w[1].1), "{method} {hessian}");
-            assert!(b.iter().all(|&(_, n)| n >= 1));
-            assert_eq!(planned_threads(method, hessian, single_thread_atoms(method, hessian)), 1);
-            for atoms in 0..2000 {
-                assert!(planned_threads(method, hessian, atoms) <= planned_threads(method, hessian, atoms + 1));
-            }
+            assert_eq!(thread_cap(method, hessian, single_thread_atoms(method, hessian)), Some(1));
+        }
+        assert_eq!(thread_cap(method, true, 1000), None);
+        for atoms in 0..2000 {
+            assert!(thread_cap(method, false, atoms) <= thread_cap(method, false, atoms + 1));
         }
     }
-    assert_eq!(planned_threads(Method::Gfn2, false, 24), 1);
-    assert_eq!(planned_threads(Method::GxtbV2_0_1, false, 113), 2);
-    assert_eq!(planned_threads(Method::GxtbV2_0_1, true, 6), 2);
-    assert_eq!(planned_threads(Method::GxtbV2_0_1, true, 24), 8);
-    assert_eq!(planned_threads(Method::GxtbV2_0_1, true, 113), 16);
-    assert_eq!(planned_threads(Method::Gfn2, true, 113), 4);
-    assert_eq!(planned_threads(Method::Gfnff, true, 300), 2);
+    assert_eq!(thread_cap(Method::GxtbV2_0_1, false, 24), Some(1));
+    assert_eq!(thread_cap(Method::GxtbV2_0_1, false, 113), Some(4));
+    assert_eq!(thread_cap(Method::Gfn2, false, 300), Some(8));
+    assert_eq!(thread_cap(Method::Gfn2, false, 9999), Some(8));
+    assert_eq!(thread_cap(Method::Gfnff, false, 300), Some(1));
+    assert_eq!(thread_cap(Method::Gfnff, false, 999), Some(4));
+    assert_eq!(thread_cap(Method::GxtbV2_0_1, true, 3), None);
+    assert_eq!(thread_cap(Method::Gfn2, true, 6), Some(1));
 }
