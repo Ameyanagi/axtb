@@ -3,7 +3,7 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
-## Unreleased
+## 0.2.0-alpha.3 (2026-11-17)
 
 ### Threads: one count per calculation, axtb's internal cap within it
 
