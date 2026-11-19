@@ -1,11 +1,15 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Fixed parameters, thresholds and element helpers of GFN-FF.
 //!
 //! Port of `newGFNFFGenerator` and `gfnff_set_param` (xtb `src/gfnff/gfnff_param.f90`),
 //! `gfnff_thresholds`, `itabrow6`, `zeta` and the factors of `gfnffrab`. xtb compiles with
 //! `-fdefault-real-8`/`-r8`, so every literal of the Fortran is a double; the digits are
-//! kept as written there. Element tables are generated (`data.rs`).
+//! kept as written there. Element tables are generated (`data.rs`); the covalent radii are
+//! axtb-base's (`axtb_base::elements`, the same literals as xtb's `covalentRadD3`), the
+//! `<r4>/<r2>` values axtb-d4's (dftd4's, with xtb's zeros for Am-Rg).
 
 use crate::data;
+use axtb_base::elements::COVALENT_RAD_2009_AA;
 
 /// Bohr radius in Angstrom written into GFN-FF's own setup code (`gfnff_ini`'s `bohr`, the
 /// topological distances of the charge model; unchanged in xtb 6.8.0). The covalent radii
@@ -13,8 +17,8 @@ use crate::data;
 pub const AUTOAA: f64 = 0.52917726;
 /// Hartree to eV of xtb (`autoev`).
 pub const AUTOEV: f64 = 27.21138505;
-/// Boltzmann constant in Eh/K of xtb (`kB`).
-pub const KB: f64 = 3.166808578545117e-06;
+/// Boltzmann constant in Eh/K of xtb (`kB`; from `axtb-base`).
+pub use axtb_base::units::reference::KB_XTB_TBLITE as KB;
 /// pi (xtb writes 3.1415926535897932384626433832795029, which is this value).
 pub const PI: f64 = std::f64::consts::PI;
 /// sqrt(pi) of `xtb_mctc_constants`.
@@ -329,10 +333,10 @@ impl Param {
         p.xbaci[z(52)] = 1.2e0;
         p.xbaci[z(53)] = 1.2e0;
         for i in 0..118 {
-            // covalentRadD3 = r * aatoau * 4/3 with the conventions' bohr
-            p.rcov[i] = data::COVRAD_D3_AA[i] * conv.rcov_aatoau * 4.0 / 3.0;
-            // sqrt(0.5*(r4Overr2*sqrt(Z)))
-            p.sqrtzr4r2[i] = (0.5 * (data::R4_OVER_R2[i] * ((i + 1) as f64).sqrt())).sqrt();
+            // covalentRadD3 = r * aatoau * 4/3 with the conventions' bohr; xtb's radii in Å are
+            // mctc-lib's (axtb-base)
+            p.rcov[i] = COVALENT_RAD_2009_AA[i] * conv.rcov_aatoau * 4.0 / 3.0;
+            p.sqrtzr4r2[i] = sqrt_z_r4_over_r2(i + 1);
         }
         let mut k = 0;
         for i in 0..MAX_ELEM {
@@ -431,15 +435,23 @@ pub fn xatom(z: usize) -> bool {
     matches!(z, 17 | 35 | 53 | 16 | 34 | 52 | 15 | 33 | 51)
 }
 
-/// Charge scaling function of the dispersion (`zeta` in `gfnff_ini`), qref = 0.
+/// Charge scaling function of the dispersion (`zeta` in `gfnff_ini`), qref = 0: dftd4's
+/// `zeta` (axtb-d4) with height 3 and GFN-FF's own effective charges and hardnesses.
 pub fn zeta(z: usize, q: f64) -> f64 {
     let zeff = data::ZETA_ZEFF[z - 1];
-    let c = data::ZETA_C[z - 1];
-    let qmod = zeff + q;
-    if qmod < 0.0 {
-        (3.0f64).exp()
+    axtb_d4::zeta(3.0, data::ZETA_C[z - 1], zeff, zeff + q)
+}
+
+/// `sqrt(0.5 <r4>/<r2> sqrt(Z))` of xtb's `sqrtZr4r2`: dftd4's value (axtb-d4), except that
+/// xtb's `<r4>/<r2>` table (`src/param/sqrtzr4r2.f90`) is zero for Am-Rg (Z = 95-111). It
+/// enters the dispersion only together with the pair's C6, which is zero for these elements
+/// (no references, [`crate::energy`]), so the zeros keep xtb's parameters without changing a
+/// result.
+fn sqrt_z_r4_over_r2(z: usize) -> f64 {
+    if (95..=111).contains(&z) {
+        0.0
     } else {
-        (3.0 * (1.0 - (c * (1.0 - zeff / qmod)).exp())).exp()
+        axtb_d4::r4r2_value(z)
     }
 }
 

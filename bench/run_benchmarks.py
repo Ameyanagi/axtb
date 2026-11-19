@@ -12,7 +12,7 @@ Every program gets identical bohr coordinates (xtb via a Turbomole `coord` file)
   SCF, gradient, file output), OMP_NUM_THREADS = MKL_NUM_THREADS = threads;
 - tblite: Calculator construction + single point inside a fresh Python process with the
   thread environment set before start (tblite reads OMP_NUM_THREADS);
-- axtb: `axtb.singlepoint` in-process (threads=…), and the `axtb` CLI end-to-end.
+- axtb: `axtb.compute` in process (tests/flat.py) (threads=…), and the `axtb` CLI end-to-end.
 Each timing is the minimum over `repeats` runs. Run on an otherwise idle machine.
 """
 
@@ -148,10 +148,10 @@ def _conventions_of(xtb) -> str:
 
 # ---------------------------------------------------------------------------- axtb
 def axtb_run(nums, pos, charge, threads, acc, conventions=None, **kw):
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     conventions = conventions or xtb_path_conventions()  # resolved before the timer (it may run `xtb --version`)
     t = time.perf_counter()
-    r = axtb.singlepoint(nums, pos, charge=float(charge), uhf=uhf_for(nums, charge), gradient=True,
+    r = flat.singlepoint(nums, pos, charge=float(charge), uhf=uhf_for(nums, charge), gradient=True,
                          threads=threads, accuracy=acc, conventions=conventions, **kw)
     r = dict(r)
     r["wall"] = time.perf_counter() - t
@@ -210,6 +210,7 @@ def main() -> int:
             row["axtb_cli"] = best(lambda: axtb_cli(nums, pos, charge, t, 1.0), reps)["wall"]
             print(f"[retime] {row['name']} threads={t}: axtb {row['axtb']:.3f} cli {row['axtb_cli']:.3f}", flush=True)
         import axtb
+        import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
         res["meta"]["axtb_retimed"] = time.strftime("%Y-%m-%d %H:%M")
         args.out.write_text(json.dumps(res, indent=1))
         return 0
@@ -217,6 +218,7 @@ def main() -> int:
     mols = MOLECULES[:3] if args.quick else MOLECULES
     acc = 1.0  # the programs' default accuracy
     import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     import tblite
     param = gfn2_param(False)
     results = {
@@ -284,7 +286,7 @@ def main() -> int:
         nums, pos, charge = read_xyz(ROOT / rel)
         for t in ([int(x) for x in args.hess_threads.split(",")] if not args.quick else [1]):
             x = xtb_run(nums, pos, charge, t, extra=("--hess", "--acc", "0.01"), files=("hessian",))
-            calc = axtb.Calculator("gfn2", nums, pos, charge=float(charge), threads=t)
+            calc = flat.Calculator("gfn2", nums, pos, charge=float(charge), threads=t)
             t0 = time.perf_counter()
             h = calc.hessian(pos, step=0.005, accuracy=0.01, method="numerical")
             wall = time.perf_counter() - t0

@@ -1,111 +1,90 @@
-//! Orbital occupations of g-xTB v1.1 at a finite electronic temperature (the 1.1.0 program's
-//! `-tel <K>`, Fermi smearing) and the entropy term −TS.
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//! Orbital occupations of g-xTB 2.0.1 at a finite electronic temperature (Fermi smearing,
+//! the program's `--etemp`), per spin channel, and the electronic entropy term −TS, on the rules
+//! of [`crate::occupations`] and [`axtb_base::occupations`].
 //!
-//! Program mode reproduces the 1.1.0 program (`solve_` → `occu_`, `fermismear_`; decoded from
-//! the binary, spec §4.17): smearing when T > 1e-6 K, per spin channel with at least one
-//! occupied and one virtual orbital, on that channel's levels (closed shell: both electron
-//! spins on the one set of levels, occupations summed). Newton steps for the Fermi level with
-//! the integer electron count N_σ: start at ½ (ε_N + ε_N+1); f = 1/(eˣ + 1) and
-//! f' = eˣ/(kT (1 + eˣ)²) for x = (ε − μ)/kT < 50, else 0; μ += (N − Σf)/(Σf' + 1e-14); stop
-//! when |N − Σf| ≤ 1e-9 (the occupations are those before the last step) or after 200 steps.
-//! kB: xtb's 3.166808578545117e-6 Eh/K rounded to single precision (3.1668084830016596e-6). The entropy
-//! term is kT Σ [f ln f + (1 − f) ln(1 − f)] over the levels with f > 1e-9 and 1 − f > 1e-9.
-//! The default conventions fill exactly ([`crate::v2::fermi::exact_filling`], CODATA 2022 kB).
+//! - Program mode reproduces the 2.0.1 program (tblite's `get_fermi_filling` as compiled into
+//!   it; decoded from the binary, spec §4.17.1; [`occupations::fill_gxtb201`]): the 0 K Aufbau
+//!   filling fixes the HOMO index h = ⌊n_σ⌋ (+1 when the fractional part exceeds ½), and the
+//!   Fermi level is found by Newton steps for **h electrons**, not n_σ: the program's fractional
+//!   electron count (Σ n⁰ − Q) is rounded per channel at any temperature above 0 K. Start at the
+//!   midpoint of orbitals h and h+1; f = 0 for (ε − μ)/kT ≥ 50; Newton steps while Σ f' > √tiny;
+//!   stop once |h − Σ f| ≤ 2⁻²⁶ (the occupations are those of the level before the last step) or
+//!   after 200 steps. Channels with h = 0 keep the Aufbau occupations. The entropy term is
+//!   tblite's ([`base::entropy_tblite`]). kB = 3.166808578545117e-6 Eh/K (xtb).
+//! - The default conventions fill the integer electron count of each channel with the exact
+//!   Fermi level (Newton steps safeguarded by bisection, to round-off;
+//!   [`base::fill_exact`]), so that the free energy E − TS is variational in the
+//!   occupations and its analytic derivatives need no occupation response; kB of CODATA 2022.
+//!
+//! The entropy term is −TS = kT Σ_σ Σ_i [f ln f + (1 − f) ln(1 − f)] (≤ 0), added to the
+//! electronic energy (the program spreads it over the atoms' electronic energies, so it enters
+//! the SCF energy, its convergence test and the total).
 
-/// The 1.1.0 program's Boltzmann constant (Eh/K): xtb's kB (3.166808578545117e-6) as a
-/// single-precision value (read from `fermismear_`).
-pub const KB_PROGRAM: f64 = 3.166_808_5e-6_f32 as f64;
+use crate::occupations::{self, Fermismear, NEWTON_GXTB201};
+use axtb::units::{reference::KB_XTB_TBLITE, KB_HARTREE};
+use axtb_base::occupations::{self as base, EXACT_MAX_STEPS};
 
-/// Electronic temperature (K) above which the program smears.
-pub const TEL_MIN: f64 = 1e-6;
+/// Boltzmann constant (Eh/K): the program's in program mode, CODATA 2022 otherwise.
+pub fn boltzmann(program: bool) -> f64 {
+    if program {
+        KB_XTB_TBLITE
+    } else {
+        KB_HARTREE
+    }
+}
 
-/// The program's Fermi smearing (`fermismear_`) of `nel` electrons over the levels `emo`
-/// (1 <= nel < emo.len()): occupations and the Fermi level they were computed with (the
-/// program returns the level after one more step).
-pub fn program_filling(nel: usize, kt: f64, emo: &[f64]) -> (Vec<f64>, f64) {
-    let n = emo.len();
+/// Occupations of one spin channel with `nel` (real) electrons over `n` levels at 0 K
+/// ([`base::aufbau`]).
+pub fn aufbau(nel: f64, n: usize) -> Vec<f64> {
     let mut occ = vec![0.0; n];
-    let occt = nel as f64;
-    let mut ef = 0.5 * (emo[nel - 1] + emo[nel]);
-    let mut ef_used = ef;
-    let n2 = n & !1;
-    for _ in 0..200 {
-        ef_used = ef;
-        // two SSE2 lanes over the first 2⌊n/2⌋ levels, then the remainder
-        let (mut t0, mut t1, mut d0, mut d1) = (0.0, 0.0, 0.0, 0.0);
-        let fermi = |e: f64| -> (f64, f64) {
-            let x = (e - ef) / kt;
-            if x < 50.0 {
-                let ex = x.exp();
-                (1.0 / (1.0 + ex), ex / (kt * (1.0 + ex) * (1.0 + ex)))
-            } else {
-                (0.0, 0.0)
-            }
-        };
-        for i in (0..n2).step_by(2) {
-            let (fa, da) = fermi(emo[i]);
-            let (fb, db) = fermi(emo[i + 1]);
-            occ[i] = fa;
-            occ[i + 1] = fb;
-            t0 += fa;
-            t1 += fb;
-            d0 += da;
-            d1 += db;
-        }
-        let mut total = t0 + t1;
-        let mut dtotal = d0 + d1;
-        for i in n2..n {
-            let (f, d) = fermi(emo[i]);
-            occ[i] = f;
-            total += f;
-            dtotal += d;
-        }
-        let diff = occt - total;
-        ef += diff / (dtotal + 1e-14);
-        if diff.abs() <= 1e-9 {
-            break;
-        }
-    }
-    (occ, ef_used)
+    base::aufbau(nel, &mut occ);
+    occ
 }
 
-/// The program's entropy term of one channel (≤ 0).
-pub fn program_entropy(occ: &[f64], kt: f64) -> f64 {
-    let thr = 1e-9;
-    let mut s = 0.0;
-    for &f in occ {
-        if f > thr && 1.0 - f > thr {
-            let g = 1.0 - f;
-            s += f * f.ln() + g * g.ln();
-        }
-    }
-    kt * s
-}
-
-/// Occupations (per electron spin, 0/1 scale), Fermi level and entropy term of one channel
-/// with `nel` electrons over `emo` at `kt` (0: Aufbau).
-pub fn fill_channel(nel: usize, kt: f64, emo: &[f64], program: bool) -> (Vec<f64>, Option<f64>, f64) {
-    let n = emo.len();
-    if kt <= 0.0 || nel == 0 || nel >= n {
-        return ((0..n).map(|i| if i < nel { 1.0 } else { 0.0 }).collect(), None, 0.0);
+/// Occupations, Fermi level and entropy term of one channel with `nel` electrons over the
+/// levels `emo` at `kt` (Eh; 0: Aufbau) in the given conventions.
+pub fn fill_channel(nel: f64, kt: f64, emo: &[f64], program: bool) -> (Vec<f64>, Option<f64>, f64) {
+    let mut occ = vec![0.0; emo.len()];
+    if kt <= 0.0 {
+        base::aufbau(nel, &mut occ);
+        return (occ, None, 0.0);
     }
     if program {
-        let (occ, ef) = program_filling(nel, kt, emo);
-        let ts = program_entropy(&occ, kt);
-        (occ, Some(ef), ts)
+        let mu = occupations::fill_gxtb201(nel, kt, emo, &mut occ, NEWTON_GXTB201);
+        let ts = base::entropy_tblite(&occ, kt);
+        (occ, mu, ts)
     } else {
-        let (occ, mu) = crate::v2::fermi::exact_filling(nel as f64, kt, emo);
-        let ts = crate::v2::fermi::exact_entropy(emo, mu, kt);
+        let mu = base::fill_exact(nel, kt, emo, &mut occ, EXACT_MAX_STEPS);
+        let ts = base::entropy_exact(emo, mu, kt);
         (occ, Some(mu), ts)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ---- v1.1's occupations (from the old tree's fermi.rs) ----
 
-    #[test]
-    fn program_constant() {
-        assert_eq!(KB_PROGRAM, 3.1668084830016596e-6);
+/// Electronic temperature (K) above which the program smears.
+pub const TEL_MIN: f64 = 1e-6;
+
+/// Levels with f or 1 − f at or below this are left out of the program's entropy term.
+const ENTROPY_THR_V1_1: f64 = 1e-9;
+
+/// Occupations (per electron spin, 0/1 scale), Fermi level and entropy term of one channel
+/// with `nel` electrons over `emo` at `kt` (0: Aufbau).
+pub fn fill_channel_v1_1(nel: usize, kt: f64, emo: &[f64], program: bool) -> (Vec<f64>, Option<f64>, f64) {
+    let n = emo.len();
+    let mut occ = vec![0.0; n];
+    if kt <= 0.0 || nel == 0 || nel >= n {
+        base::aufbau(nel as f64, &mut occ);
+        return (occ, None, 0.0);
+    }
+    if program {
+        let ef = occupations::fill_gxtb110(nel, kt, emo, &mut occ, Fermismear::GXTB110);
+        let ts = occupations::entropy_thresholded(&occ, kt, ENTROPY_THR_V1_1);
+        (occ, Some(ef), ts)
+    } else {
+        let mu = base::fill_exact(nel as f64, kt, emo, &mut occ, EXACT_MAX_STEPS);
+        let ts = base::entropy_exact(emo, mu, kt);
+        (occ, Some(mu), ts)
     }
 }

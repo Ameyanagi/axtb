@@ -2,13 +2,17 @@
 # axtb's checks, in two tiers.
 #
 #   scripts/check.sh fast                 no external programs: formatting, lints, docs, the Rust
-#                                         tests, the LGPL-only build, the Python tests from a wheel
-#                                         in a fresh venv, the privacy grep and the crates' copies
-#                                         of the license files
+#                                         tests, the Python tier below, the privacy grep, the
+#                                         crates' copies of the license files and the sources'
+#                                         SPDX headers
+#   scripts/check.sh python               the Python part of fast: a wheel in a fresh venv, the
+#                                         Python tests, the quick Python golden check, ruff and
+#                                         mypy on python/axtb, the generated docs (CI runs it on
+#                                         each supported Python)
 #   scripts/check.sh programs [GATE ...]  the validation gates against xtb, tblite and the g-xTB
 #                                         programs (all, or the named ones); a gate whose programs
 #                                         are not set is reported as skipped
-#   scripts/check.sh all                  both
+#   scripts/check.sh all                  fast and programs
 #   scripts/check.sh list                 the gates of the programs tier: needs and limits
 #
 # The programs come from AXTB_XTB680, AXTB_GXTB2, AXTB_XTB671 and AXTB_GXTB11_DIR
@@ -78,8 +82,7 @@ license_files() {
   # cargo packages only the files inside a crate's directory, and the wheel only those next to
   # pyproject.toml, so each crate keeps copies of the texts it needs; they must equal the top level
   local need=(
-    "axtb d4 solvation gfnff driver axtb-cli axtb-py|COPYING COPYING.LESSER NOTICE"
-    "gxtb|COPYING NOTICE"
+    "base axtb d4 solvation gfnff gxtb driver axtb-cli axtb-py|COPYING COPYING.LESSER NOTICE"
     "axtb-py|LICENSE"
   )
   local entry crates files c f bad=0
@@ -98,13 +101,26 @@ license_files() {
   return $bad
 }
 
-lgpl_build() {
-  # the build without g-xTB (LGPL-3.0-or-later) compiles cleanly and does not contain axtb-gxtb
-  cargo clippy -p axtb-cli -p axtb-py --no-default-features -- -D warnings || return 1
-  if cargo tree -p axtb-cli -p axtb-py --no-default-features -e normal | grep -q axtb-gxtb; then
-    echo "axtb-gxtb is in the --no-default-features dependency tree"
-    return 1
-  fi
+spdx_headers() {
+  # every Rust file of the crates and every Python file of the crates and of scripts/ starts with
+  # the SPDX line (after a Python file's shebang); third_party/ keeps its own headers
+  local f want top n=0 bad=0
+  while IFS= read -r -d '' f; do
+    [ -L "$f" ] && continue
+    n=$((n + 1))
+    case $f in
+      *.rs) want='// SPDX-License-Identifier: LGPL-3.0-or-later' ;;
+      *) want='# SPDX-License-Identifier: LGPL-3.0-or-later' ;;
+    esac
+    top=$(head -n 1 "$f")
+    if [[ $f != *.rs && $top == '#!'* ]]; then top=$(sed -n 2p "$f"); fi
+    if [ "$top" != "$want" ]; then
+      echo "$f: does not start with \"$want\""
+      bad=1
+    fi
+  done < <(git ls-files -z -- 'crates/*.rs' 'crates/*.py' 'crates/*.pyi' 'scripts/*.py')
+  [ $bad = 0 ] && echo "SPDX headers: all $n source files start with LGPL-3.0-or-later"
+  return $bad
 }
 
 make_venv() {
@@ -119,7 +135,10 @@ make_venv() {
     PIP=("$PY" -m pip install -q)
     REINSTALL=--force-reinstall
   fi
-  "${PIP[@]}" maturin numpy pytest "tblite==0.8.0" "dftd4==4.3.1" qccompute
+  # the qc* releases the Python interface is built on (qcdata; qccompute for check_program and
+  # the runner), the linters of python/axtb
+  "${PIP[@]}" maturin numpy pytest "tblite==0.8.0" "dftd4==4.3.1" "qcdata>=0.24.0,<0.25" \
+    "qccompute[testing]>=0.23.0,<0.24" ruff mypy
 }
 
 wheel() {
@@ -137,18 +156,41 @@ python_tests() {
   env "${unset[@]}" "$PY" -m pytest -q -p no:cacheprovider crates/axtb-py/tests tests/reference_matrix
 }
 
+python_lint() {
+  (cd crates/axtb-py && "$PY" -m ruff check python && "$PY" -m ruff format --check python && "$PY" -m mypy)
+}
+
+golden_quick() {
+  # scripts/golden_python.py on the water and caffeine cases of a fresh CLI recording (golden
+  # files are machine-specific)
+  cargo build --release -q -p axtb-driver --example golden_trajectory || return 1
+  local dir=$CHECK_DIR/golden
+  rm -rf "$dir"
+  python3 scripts/golden.py record "$dir" --only water,caffeine \
+    --trajectory "$ROOT/target/release/examples/golden_trajectory" > "$CHECK_DIR/golden-record.log" || return 1
+  "$PY" scripts/golden_python.py compare "$dir" --quick --interleave | tail -n 1
+  return "${PIPESTATUS[0]}"
+}
+
+python_tier() {
+  step "release CLI" cargo build --release -q -p axtb-cli
+  step "fresh venv ($CHECK_DIR/venv)" make_venv
+  step "wheel (maturin build) installed in the venv" wheel
+  step "Python tests (crates/axtb-py/tests, tests/reference_matrix)" python_tests
+  step "Python golden check (water, caffeine; scripts/golden_python.py)" golden_quick
+  step "ruff and mypy (python/axtb)" python_lint
+  step "generated docs (docs/python.md)" "$PY" scripts/gen_python_docs.py --check
+}
+
 fast() {
   step "cargo fmt --check" cargo fmt --all --check
   step "clippy -D warnings" cargo clippy --workspace --all-targets -- -D warnings
   step "rustdoc -D warnings" env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps -q
   step "cargo test --release" cargo test --workspace --release -q
-  step "LGPL-only build (--no-default-features)" lgpl_build
-  step "release CLI" cargo build --release -q -p axtb-cli
-  step "fresh venv ($CHECK_DIR/venv)" make_venv
-  step "wheel (maturin build) installed in the venv" wheel
-  step "Python tests (crates/axtb-py/tests, tests/reference_matrix)" python_tests
+  python_tier
   step "privacy grep" privacy
   step "license files in the crates" license_files
+  step "SPDX headers of the source files" spdx_headers
 }
 
 # ---------------------------------------------------------------------------------- programs
@@ -273,6 +315,7 @@ tier=${1:-fast}
 shift || true
 case $tier in
   fast) fast ;;
+  python) python_tier ;;
   programs) programs_tier "$@" ;;
   all)
     fast
@@ -283,7 +326,7 @@ case $tier in
     exit 0
     ;;
   *)
-    sed -n '2,12p' "$0"
+    sed -n '2,16p' "$0"
     exit 2
     ;;
 esac

@@ -1,12 +1,14 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! g-xTB 2.0.1 Hessians at a finite electronic temperature (Fermi smearing) against a tight
 //! reference: Richardson extrapolation of central differences of analytic gradients (h = 2e-3
 //! and 1e-3 bohr) with SCFs converged to 1e-12 Eh / 5e-13, in both conventions.
 //!
 //! `V2_ETEMP_HESS=reference/water:1000,...` selects molecule:temperature pairs.
 
-use axtb_gxtb::v2::hessian::{symmetrize, AnalyticOptions};
-use axtb_gxtb::v2::response::CpksOptions;
-use axtb_gxtb::v2::scf::{ScfResult, Setup};
+use axtb_base::fd::symmetrize;
+use axtb_gxtb::hessian::AnalyticOptions;
+use axtb_gxtb::response::CpksOptions;
+use axtb_gxtb::scf::{ScfResult, Setup};
 use axtb_gxtb::{Conventions, ScfOptions};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -20,7 +22,7 @@ fn molecule(rel: &str, conv: Conventions) -> axtb::Molecule {
     let input: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
     let uhf = input["uhf"].as_u64().unwrap() as usize;
     let xyz = std::fs::read_to_string(dir.join("mol.xyz")).unwrap();
-    axtb_gxtb::v2::read_xyz(&xyz, input["charge"].as_f64().unwrap(), Some(uhf), conv).unwrap()
+    axtb_gxtb::model::read_xyz(&xyz, input["charge"].as_f64().unwrap(), Some(uhf), conv).unwrap()
 }
 
 fn tight(c: Conventions, etemp: f64) -> ScfOptions {
@@ -30,13 +32,13 @@ fn tight(c: Conventions, etemp: f64) -> ScfOptions {
         energy_tol: Some(1e-12),
         residual_tol: Some(5e-13),
         max_iter: 1000,
-        keep_orbitals: true,
+        all_orbitals: true,
         ..Default::default()
     }
 }
 
 fn scf(m: &axtb::Molecule, opts: &ScfOptions) -> (Setup, ScfResult) {
-    let s = Setup::new(m, opts.conventions).unwrap();
+    let s = Setup::new(m, axtb_gxtb::model::Model::v2_0_1(opts.conventions)).unwrap();
     let r = s.scf(opts).unwrap();
     (s, r)
 }

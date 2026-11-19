@@ -1,4 +1,5 @@
-//! Analytic gradients of g-xTB v1.1 ([`Setup::gradient`]) against finite differences of our
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//! Analytic gradients of g-xTB v1.1 (the engine's [`Setup::gradient`]) against finite differences of our
 //! own energies at tight SCF convergence, for the exact Fock matrix (default, stationary SCF)
 //! and the program's (with the Z-vector response), and against the g-xTB 1.1.0 program's
 //! numerical gradients (program conventions).
@@ -10,7 +11,9 @@
 //! energy is not stationary in the density. `gradient_tight` is the same run with the SCF
 //! thresholds tightened to 1e-12 Eh / 1e-10 (gdb, `scripts/make_reference.py`).
 
-use axtb_gxtb::{read_xyz, Calculator, Conventions, ScfOptions, Setup};
+use axtb::method::{Method, Want};
+use axtb_gxtb::scf::Setup;
+use axtb_gxtb::{read_xyz, Calculator, Conventions, Options, ScfOptions};
 use serde_json::Value;
 use std::path::Path;
 
@@ -59,6 +62,11 @@ fn program_gradient(name: &str, file: &str, nat: usize) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// The engine's v1.1 setup in the conventions `c`.
+fn setup(mol: &axtb::Molecule, c: Conventions) -> Setup {
+    Setup::new(mol, axtb_gxtb::model::Model::v1_1(c)).unwrap()
+}
+
 fn tight(conventions: Conventions) -> ScfOptions {
     ScfOptions { energy_tol: Some(1e-13), density_tol: Some(1e-11), conventions, ..Default::default() }
 }
@@ -66,11 +74,11 @@ fn tight(conventions: Conventions) -> ScfOptions {
 fn energy(mol: &axtb::Molecule, atom: usize, dir: usize, d: f64, c: Conventions) -> f64 {
     let mut m = mol.clone();
     m.positions[atom][dir] += d;
-    Setup::new(&m).unwrap().scf(&tight(c)).unwrap().energies.total
+    setup(&m, c).scf(&tight(c)).unwrap().energies.total
 }
 
 fn analytic(mol: &axtb::Molecule, opts: &ScfOptions) -> Vec<[f64; 3]> {
-    let st = Setup::new(mol).unwrap();
+    let st = setup(mol, opts.conventions);
     st.gradient(&st.scf(opts).unwrap()).unwrap()
 }
 
@@ -175,11 +183,11 @@ fn gradient_is_translation_invariant_and_default_convergence_suffices() {
     for (c, tol) in [(Conventions::Axtb, 5e-6), (Conventions::Gxtb, 5e-6)] {
         for name in ALL {
             let mol = molecule(name);
-            let opts = ScfOptions { conventions: c, ..Default::default() };
+            let opts = Options { conventions: c, ..Default::default() };
             let mut calc =
                 Calculator::new(axtb_gxtb::Version::V1_1, &mol.numbers, &mol.positions, mol.charge, mol.uhf, opts)
                     .unwrap();
-            let g = calc.singlepoint(&mol.positions, true).unwrap().singlepoint.gradient.unwrap();
+            let g = calc.singlepoint(&mol.positions, &Want::gradient(true)).unwrap().gradient.unwrap();
             for k in 0..3 {
                 let s: f64 = g.iter().map(|v| v[k]).sum();
                 assert!(s.abs() < 1e-9, "{c:?} {name}: sum {k} = {s}");

@@ -77,13 +77,9 @@ pub struct D4Model {
     pub(crate) mref: usize,
 }
 
-/// Conversion factor Angstrom -> bohr exactly as mctc-lib evaluates it.
-pub const AATOAU: f64 = {
-    let hbar = data::PLANCK / (2.0 * data::PI);
-    let bohr = hbar / (data::ELECTRON_MASS * data::SPEED_OF_LIGHT * data::FINE_STRUCTURE);
-    let autoaa = bohr * 1e10;
-    1.0 / autoaa
-};
+/// Conversion factor Angstrom -> bohr exactly as mctc-lib evaluates it (CODATA 2018 derived;
+/// `axtb_base::units::reference::MCTC_AATOAU`).
+pub const AATOAU: f64 = axtb_base::units::reference::MCTC_AATOAU;
 
 /// D3/D4 covalent radius (bohr): 4/3 * Pyykko radius.
 #[inline]
@@ -166,43 +162,47 @@ pub fn trapzd(pol: &[f64; NFREQ]) -> f64 {
     s
 }
 
-/// Number of Gaussian weights per reference (`set_refgw`).
-fn reference_ngw(z: usize) -> [u32; MAX_REF] {
+/// Number of Gaussian weights of each reference system (`set_refgw`) from the reference
+/// coordination numbers `refcn` of one element (dftd4's `refcn`, or another program's table):
+/// with icn = nint(refcn) capped at 19 and c(icn) the number of references with that icn (plus
+/// one for icn = 0), ngw = c (c + 1)/2.
+pub fn reference_ngw(refcn: &[f64]) -> Vec<u32> {
     const MAX_CN: usize = 19;
-    let mut ngw = [1u32; MAX_REF];
-    let nref = data::REFN[z - 1] as usize;
     let mut cnc = [0u32; MAX_CN + 1];
     cnc[0] = 1;
     // nint: round half away from zero
     let icn = |x: f64| -> usize { (x.round() as i64).clamp(0, MAX_CN as i64) as usize };
-    for ir in 0..nref {
-        cnc[icn(data::REFCN[z - 1][ir])] += 1;
+    for &cn in refcn {
+        cnc[icn(cn)] += 1;
     }
-    for ir in 0..nref {
-        let c = cnc[icn(data::REFCN[z - 1][ir])];
-        ngw[ir] = c * (c + 1) / 2;
-    }
+    refcn.iter().map(|&cn| cnc[icn(cn)] * (cnc[icn(cn)] + 1) / 2).collect()
+}
+
+/// [`reference_ngw`] of dftd4's references of element `z`, padded with 1.
+fn dftd4_reference_ngw(z: usize) -> [u32; MAX_REF] {
+    let nref = data::REFN[z - 1] as usize;
+    let mut ngw = [1u32; MAX_REF];
+    ngw[..nref].copy_from_slice(&reference_ngw(&data::REFCN[z - 1][..nref]));
     ngw
 }
 
-/// Reference polarizabilities with the hydrogen contributions removed
-/// (`set_refalpha_eeq` / `set_refalpha_gfn2`).
-fn reference_alpha(z: usize, ga: f64, gc: f64, model: ChargeModel) -> [[f64; NFREQ]; MAX_REF] {
+/// Reference polarizabilities of element `z` (1-based) on the imaginary frequency grid, with
+/// the hydrogen contributions of the secondary systems removed (the loop of dftd4's
+/// `set_refalpha_eeq` / `set_refalpha_gfn2`):
+/// `max(0, ascale (alpha_iw - hcount sscale secaiw s))` for each of the `data::REFN[z - 1]`
+/// references, where `s = secondary_scale(is, ir)` is the charge scaling of the secondary
+/// system `is` (1-based) of reference `ir`: dftd4's `zeta` for D4 ([`D4Model`]), 1 for the
+/// D3-type dispersion of GFN-FF (whose `s · x` is then `x` exactly). Entries of references
+/// without a secondary system and beyond `REFN` are zero.
+pub fn reference_alpha(z: usize, secondary_scale: impl Fn(usize, usize) -> f64) -> [[f64; NFREQ]; MAX_REF] {
     let mut alpha = [[0.0; NFREQ]; MAX_REF];
     let nref = data::REFN[z - 1] as usize;
-    let refh = match model {
-        ChargeModel::Eeq => &data::REFH_EEQ,
-        ChargeModel::Gfn2 => &data::REFH_GFN2,
-    };
     for ir in 0..nref {
         let is = data::REFSYS[z - 1][ir] as usize;
         if is == 0 {
             continue;
         }
-        // NB: dftd4 evaluates zeff and hardness of the *secondary system index*
-        let iz = tab(&data::EFFECTIVE_NUCLEAR_CHARGE, is);
-        let gam = tab(&data::CHEMICAL_HARDNESS, is) * gc;
-        let zv = zeta(ga, gam, iz, refh[z - 1][ir] + iz);
+        let zv = secondary_scale(is, ir);
         let ascale = data::ASCALE[z - 1][ir];
         let hcount = data::HCOUNT[z - 1][ir];
         for k in 0..NFREQ {
@@ -214,9 +214,27 @@ fn reference_alpha(z: usize, ga: f64, gc: f64, model: ChargeModel) -> [[f64; NFR
     alpha
 }
 
-/// Reference C6 coefficients of all species pairs by Casimir-Polder integration of the
-/// reference polarizabilities, block `[isp*nsp + jsp][iref][jref]`.
-fn reference_c6_table(nref: &[usize], aiw: &[[[f64; NFREQ]; MAX_REF]]) -> Vec<[[f64; MAX_REF]; MAX_REF]> {
+/// dftd4's reference polarizabilities: [`reference_alpha`] with the `zeta` charge scaling of
+/// the secondary systems (`set_refalpha_eeq` / `set_refalpha_gfn2`).
+fn dftd4_reference_alpha(z: usize, ga: f64, gc: f64, model: ChargeModel) -> [[f64; NFREQ]; MAX_REF] {
+    let refh = match model {
+        ChargeModel::Eeq => &data::REFH_EEQ,
+        ChargeModel::Gfn2 => &data::REFH_GFN2,
+    };
+    reference_alpha(z, |is, ir| {
+        // NB: dftd4 evaluates zeff and hardness of the *secondary system index*
+        let iz = tab(&data::EFFECTIVE_NUCLEAR_CHARGE, is);
+        let gam = tab(&data::CHEMICAL_HARDNESS, is) * gc;
+        zeta(ga, gam, iz, refh[z - 1][ir] + iz)
+    })
+}
+
+/// Reference C6 coefficients of all pairs of species by Casimir-Polder integration of their
+/// reference polarizabilities `aiw[isp][iref]` (e.g. from [`reference_alpha`]):
+/// `3/pi * trapzd(alpha_A * alpha_B)` on the 23-point grid ([`trapzd`]), each product formed
+/// with the species of the larger index first. `nref[isp]` references per species; returns the
+/// blocks `[isp * nsp + jsp][iref][jref]`, zero beyond `nref`.
+pub fn reference_c6_table(nref: &[usize], aiw: &[[[f64; NFREQ]; MAX_REF]]) -> Vec<[[f64; MAX_REF]; MAX_REF]> {
     let nsp = nref.len();
     let thopi = 3.0 / data::PI;
     let mut c6ref = vec![[[0.0; MAX_REF]; MAX_REF]; nsp * nsp];
@@ -294,7 +312,7 @@ impl D4Model {
         let eta = species.iter().map(|&z| tab(&data::CHEMICAL_HARDNESS, z)).collect();
         let r4r2 = species.iter().map(|&z| r4r2_value(z)).collect();
         let nref: Vec<usize> = species.iter().map(|&z| data::REFN[z - 1] as usize).collect();
-        let ngw = species.iter().map(|&z| reference_ngw(z)).collect();
+        let ngw = species.iter().map(|&z| dftd4_reference_ngw(z)).collect();
         let refcn = species
             .iter()
             .zip(&nref)
@@ -314,7 +332,7 @@ impl D4Model {
             })
             .collect();
         let aiw: Vec<[[f64; NFREQ]; MAX_REF]> =
-            species.iter().map(|&z| reference_alpha(z, ga, gc, charge_model)).collect();
+            species.iter().map(|&z| dftd4_reference_alpha(z, ga, gc, charge_model)).collect();
 
         let c6ref = reference_c6_table(&nref, &aiw);
         let mref = nref.iter().copied().max().unwrap_or(0);
@@ -579,10 +597,25 @@ impl D4Model {
         gw: &[[f64; MAX_REF]],
         dgw: &[[f64; MAX_REF]],
     ) -> (f64, f64, f64) {
+        self.pair_c6_from_weights(iat, jat, (&gw[iat], &dgw[iat]), (&gw[jat], &dgw[jat]))
+    }
+
+    /// C6 of the pair (`iat`, `jat`) from reference weights given for this pair, with the
+    /// derivative contractions: for `(wi, di)` of `iat` and `(wj, dj)` of `jat` returns
+    /// `(sum_ab wi_a wj_b C6ref_ab, sum_ab di_a wj_b C6ref_ab, sum_ab wi_a dj_b C6ref_ab)`,
+    /// summed over the references in order. For weighting schemes other than the model's own,
+    /// e.g. pair-specific weights; with the model's weights it is the C6 of
+    /// [`atomic_c6`](Self::atomic_c6).
+    #[inline]
+    pub fn pair_c6_from_weights(
+        &self,
+        iat: usize,
+        jat: usize,
+        (wi, di): (&[f64; MAX_REF], &[f64; MAX_REF]),
+        (wj, dj): (&[f64; MAX_REF], &[f64; MAX_REF]),
+    ) -> (f64, f64, f64) {
         let (isp, jsp) = (self.id[iat], self.id[jat]);
         let blk = self.c6_block(isp, jsp);
-        let (wi, wj) = (&gw[iat], &gw[jat]);
-        let (di, dj) = (&dgw[iat], &dgw[jat]);
         let (mut c6, mut dci, mut dcj) = (0.0, 0.0, 0.0);
         for iref in 0..self.nref[isp] {
             for jref in 0..self.nref[jsp] {

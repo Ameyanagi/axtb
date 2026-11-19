@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! `axtb` command-line driver: one calculation per call, the result as JSON on stdout.
 //!
 //! `axtb mol.xyz [options]` runs the structure file (XYZ, Ångström); `axtb --json` reads a
@@ -9,7 +10,7 @@
 //! `error: <message>` on stderr; exit code 1. Invalid arguments and unreadable files are usage
 //! errors (`error: ...` on stderr, exit code 2).
 
-use axtb_driver::{Method, Request, Temperatures};
+use axtb_driver::{Method, Request, ScfRetry, Temperatures};
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::io::Read;
@@ -83,6 +84,17 @@ struct Cli {
     #[arg(long = "max-iter", value_name = "N", help_heading = "SCF (GFN2-xTB, g-xTB)")]
     max_iter: Option<usize>,
 
+    /// SCF retry after an SCF that fails: a fresh SCF with another electronic temperature (K)
+    /// and/or iteration limit, e.g. etemp=1000,max_iter=1000; repeat it for a ladder, tried in
+    /// order (none below --etemp)
+    #[arg(
+        long = "scf-retry",
+        value_name = "etemp=K,max_iter=N",
+        value_parser = scf_retry,
+        help_heading = "SCF (GFN2-xTB, g-xTB)"
+    )]
+    scf_retry: Vec<ScfRetry>,
+
     /// GFN2-xTB SCF mixer: auto, broyden or diis (default: the conventions')
     #[arg(long, value_name = "MIXER", help_heading = "SCF (GFN2-xTB, g-xTB)")]
     mixer: Option<String>,
@@ -113,6 +125,14 @@ struct Cli {
     /// Add the Mayer-Wiberg bond orders
     #[arg(long = "wbo", help_heading = "SCF (GFN2-xTB, g-xTB)")]
     bond_orders: bool,
+
+    /// Add the AO overlap matrix of the SCF (axtb's AO order)
+    #[arg(long, help_heading = "SCF (GFN2-xTB, g-xTB)")]
+    overlap: bool,
+
+    /// Add the Hamiltonian whose eigenvectors are the orbitals, and the overlap (axtb's AO order)
+    #[arg(long, help_heading = "SCF (GFN2-xTB, g-xTB)")]
+    hamiltonian: bool,
 
     /// Implicit solvent ALPB (GFN2-xTB; g-xTB with --solvation-correction)
     #[arg(long, value_name = "SOLVENT", conflicts_with = "gbsa", help_heading = "Implicit solvent")]
@@ -225,6 +245,27 @@ fn usage(msg: impl std::fmt::Display) -> ! {
     Cli::command().error(clap::error::ErrorKind::ValueValidation, msg).exit()
 }
 
+/// One `--scf-retry`: `etemp=K`, `max_iter=N` or both, comma-separated.
+fn scf_retry(text: &str) -> Result<ScfRetry, String> {
+    let mut r = ScfRetry::default();
+    for item in text.split(',') {
+        let (key, value) =
+            item.split_once('=').ok_or_else(|| format!("{item:?} is not key=value (etemp=K, max_iter=N)"))?;
+        let value = value.trim();
+        match key.trim() {
+            "etemp" if r.etemp.is_none() => {
+                r.etemp = Some(value.parse().map_err(|_| format!("etemp: a temperature in K, not {value:?}"))?)
+            }
+            "max_iter" | "max-iter" if r.max_iter.is_none() => {
+                r.max_iter = Some(value.parse().map_err(|_| format!("max_iter: an iteration limit, not {value:?}"))?)
+            }
+            "etemp" | "max_iter" | "max-iter" => return Err(format!("{} given twice", key.trim())),
+            other => return Err(format!("unknown key {other:?} (etemp, max_iter)")),
+        }
+    }
+    Ok(r)
+}
+
 /// The request of the command line: from stdin with `--json`, else from the structure file
 /// and the options.
 fn request(mut cli: Cli) -> Result<Request, axtb_driver::Error> {
@@ -276,6 +317,7 @@ fn request(mut cli: Cli) -> Result<Request, axtb_driver::Error> {
         accuracy: cli.accuracy,
         etemp: cli.etemp,
         max_iter: cli.max_iter,
+        scf_retries: (!cli.scf_retry.is_empty()).then_some(cli.scf_retry),
         threads: cli.threads,
         dispersion: cli.nodisp.then_some(false),
         mixer: cli.mixer,
@@ -295,6 +337,8 @@ fn request(mut cli: Cli) -> Result<Request, axtb_driver::Error> {
         molden_file,
         molden_cartesian: cli.molden_cartesian,
         bond_orders: cli.bond_orders,
+        overlap: cli.overlap,
+        hamiltonian: cli.hamiltonian,
         vibrations: cli.novib.then_some(false),
         thermo: cli.nothermo.then_some(false),
         analysis_conventions: cli.analysis_conventions,
@@ -353,6 +397,9 @@ fn run() -> ExitCode {
     match std::panic::catch_unwind(|| axtb_driver::run(&req)) {
         Ok(Ok(response)) => {
             if let Some(w) = axtb_driver::eigensolver_warning(&response) {
+                eprintln!("warning: {w}");
+            }
+            for w in axtb_driver::retry_warnings(&response) {
                 eprintln!("warning: {w}");
             }
             match serde_json::to_string(&response) {

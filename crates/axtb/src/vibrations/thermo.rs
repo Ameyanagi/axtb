@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Quasi-RRHO thermochemistry of an ideal gas: translation (ideal gas at pressure p),
 //! rigid rotor (rotational symmetry number from the point group) and harmonic vibrations
 //! whose entropy is interpolated to that of a free rotor below the rotor cutoff (Grimme's
@@ -25,8 +26,8 @@
 
 use super::symmetry::{point_group, xtb_symmetry_number};
 use super::{xtbc, Conventions, LinearTest};
-use crate::error::{Error, Result};
 use crate::units;
+use crate::{Error, Result};
 
 /// Settings of the thermochemistry.
 #[derive(Clone, Debug)]
@@ -114,6 +115,12 @@ pub struct Thermo {
     pub n_modes: usize,
     pub n_inverted: usize,
     pub n_dropped: usize,
+    /// The imaginary frequencies (cm⁻¹, as scaled, negative) inverted into the partition
+    /// function, and those left out.
+    pub inverted_frequencies: Vec<f64>,
+    pub dropped_frequencies: Vec<f64>,
+    /// The average moment of inertia B_av (kg m²) of the quasi-RRHO rotor interpolation.
+    pub average_moment: f64,
     pub zpve: f64,
     pub pressure: f64,
     pub rotor_cutoff: f64,
@@ -247,7 +254,7 @@ pub fn thermochemistry(
     } else {
         point_group(numbers, positions, opts.symmetry_threshold).name
     };
-    let params = conventions.params();
+    let params = super::params(conventions);
     match params.thermo_bohr {
         Some(autoaa) => {
             let (abc, avmom, wt) = axis2_xtb(masses, positions, autoaa);
@@ -264,12 +271,15 @@ pub fn thermochemistry(
                 *v *= opts.frequency_scale;
             }
             let mut n_inverted = 0;
+            let mut inverted_frequencies = Vec::new();
             for v in &mut vibs {
                 if *v < 0.0 && *v > ithr {
+                    inverted_frequencies.push(*v);
                     *v = -*v;
                     n_inverted += 1;
                 }
             }
+            let dropped_frequencies: Vec<f64> = vibs.iter().copied().filter(|v| *v <= 0.0).collect();
             let kept: Vec<f64> = vibs.iter().filter(|v| **v > 0.0).map(|v| v * xtbc::RCMTOAU).collect();
             let n_dropped = vibs.len() - kept.len();
             let zp = 0.5 * kept.iter().sum::<f64>();
@@ -303,6 +313,9 @@ pub fn thermochemistry(
                 n_modes: kept.len(),
                 n_inverted,
                 n_dropped,
+                inverted_frequencies,
+                dropped_frequencies,
+                average_moment: avmom,
                 zpve: zp,
                 pressure: opts.pressure,
                 rotor_cutoff: opts.rotor_cutoff,
@@ -326,12 +339,15 @@ pub fn thermochemistry(
             let mut vibs: Vec<f64> =
                 if atom { Vec::new() } else { frequencies.iter().map(|f| f * opts.frequency_scale).collect() };
             let mut n_inverted = 0;
+            let mut inverted_frequencies = Vec::new();
             for v in &mut vibs {
                 if *v < 0.0 && *v > ithr {
+                    inverted_frequencies.push(*v);
                     *v = -*v;
                     n_inverted += 1;
                 }
             }
+            let dropped_frequencies: Vec<f64> = vibs.iter().copied().filter(|v| *v <= 0.0).collect();
             let kept: Vec<f64> = vibs.iter().filter(|v| **v > 0.0).map(|v| v / units::HARTREE_TO_WAVENUMBER).collect();
             let n_dropped = vibs.len() - kept.len();
             let zp = 0.5 * kept.iter().sum::<f64>();
@@ -366,6 +382,10 @@ pub fn thermochemistry(
                 n_modes: kept.len(),
                 n_inverted,
                 n_dropped,
+                inverted_frequencies,
+                dropped_frequencies,
+                // m_e bohr² in kg m²
+                average_moment: avmom * units::ELECTRON_MASS_KG * (units::AUTOAA * 1e-10).powi(2),
                 zpve: zp,
                 pressure: opts.pressure,
                 rotor_cutoff: opts.rotor_cutoff,

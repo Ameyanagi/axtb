@@ -1,4 +1,5 @@
-"""Molden files of converged orbitals (Python package, qccodec codec and CLI).
+# SPDX-License-Identifier: LGPL-3.0-or-later
+"""Molden files of converged orbitals (Python package and CLI).
 
 Run with the extension built from this tree and the CLI at ``target/release/axtb`` (or
 ``$AXTB_BIN``)::
@@ -26,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
+import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
 
 import axtb
 
@@ -75,8 +78,8 @@ def test_round_trip(method, xyz, charge, uhf):
     the same orbitals; energies and occupations as the result reports them."""
     numbers, pos = molecule(xyz)
     # two stateless single points: the same SCF (a Calculator would start the second from the first)
-    r = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=method, molden=True)
-    rc = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=method, molden="cartesian")
+    r = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=method, molden=True)
+    rc = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method=method, molden="cartesian")
     sph, cart = mc.parse_molden(r["molden"]), mc.parse_molden(rc["molden"])
     sb, cb = mc.Basis(sph), mc.Basis(cart)
     assert mc.orthonormality(sph, sb) < 1e-8
@@ -125,7 +128,7 @@ def test_same_orbitals_as_gxtb_1_1_0(name, uhf):
     prog = mc.parse_molden((d / "molden.input").read_text())
     numbers = [z for z, _ in prog["atoms"]]
     pos = np.array([p for _, p in prog["atoms"]])
-    r = axtb.singlepoint(numbers, pos, charge=charge, uhf=uhf, method="gxtb-v1.1", conventions="gxtb", molden=True)
+    r = flat.singlepoint(numbers, pos, charge=charge, uhf=uhf, method="gxtb-v1.1", conventions="gxtb", molden=True)
     ours = mc.parse_molden(r["molden"])
     pb, ob = mc.Basis(prog, *mc.PROGRAM_READ["gxtb11"]), mc.Basis(ours)
     assert mc.orthonormality(prog, pb) < 1e-8
@@ -160,46 +163,16 @@ def test_same_orbitals_as_xtb(kind, xyz, charge, uhf, tmp_path):
         assert v["occupation"] < 1e-8, res
 
 
-def test_arguments():
+def test_molden_is_the_clis():
+    """Molden text left the Python interface in 0.2 (the CLI writes it; a qcdata wavefunction
+    carries the orbitals): tests/flat.py sends requests with ``molden`` to the CLI."""
     pos = np.array([[0, 0, 0.22], [0, 1.43, -0.89], [0, -1.43, -0.89]])
-    r = axtb.singlepoint([8, 1, 1], pos)
-    assert "molden" not in r
-    assert "molden" not in axtb.singlepoint([8, 1, 1], pos, molden=False)
-    assert axtb.singlepoint([8, 1, 1], pos, molden="spherical")["molden"] == axtb.singlepoint([8, 1, 1], pos, molden=True)["molden"]
-    with pytest.raises(ValueError):
-        axtb.singlepoint([8, 1, 1], pos, molden="6d10f")
-    with pytest.raises(ValueError):
-        axtb.singlepoint([8, 1, 1], pos, molden=3)
-    calc = axtb.Calculator("gxtb-v2.0.1", [8, 1, 1], pos)
-    assert "molden" not in calc.singlepoint(pos)
-    text = calc.singlepoint(pos, molden=True)["molden"]
+    assert "molden" not in flat.singlepoint([8, 1, 1], pos)
+    text = flat.singlepoint([8, 1, 1], pos, method="gxtb-v2.0.1", molden=True)["molden"]
     assert text.startswith("[Molden Format]\n[Title]\naxtb ") and "gxtb-v2.0.1" in text.splitlines()[2]
-
-
-def test_qccodec():
-    qccompute = pytest.importorskip("qccompute")
-    from qccodec.exceptions import EncoderError
-    from qcdata import CalcType, Model, ProgramInput, Structure
-
-    structure = Structure(symbols=["O", "H", "H"], geometry=np.array([[0, 0, 0.22], [0, 1.43, -0.89], [0, -1.43, -0.89]]))
-    for method in METHODS:
-        for kw in ({"molden": True}, {"molden": "cartesian"}):
-            for calctype in (CalcType.energy, CalcType.gradient, CalcType.hessian):
-                out = qccompute.compute(ProgramInput(program="axtb", calctype=calctype, structure=structure,
-                                                     model=Model(method=method), keywords=kw))
-                text = out.results.files["molden.input"]
-                mol = mc.parse_molden(text)
-                assert mc.orthonormality(mol, mc.Basis(mol)) < 1e-8
-                if calctype != CalcType.hessian:  # (a Hessian's single point starts from its reference SCF)
-                    ref = axtb.singlepoint([8, 1, 1], structure.geometry, method=method, molden=kw["molden"])
-                    assert text == ref["molden"]
-        out = qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.energy, structure=structure,
-                                             model=Model(method=method)))
-        assert "molden.input" not in out.results.files
-    with pytest.raises(Exception) as err:
-        qccompute.compute(ProgramInput(program="axtb", calctype=CalcType.energy, structure=structure,
-                                       model=Model(method="gfn2"), keywords={"molden": "yes"}))
-    assert isinstance(err.value, EncoderError) or "molden must be" in str(err.value)
+    assert not hasattr(axtb, "singlepoint")
+    with pytest.raises(flat.NoQcdataForm):
+        flat.Calculator("gxtb-v2.0.1", [8, 1, 1], pos).singlepoint(pos, molden=True)
 
 
 @pytest.mark.skipif(not AXTB_BIN.exists(), reason="needs target/release/axtb")
@@ -228,4 +201,4 @@ def test_cli(tmp_path):
         req = {"numbers": numbers, "positions": pos.tolist(), "method": method, "molden": True}
         out = subprocess.run([str(AXTB_BIN), "--json"], input=json.dumps(req), capture_output=True, text=True, check=True)
         text = json.loads(out.stdout)["molden"]
-        assert text == axtb.singlepoint(numbers, pos, method=method, molden=True)["molden"]
+        assert text == flat.singlepoint(numbers, pos, method=method, molden=True)["molden"]

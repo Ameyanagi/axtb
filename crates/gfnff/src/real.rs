@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Scalar type of the energy and gradient kernels.
 //!
 //! The kernels are written once, generic over [`Real`]: with `f64` they are the energy
@@ -10,17 +11,8 @@
 use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
 
-extern "C" {
-    /// C99 libm error function.
-    #[link_name = "erf"]
-    fn c_erf(x: f64) -> f64;
-}
-
-/// Error function (libm).
-#[inline]
-pub fn erf(x: f64) -> f64 {
-    unsafe { c_erf(x) }
-}
+/// Error function of the reference programs (libm; from `axtb-base`).
+pub use axtb_base::math::erf;
 
 pub trait Real:
     Copy
@@ -277,6 +269,27 @@ impl Real for Dual {
     fn erf(self) -> Self {
         let two_over_sqrtpi = 2.0 / std::f64::consts::PI.sqrt();
         Dual::new(erf(self.v), self.d * two_over_sqrtpi * (-self.v * self.v).exp())
+    }
+}
+
+/// The CN counting function and cap of `axtb-base` evaluate on duals for the Hessian, with the
+/// operations of [`Real`].
+impl axtb_base::ncoord::Scalar for Dual {
+    #[inline]
+    fn cst(v: f64) -> Self {
+        <Dual as Real>::cst(v)
+    }
+    #[inline]
+    fn exp(self) -> Self {
+        Real::exp(self)
+    }
+    #[inline]
+    fn ln(self) -> Self {
+        Real::ln(self)
+    }
+    #[inline]
+    fn erf(self) -> Self {
+        Real::erf(self)
     }
 }
 

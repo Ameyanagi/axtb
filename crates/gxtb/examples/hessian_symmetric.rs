@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! One analytic g-xTB 2.0.1 Hessian with a chosen response tolerance and with or without the
 //! symmetric response terms ([`AnalyticOptions::symmetric`]), for
 //! `tests/gxtb2_hessian_symmetric.py`, which compares the settings.
@@ -11,9 +12,10 @@
 //! analytic Hessian's phases (s). The reference SCF is converged tightly (1e-12 Eh, residual
 //! 1e-11) and is not timed.
 
-use axtb_gxtb::v2::hessian::{symmetrize, AnalyticOptions};
-use axtb_gxtb::v2::response::CpksOptions;
-use axtb_gxtb::v2::scf::Setup;
+use axtb_base::fd::symmetrize;
+use axtb_gxtb::hessian::AnalyticOptions;
+use axtb_gxtb::response::CpksOptions;
+use axtb_gxtb::scf::Setup;
 use axtb_gxtb::{Conventions, ScfOptions};
 
 fn main() {
@@ -33,15 +35,15 @@ fn main() {
     let tol: f64 = a[6].parse().expect("tolerance");
     let symmetric = a[7] == "1";
     let threads: usize = a[8].parse().expect("threads");
-    let mol = axtb_gxtb::v2::read_xyz(&xyz, charge, Some(uhf), conv).expect("molecule");
-    let mut setup = Setup::with_threads(&mol, conv, threads).expect("setup");
+    let mol = axtb_gxtb::model::read_xyz(&xyz, charge, Some(uhf), conv).expect("molecule");
+    let mut setup = Setup::with_threads(&mol, axtb_gxtb::model::Model::v2_0_1(conv), threads).expect("setup");
     let opts = ScfOptions {
         conventions: conv,
         etemp,
         energy_tol: Some(1e-12),
         residual_tol: Some(1e-11),
         max_iter: 500,
-        keep_orbitals: true,
+        all_orbitals: true,
         threads,
         ..Default::default()
     };

@@ -1,8 +1,31 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Electrostatics of the GFN-xTB methods: isotropic second order (shell-resolved γ
 //! kernel), on-site third order, and damped anisotropic multipole electrostatics (GFN2).
 
+use crate::basis::Basis;
 use crate::molecule::{dot3, norm2_sq, sub3, Molecule};
 use crate::ncoord::Ncoord;
+use crate::terms::{
+    Chain, Chain2, Geometry, Kernel, MomentTerm, Needs, PotentialDerivative, Potentials, SccMoments, Slot, TermEnergy,
+};
+use crate::Result;
+use axtb_base::math::add_radial_hessian;
+use rayon::prelude::*;
+
+/// The shells of a molecule's atoms: first shell and number of shells of every atom, atom of
+/// every shell.
+#[derive(Clone, Debug)]
+pub struct ShellLayout {
+    pub ish_at: Vec<usize>,
+    pub nsh_at: Vec<usize>,
+    pub sh2at: Vec<usize>,
+}
+
+impl ShellLayout {
+    pub fn of(bas: &Basis) -> Self {
+        Self { ish_at: bas.ish_at.clone(), nsh_at: bas.nsh_at.clone(), sh2at: bas.sh2at.clone() }
+    }
+}
 
 /// Isotropic second-order electrostatics with the generalized Mataga–Nishimoto–Ohno–Klopman
 /// kernel `γ = 1 / (r^g + η^-g)^(1/g)`, shell resolved.
@@ -11,12 +34,14 @@ pub struct EffectiveCoulomb {
     gexp: f64,
     /// Averaged hardness `eta[isp][jsp][ish][jsh]`.
     eta: Vec<Vec<Vec<Vec<f64>>>>,
+    /// The shells of the molecule.
+    shells: ShellLayout,
 }
 
 impl EffectiveCoulomb {
     /// `hardness[isp][ish]` are the shell hardnesses of each species; a shell pair has their
-    /// arithmetic mean (GFN2-xTB).
-    pub fn new(hardness: &[Vec<f64>], gexp: f64) -> Self {
+    /// arithmetic mean (GFN2-xTB). `bas`: the basis of the molecule (its shells).
+    pub fn new(hardness: &[Vec<f64>], gexp: f64, bas: &Basis) -> Self {
         let eta = hardness
             .iter()
             .map(|hi| {
@@ -26,62 +51,165 @@ impl EffectiveCoulomb {
                     .collect()
             })
             .collect();
-        Self { gexp, eta }
+        Self { gexp, eta, shells: ShellLayout::of(bas) }
     }
 
-    /// Dense γ matrix over all shells (row-major `nsh x nsh`).
-    pub fn matrix(&self, mol: &Molecule, ish_at: &[usize], nsh_at: &[usize], nsh: usize) -> Vec<f64> {
+    /// Dense γ matrix over all shells (row-major `nsh x nsh`). With `parallel`, on the current
+    /// rayon pool: the rows of each atom (its shells against those of itself and every earlier
+    /// atom: the lower triangle) are one task, then the upper triangle is mirrored row by row.
+    /// Every element is computed once, by the same expression, on any thread count.
+    pub fn matrix(&self, mol: &Molecule, ish_at: &[usize], nsh_at: &[usize], nsh: usize, parallel: bool) -> Vec<f64> {
         let mut a = vec![0.0; nsh * nsh];
         let g = self.gexp;
+        // the element of shell ish of atom iat and shell jsh of atom jat <= iat (r1g = r^g)
+        let gamma = |iat: usize, jat: usize, ish: usize, jsh: usize, r1g: f64| -> f64 {
+            let eta = self.eta[mol.id[iat]][mol.id[jat]][ish][jsh];
+            if iat == jat {
+                eta
+            } else {
+                1.0 / (r1g + eta.powf(-g)).powf(1.0 / g)
+            }
+        };
+        let r1g = |iat: usize, jat: usize| norm2_sq(sub3(mol.positions[jat], mol.positions[iat])).sqrt().powf(g);
+        if !parallel {
+            for iat in 0..mol.nat() {
+                let ii = ish_at[iat];
+                for jat in 0..=iat {
+                    let jj = ish_at[jat];
+                    let r = r1g(iat, jat);
+                    for ish in 0..nsh_at[iat] {
+                        let jmax = if iat == jat { ish + 1 } else { nsh_at[jat] };
+                        for jsh in 0..jmax {
+                            let val = gamma(iat, jat, ish, jsh, r);
+                            a[(ii + ish) * nsh + jj + jsh] = val;
+                            a[(jj + jsh) * nsh + ii + ish] = val;
+                        }
+                    }
+                }
+            }
+            return a;
+        }
+        // the atoms' row blocks (lower triangle), then the upper triangle from a copy
+        let mut blocks: Vec<(usize, &mut [f64])> = Vec::with_capacity(mol.nat());
+        let mut rest = &mut a[..];
         for iat in 0..mol.nat() {
-            let isp = mol.id[iat];
-            let ii = ish_at[iat];
+            let (block, tail) = rest.split_at_mut(nsh_at[iat] * nsh);
+            blocks.push((iat, block));
+            rest = tail;
+        }
+        blocks.into_par_iter().with_min_len(8).for_each(|(iat, rows)| {
             for jat in 0..=iat {
-                let jsp = mol.id[jat];
                 let jj = ish_at[jat];
-                let r1 = norm2_sq(sub3(mol.positions[jat], mol.positions[iat])).sqrt();
-                let r1g = r1.powf(g);
+                let r = r1g(iat, jat);
                 for ish in 0..nsh_at[iat] {
                     let jmax = if iat == jat { ish + 1 } else { nsh_at[jat] };
                     for jsh in 0..jmax {
-                        let eta = self.eta[isp][jsp][ish][jsh];
-                        let val = if iat == jat { eta } else { 1.0 / (r1g + eta.powf(-g)).powf(1.0 / g) };
-                        a[(ii + ish) * nsh + jj + jsh] = val;
-                        a[(jj + jsh) * nsh + ii + ish] = val;
+                        rows[ish * nsh + jj + jsh] = gamma(iat, jat, ish, jsh, r);
                     }
                 }
             }
-        }
+        });
+        let lower = a.clone();
+        a.par_chunks_mut(nsh).enumerate().with_min_len(32).for_each(|(i, row)| {
+            for j in i + 1..nsh {
+                row[j] = lower[j * nsh + i];
+            }
+        });
         a
     }
 
-    /// Add `sum_{A<B} q q dγ/dR` to the gradient.
-    pub fn add_gradient(&self, mol: &Molecule, ish_at: &[usize], nsh_at: &[usize], qsh: &[f64], grad: &mut [[f64; 3]]) {
+    /// Add `sum_{A<B} q q dγ/dR` to the gradient; with `parallel` on the current rayon pool
+    /// ([`ordered_pairs_par`]: the same sums in the same order).
+    pub fn add_gradient(
+        &self,
+        mol: &Molecule,
+        ish_at: &[usize],
+        nsh_at: &[usize],
+        qsh: &[f64],
+        grad: &mut [[f64; 3]],
+        parallel: bool,
+    ) {
         let g = self.gexp;
-        for iat in 0..mol.nat() {
-            let isp = mol.id[iat];
-            let ii = ish_at[iat];
-            for jat in 0..iat {
-                let jsp = mol.id[jat];
-                let jj = ish_at[jat];
-                let vec = sub3(mol.positions[iat], mol.positions[jat]);
-                let r1 = norm2_sq(vec).sqrt();
-                let mut dg = 0.0;
-                for ish in 0..nsh_at[iat] {
-                    for jsh in 0..nsh_at[jat] {
-                        let eta = self.eta[isp][jsp][ish][jsh];
-                        let mut dtmp = 1.0 / (r1.powf(g) + eta.powf(-g));
-                        dtmp = -r1.powf(g - 2.0) * dtmp * dtmp.powf(1.0 / g);
-                        dg += dtmp * qsh[ii + ish] * qsh[jj + jsh];
-                    }
-                }
-                for k in 0..3 {
-                    grad[iat][k] += dg * vec[k];
-                    grad[jat][k] -= dg * vec[k];
+        // the pair's term dE/dr / r (R_iat - R_jat), jat < iat
+        let pair = |iat: usize, jat: usize| -> [f64; 3] {
+            let (isp, jsp) = (mol.id[iat], mol.id[jat]);
+            let (ii, jj) = (ish_at[iat], ish_at[jat]);
+            let vec = sub3(mol.positions[iat], mol.positions[jat]);
+            let r1 = norm2_sq(vec).sqrt();
+            let mut dg = 0.0;
+            for ish in 0..nsh_at[iat] {
+                for jsh in 0..nsh_at[jat] {
+                    let eta = self.eta[isp][jsp][ish][jsh];
+                    let mut dtmp = 1.0 / (r1.powf(g) + eta.powf(-g));
+                    dtmp = -r1.powf(g - 2.0) * dtmp * dtmp.powf(1.0 / g);
+                    dg += dtmp * qsh[ii + ish] * qsh[jj + jsh];
                 }
             }
+            [dg * vec[0], dg * vec[1], dg * vec[2]]
+        };
+        if !parallel {
+            for iat in 1..mol.nat() {
+                for jat in 0..iat {
+                    let t = pair(iat, jat);
+                    for k in 0..3 {
+                        grad[iat][k] += t[k];
+                        grad[jat][k] -= t[k];
+                    }
+                }
+            }
+            return;
         }
+        let add = |_: usize, _: usize, t: &[f64; 3], gi: &mut [f64; 3], gj: &mut [f64; 3]| {
+            for k in 0..3 {
+                gi[k] += t[k];
+                gj[k] -= t[k];
+            }
+        };
+        ordered_pairs_par(mol.nat(), pair, add, grad);
     }
+}
+
+/// The pair loop `for i { for j < i { t = pair(i, j); add(i, j, t, &mut out[i], &mut out[j]) } }`
+/// of a gradient on the current rayon pool: the pair terms (one row of pairs per task) are
+/// stored, then every atom's element is summed by one task in the order the loop adds to it (its
+/// pairs with the earlier atoms as the first atom, then its pairs with the later atoms as the
+/// second), so the sums are the bits of the sequential loop. `add` must touch component k of
+/// `out[i]` and `out[j]` once each per pair (`+=` / `-=` of the pair's own term).
+fn ordered_pairs_par<const M: usize, T>(
+    nat: usize,
+    pair: impl Fn(usize, usize) -> [f64; M] + Sync,
+    add: impl Fn(usize, usize, &[f64; M], &mut T, &mut T) + Sync,
+    out: &mut [T],
+) where
+    T: Copy + Default + Send + Sync,
+{
+    // the pair terms, row i (pairs (i, j < i)) at i (i - 1) / 2
+    let mut terms = vec![[0.0; M]; nat * nat.saturating_sub(1) / 2];
+    {
+        let mut rows: Vec<(usize, &mut [[f64; M]])> = Vec::with_capacity(nat);
+        let mut rest = &mut terms[..];
+        for i in 1..nat {
+            let (row, tail) = rest.split_at_mut(i);
+            rows.push((i, row));
+            rest = tail;
+        }
+        rows.into_par_iter().with_min_len(4).for_each(|(i, row)| {
+            for (j, t) in row.iter_mut().enumerate() {
+                *t = pair(i, j);
+            }
+        });
+    }
+    let row = |i: usize| i * (i - 1) / 2;
+    out[..nat].par_iter_mut().enumerate().with_min_len(4).for_each(|(a, x)| {
+        // the other atom's element of `add` goes to a scratch value
+        let mut other = T::default();
+        for j in 0..a {
+            add(a, j, &terms[row(a) + j], x, &mut other);
+        }
+        for i in a + 1..nat {
+            add(i, a, &terms[row(i) + a], &mut other, x);
+        }
+    });
 }
 
 impl EffectiveCoulomb {
@@ -169,64 +297,22 @@ impl EffectiveCoulomb {
     }
 }
 
-/// Add the Cartesian Hessian of a pair term `E(r)` with `dE/dr = e1`, `d²E/dr² = e2`
-/// (`vec = R_i - R_j`, `r1 = |vec|`) to `h` (row-major `n3 x n3`).
-#[inline]
-pub(crate) fn add_radial_hessian(
-    h: &mut [f64],
-    n3: usize,
-    iat: usize,
-    jat: usize,
-    vec: [f64; 3],
-    r1: f64,
-    e1: f64,
-    e2: f64,
-) {
-    let u = [vec[0] / r1, vec[1] / r1, vec[2] / r1];
-    for a in 0..3 {
-        for b in 0..3 {
-            let d = if a == b { 1.0 } else { 0.0 };
-            let blk = e2 * u[a] * u[b] + e1 / r1 * (d - u[a] * u[b]);
-            h[(3 * iat + a) * n3 + 3 * iat + b] += blk;
-            h[(3 * jat + a) * n3 + 3 * jat + b] += blk;
-            h[(3 * iat + a) * n3 + 3 * jat + b] -= blk;
-            h[(3 * jat + a) * n3 + 3 * iat + b] -= blk;
-        }
-    }
-}
-
 /// On-site third-order term `E = sum_sh Γ_sh q_sh^3 / 3`.
 #[derive(Clone, Debug)]
 pub struct OnsiteThirdOrder {
     /// Hubbard derivative per species and shell.
     pub gamma: Vec<Vec<f64>>,
+    /// First shell of every atom.
+    pub ish_at: Vec<usize>,
 }
 
 impl OnsiteThirdOrder {
-    pub fn energy(&self, mol: &Molecule, ish_at: &[usize], qsh: &[f64], energies: &mut [f64]) {
+    /// `f(shell, Γ)` for every shell, atom by atom.
+    fn for_shells(&self, mol: &Molecule, mut f: impl FnMut(usize, f64)) {
         for iat in 0..mol.nat() {
-            let ii = ish_at[iat];
+            let ii = self.ish_at[iat];
             for (ish, &gam) in self.gamma[mol.id[iat]].iter().enumerate() {
-                energies[iat] += qsh[ii + ish].powi(3) * gam / 3.0;
-            }
-        }
-    }
-
-    pub fn potential(&self, mol: &Molecule, ish_at: &[usize], qsh: &[f64], vsh: &mut [f64]) {
-        for iat in 0..mol.nat() {
-            let ii = ish_at[iat];
-            for (ish, &gam) in self.gamma[mol.id[iat]].iter().enumerate() {
-                vsh[ii + ish] += qsh[ii + ish].powi(2) * gam;
-            }
-        }
-    }
-
-    /// Diagonal second derivatives `2 Γ q` with respect to the shell charges, added to `kdiag`.
-    pub fn kernel_diagonal(&self, mol: &Molecule, ish_at: &[usize], qsh: &[f64], kdiag: &mut [f64]) {
-        for iat in 0..mol.nat() {
-            let ii = ish_at[iat];
-            for (ish, &gam) in self.gamma[mol.id[iat]].iter().enumerate() {
-                kdiag[ii + ish] += 2.0 * qsh[ii + ish] * gam;
+                f(ii + ish, gam);
             }
         }
     }
@@ -248,6 +334,8 @@ pub struct DampedMultipole {
     pub rad: Vec<f64>,
     pub vcn: Vec<f64>,
     pub ncoord: Ncoord,
+    /// The slot of the GFN2-xTB coordination number (`ncoord`) in the model's chain layout.
+    pub cn: Slot,
 }
 
 /// Geometry-dependent data of the multipole term.
@@ -272,11 +360,12 @@ const QSCALE: [f64; 6] = [1.0, 2.0, 1.0, 2.0, 2.0, 1.0];
 impl DampedMultipole {
     /// On-site kernels, damping radii and valence CNs per species, and the coordination
     /// number of the damping radii.
-    pub fn new(dkernel: Vec<f64>, qkernel: Vec<f64>, rad: Vec<f64>, vcn: Vec<f64>, ncoord: Ncoord) -> Self {
-        Self { kdmp3: 3.0, kdmp5: 4.0, dkernel, qkernel, shift: 1.2, kexp: 4.0, rmax: 5.0, rad, vcn, ncoord }
+    pub fn new(dkernel: Vec<f64>, qkernel: Vec<f64>, rad: Vec<f64>, vcn: Vec<f64>, ncoord: Ncoord, cn: Slot) -> Self {
+        Self { kdmp3: 3.0, kdmp5: 4.0, dkernel, qkernel, shift: 1.2, kexp: 4.0, rmax: 5.0, rad, vcn, ncoord, cn }
     }
 
-    pub fn update(&self, mol: &Molecule, cn: &[f64]) -> MultipoleCache {
+    /// The damping radii of the coordination numbers `cn` and the damped pair kernels.
+    pub fn cache(&self, mol: &Molecule, cn: &[f64]) -> MultipoleCache {
         let nat = mol.nat();
         let mut mrad = vec![0.0; nat];
         let mut dmrdcn = vec![0.0; nat];
@@ -315,7 +404,7 @@ impl DampedMultipole {
     /// current rayon pool. The terms of the second atom of a pair are those of the first with
     /// R_a - R_b negated, which is exact, so the blocks change no bit: the same result for any
     /// thread count.
-    pub fn potential(
+    pub fn add_potentials(
         &self,
         mol: &Molecule,
         cache: &MultipoleCache,
@@ -415,7 +504,7 @@ impl DampedMultipole {
     /// Second derivatives of the multipole energy with respect to the moments in the atomic
     /// layout `[q (nat) | μ (3 nat) | Θ (6 nat, packed)]`, added to `k` (row-major,
     /// `10 nat` square). The energy is bilinear in the moments, so this is its full kernel.
-    pub fn kernel(&self, mol: &Molecule, cache: &MultipoleCache, k: &mut [f64]) {
+    pub fn add_kernel(&self, mol: &Molecule, cache: &MultipoleCache, k: &mut [f64]) {
         let nat = mol.nat();
         let n = 10 * nat;
         let id = |i: usize, c: usize| nat + 3 * i + c;
@@ -576,7 +665,7 @@ impl DampedMultipole {
     }
 
     /// Multipole energy per atom (pair terms split evenly, on-site kernels on the atom).
-    pub fn energy(
+    pub fn atom_energies(
         &self,
         mol: &Molecule,
         cache: &MultipoleCache,
@@ -801,89 +890,373 @@ impl DampedMultipole {
         self.ncoord.add_hessian(mol, &w, hess);
     }
 
-    /// Explicit nuclear gradient at fixed moments, including the CN dependence of the
-    /// damping radii.
+    /// Explicit nuclear gradient at fixed moments; the CN dependence of the damping radii goes
+    /// to the chain's CN slot, contracted once with the other terms' (tblite contracts it
+    /// separately, first: the gradient differs by round-off).
     pub fn add_gradient(
         &self,
-        mol: &Molecule,
+        geo: &Geometry<'_>,
         cache: &MultipoleCache,
         qat: &[f64],
         dpat: &[[f64; 3]],
         qpat: &[[f64; 6]],
-        grad: &mut [[f64; 3]],
+        chain: &mut Chain,
     ) {
+        let mol = geo.mol;
         let nat = mol.nat();
         let (kdmp3, kdmp5) = (self.kdmp3, self.kdmp5);
+        // the pair (iat, jat), jat < iat: its gradient term dg and dE/d(rr), [dg, fddr]
+        let pair = |iat: usize, jat: usize| -> [f64; 4] {
+            let rr = 0.5 * (cache.mrad[iat] + cache.mrad[jat]);
+            let vec = sub3(mol.positions[jat], mol.positions[iat]);
+            let r2 = norm2_sq(vec);
+            let r1 = r2.sqrt();
+            let g1 = 1.0 / r1;
+            let g3 = g1 * g1 * g1;
+            let g5 = g3 * g1 * g1;
+            let g7 = g5 * g1 * g1;
+            let fdmp3 = 1.0 / (1.0 + 6.0 * (rr * g1).powf(kdmp3));
+            let ddmp3 = -3.0 * g5 * fdmp3 - kdmp3 * fdmp3 * (fdmp3 - 1.0) * g5;
+            let fdmp5 = 1.0 / (1.0 + 6.0 * (rr * g1).powf(kdmp5));
+            let ddmp5 = -5.0 * fdmp5 - kdmp5 * (fdmp5 * fdmp5 - fdmp5);
+            let (qi, qj) = (qat[iat], qat[jat]);
+            let (di, dj) = (dpat[iat], dpat[jat]);
+
+            let dpiqj = dot3(vec, di) * qj;
+            let qidpj = dot3(vec, dj) * qi;
+            let mut fddr = 3.0 * (dpiqj - qidpj) * kdmp3 * fdmp3 * g3 * (fdmp3 / rr) * (rr * g1).powf(kdmp3);
+            let mut dg = [0.0; 3];
+            for k in 0..3 {
+                dg[k] = -ddmp3 * vec[k] * (dpiqj - qidpj) + fdmp3 * g3 * (qi * dj[k] - qj * di[k]);
+            }
+
+            let dpidpj = dot3(dj, di);
+            let dpiv = dot3(di, vec);
+            let dpjv = dot3(dj, vec);
+            let edd = dpidpj * r2 - 3.0 * dpjv * dpiv;
+            fddr += 3.0 * edd * kdmp5 * fdmp5 * g5 * (fdmp5 / rr) * (rr * g1).powf(kdmp5);
+            for k in 0..3 {
+                dg[k] += -2.0 * fdmp5 * g5 * dpidpj * vec[k] + 3.0 * fdmp5 * g5 * (dpiv * dj[k] + dpjv * di[k])
+                    - edd * ddmp5 * g7 * vec[k];
+            }
+
+            let (ti, tj) = (qpat[iat], qpat[jat]);
+            let eq = 2.0 * (qj * ti[1] + tj[1] * qi) * vec[0] * vec[1]
+                + 2.0 * (qj * ti[3] + tj[3] * qi) * vec[0] * vec[2]
+                + 2.0 * (qj * ti[4] + tj[4] * qi) * vec[1] * vec[2]
+                + (qj * ti[0] + tj[0] * qi) * vec[0] * vec[0]
+                + (qj * ti[2] + tj[2] * qi) * vec[1] * vec[1]
+                + (qj * ti[5] + tj[5] * qi) * vec[2] * vec[2];
+            fddr += eq * 3.0 * kdmp5 * fdmp5 * g5 * fdmp5 / rr * (rr * g1).powf(kdmp5);
+            let tvj = [
+                vec[0] * tj[0] + vec[1] * tj[1] + vec[2] * tj[3],
+                vec[0] * tj[1] + vec[1] * tj[2] + vec[2] * tj[4],
+                vec[0] * tj[3] + vec[1] * tj[4] + vec[2] * tj[5],
+            ];
+            let tvi = [
+                vec[0] * ti[0] + vec[1] * ti[1] + vec[2] * ti[3],
+                vec[0] * ti[1] + vec[1] * ti[2] + vec[2] * ti[4],
+                vec[0] * ti[3] + vec[1] * ti[4] + vec[2] * ti[5],
+            ];
+            for k in 0..3 {
+                dg[k] += -eq * ddmp5 * g7 * vec[k] - 2.0 * fdmp5 * g5 * qi * tvj[k] - 2.0 * fdmp5 * g5 * qj * tvi[k];
+            }
+
+            [dg[0], dg[1], dg[2], fddr]
+        };
+        let add = |_: usize, _: usize, t: &[f64; 4], i: &mut ([f64; 3], f64), j: &mut ([f64; 3], f64)| {
+            i.1 += t[3];
+            j.1 += t[3];
+            for k in 0..3 {
+                i.0[k] += t[k];
+                j.0[k] -= t[k];
+            }
+        };
         let mut dedr = vec![0.0; nat];
-        for iat in 1..nat {
-            for jat in 0..iat {
-                let rr = 0.5 * (cache.mrad[iat] + cache.mrad[jat]);
-                let vec = sub3(mol.positions[jat], mol.positions[iat]);
-                let r2 = norm2_sq(vec);
-                let r1 = r2.sqrt();
-                let g1 = 1.0 / r1;
-                let g3 = g1 * g1 * g1;
-                let g5 = g3 * g1 * g1;
-                let g7 = g5 * g1 * g1;
-                let fdmp3 = 1.0 / (1.0 + 6.0 * (rr * g1).powf(kdmp3));
-                let ddmp3 = -3.0 * g5 * fdmp3 - kdmp3 * fdmp3 * (fdmp3 - 1.0) * g5;
-                let fdmp5 = 1.0 / (1.0 + 6.0 * (rr * g1).powf(kdmp5));
-                let ddmp5 = -5.0 * fdmp5 - kdmp5 * (fdmp5 * fdmp5 - fdmp5);
-                let (qi, qj) = (qat[iat], qat[jat]);
-                let (di, dj) = (dpat[iat], dpat[jat]);
-
-                let dpiqj = dot3(vec, di) * qj;
-                let qidpj = dot3(vec, dj) * qi;
-                let mut fddr = 3.0 * (dpiqj - qidpj) * kdmp3 * fdmp3 * g3 * (fdmp3 / rr) * (rr * g1).powf(kdmp3);
-                let mut dg = [0.0; 3];
-                for k in 0..3 {
-                    dg[k] = -ddmp3 * vec[k] * (dpiqj - qidpj) + fdmp3 * g3 * (qi * dj[k] - qj * di[k]);
-                }
-
-                let dpidpj = dot3(dj, di);
-                let dpiv = dot3(di, vec);
-                let dpjv = dot3(dj, vec);
-                let edd = dpidpj * r2 - 3.0 * dpjv * dpiv;
-                fddr += 3.0 * edd * kdmp5 * fdmp5 * g5 * (fdmp5 / rr) * (rr * g1).powf(kdmp5);
-                for k in 0..3 {
-                    dg[k] += -2.0 * fdmp5 * g5 * dpidpj * vec[k] + 3.0 * fdmp5 * g5 * (dpiv * dj[k] + dpjv * di[k])
-                        - edd * ddmp5 * g7 * vec[k];
-                }
-
-                let (ti, tj) = (qpat[iat], qpat[jat]);
-                let eq = 2.0 * (qj * ti[1] + tj[1] * qi) * vec[0] * vec[1]
-                    + 2.0 * (qj * ti[3] + tj[3] * qi) * vec[0] * vec[2]
-                    + 2.0 * (qj * ti[4] + tj[4] * qi) * vec[1] * vec[2]
-                    + (qj * ti[0] + tj[0] * qi) * vec[0] * vec[0]
-                    + (qj * ti[2] + tj[2] * qi) * vec[1] * vec[1]
-                    + (qj * ti[5] + tj[5] * qi) * vec[2] * vec[2];
-                fddr += eq * 3.0 * kdmp5 * fdmp5 * g5 * fdmp5 / rr * (rr * g1).powf(kdmp5);
-                let tvj = [
-                    vec[0] * tj[0] + vec[1] * tj[1] + vec[2] * tj[3],
-                    vec[0] * tj[1] + vec[1] * tj[2] + vec[2] * tj[4],
-                    vec[0] * tj[3] + vec[1] * tj[4] + vec[2] * tj[5],
-                ];
-                let tvi = [
-                    vec[0] * ti[0] + vec[1] * ti[1] + vec[2] * ti[3],
-                    vec[0] * ti[1] + vec[1] * ti[2] + vec[2] * ti[4],
-                    vec[0] * ti[3] + vec[1] * ti[4] + vec[2] * ti[5],
-                ];
-                for k in 0..3 {
-                    dg[k] +=
-                        -eq * ddmp5 * g7 * vec[k] - 2.0 * fdmp5 * g5 * qi * tvj[k] - 2.0 * fdmp5 * g5 * qj * tvi[k];
-                }
-
-                dedr[iat] += fddr;
-                dedr[jat] += fddr;
-                for k in 0..3 {
-                    grad[iat][k] += dg[k];
-                    grad[jat][k] -= dg[k];
+        if geo.parallel {
+            // (gradient, dE/d(rr)) per atom, summed in the order of the sequential pair loop
+            let mut out: Vec<([f64; 3], f64)> = chain.g[..nat].iter().map(|&g| (g, 0.0)).collect();
+            ordered_pairs_par(nat, pair, add, &mut out);
+            for ((g, d), o) in chain.g.iter_mut().zip(dedr.iter_mut()).zip(&out) {
+                (*g, *d) = *o;
+            }
+        } else {
+            let grad = &mut chain.g;
+            for iat in 1..nat {
+                for jat in 0..iat {
+                    let t = pair(iat, jat);
+                    dedr[iat] += t[3];
+                    dedr[jat] += t[3];
+                    for k in 0..3 {
+                        grad[iat][k] += t[k];
+                        grad[jat][k] -= t[k];
+                    }
                 }
             }
         }
+        let w = chain.slot(self.cn);
         for i in 0..nat {
-            dedr[i] *= cache.dmrdcn[i];
+            w[i] += dedr[i] * cache.dmrdcn[i];
         }
-        self.ncoord.add_gradient(mol, &dedr, grad);
+    }
+}
+
+/// `out = γ q` for the row-major square `gamma`, rows in parallel when asked (each row summed
+/// in order: the same bits); with `add`, `out += γ q`.
+fn gamma_rows(gamma: &[f64], q: &[f64], out: &mut [f64], parallel: bool, add: bool) {
+    let n = q.len();
+    let row = |a: usize| -> f64 { gamma[a * n..(a + 1) * n].iter().zip(q).map(|(g, x)| g * x).sum() };
+    let set = |(a, v): (usize, &mut f64)| {
+        if add {
+            *v += row(a)
+        } else {
+            *v = row(a)
+        }
+    };
+    if parallel {
+        out[..n].par_iter_mut().enumerate().with_min_len(32).for_each(set);
+    } else {
+        out[..n].iter_mut().enumerate().for_each(set);
+    }
+}
+
+/// GFN2-xTB's isotropic second-order electrostatics: energy split over the shells' atoms,
+/// shell potential γ q, kernel γ, analytic gradient and second derivatives. The cache is γ.
+impl MomentTerm for EffectiveCoulomb {
+    type Cache = Vec<f64>;
+
+    fn names(&self) -> &[&'static str] {
+        &["isotropic_es"]
+    }
+
+    fn needs(&self) -> Needs {
+        Needs { shell: true, ..Needs::default() }
+    }
+
+    fn partitions_energy(&self) -> bool {
+        true
+    }
+
+    fn update(&self, geo: &Geometry<'_>) -> Result<Vec<f64>> {
+        let sh = &self.shells;
+        Ok(self.matrix(geo.mol, &sh.ish_at, &sh.nsh_at, sh.sh2at.len(), geo.parallel))
+    }
+
+    /// E = q^T γ q / 2 (folded over the shells); per atom, each shell's q_a (γ q)_a / 2 on its
+    /// atom.
+    fn energy(&self, geo: &Geometry<'_>, gamma: &Vec<f64>, s: &SccMoments<'_>, e: &mut TermEnergy<'_>) {
+        let (qsh, nsh) = (s.qsh, s.qsh.len());
+        let mut v = vec![0.0; nsh];
+        gamma_rows(gamma, qsh, &mut v, geo.parallel, false);
+        e.pieces[0] = 0.5 * (0..nsh).fold(0.0, |e, a| e + qsh[a] * v[a]);
+        if let Some(atoms) = e.atoms.as_deref_mut() {
+            for a in 0..nsh {
+                atoms[self.shells.sh2at[a]] += 0.5 * qsh[a] * v[a];
+            }
+        }
+    }
+
+    fn potential(&self, geo: &Geometry<'_>, gamma: &Vec<f64>, s: &SccMoments<'_>, v: &mut Potentials) {
+        // Added to the shell potentials, which GFN2-xTB zeroes before (it assigned γ q before):
+        // 0 + x differs from x only for x = -0, and a row Σ_b γ_ab q_b is -0 only if every q_b
+        // is -0 (γ > 0). Mulliken shell charges n0 - pop never are (n0 >= +0), nor are the
+        // mixers' sums of such values, so the bits are the same.
+        gamma_rows(gamma, s.qsh, &mut v.shell, geo.parallel, true);
+    }
+
+    fn gradient(&self, geo: &Geometry<'_>, _gamma: &Vec<f64>, s: &SccMoments<'_>, chain: &mut Chain) {
+        self.add_gradient(geo.mol, &self.shells.ish_at, &self.shells.nsh_at, s.qsh, &mut chain.g, geo.parallel);
+    }
+
+    fn kernel(&self, _geo: &Geometry<'_>, gamma: &Vec<f64>, _s: &SccMoments<'_>, k: &mut Kernel) {
+        for (x, g) in k.shell.iter_mut().zip(gamma) {
+            *x += g;
+        }
+    }
+
+    fn kernel_apply(
+        &self,
+        geo: &Geometry<'_>,
+        gamma: &Vec<f64>,
+        _s: &SccMoments<'_>,
+        ds: &SccMoments<'_>,
+        dv: &mut Potentials,
+    ) {
+        gamma_rows(gamma, ds.qsh, &mut dv.shell, geo.parallel, true);
+    }
+
+    fn second_derivatives(
+        &self,
+        geo: &Geometry<'_>,
+        _gamma: &Vec<f64>,
+        s: &SccMoments<'_>,
+        dv: Option<&mut PotentialDerivative>,
+        h: Option<&mut Chain2<'_>>,
+    ) -> Result<()> {
+        let sh = &self.shells;
+        if let Some(dv) = dv {
+            self.potential_derivative(geo.mol, &sh.ish_at, &sh.nsh_at, s.qsh, &mut dv.shell);
+        }
+        if let Some(h) = h {
+            self.add_hessian(geo.mol, &sh.ish_at, &sh.nsh_at, s.qsh, h.h);
+        }
+        Ok(())
+    }
+}
+
+/// GFN2-xTB's on-site third order: no geometry dependence.
+impl MomentTerm for OnsiteThirdOrder {
+    type Cache = ();
+
+    fn names(&self) -> &[&'static str] {
+        &["third_order"]
+    }
+
+    fn needs(&self) -> Needs {
+        Needs { shell: true, ..Needs::default() }
+    }
+
+    fn partitions_energy(&self) -> bool {
+        true
+    }
+
+    fn update(&self, _geo: &Geometry<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    fn energy(&self, geo: &Geometry<'_>, _c: &(), s: &SccMoments<'_>, e: &mut TermEnergy<'_>) {
+        let mut own = Vec::new();
+        let atoms = e.atoms_or(&mut own, geo.mol.nat());
+        let ish_at = &self.ish_at;
+        for iat in 0..geo.mol.nat() {
+            let ii = ish_at[iat];
+            for (ish, &gam) in self.gamma[geo.mol.id[iat]].iter().enumerate() {
+                atoms[iat] += s.qsh[ii + ish].powi(3) * gam / 3.0;
+            }
+        }
+        let total = atoms.iter().sum();
+        e.pieces[0] = total;
+    }
+
+    fn potential(&self, geo: &Geometry<'_>, _c: &(), s: &SccMoments<'_>, v: &mut Potentials) {
+        self.for_shells(geo.mol, |a, gam| v.shell[a] += s.qsh[a].powi(2) * gam);
+    }
+
+    fn gradient(&self, _geo: &Geometry<'_>, _c: &(), _s: &SccMoments<'_>, _chain: &mut Chain) {}
+
+    /// The diagonal 2 Γ q.
+    fn kernel(&self, geo: &Geometry<'_>, _c: &(), s: &SccMoments<'_>, k: &mut Kernel) {
+        let nsh = s.qsh.len();
+        self.for_shells(geo.mol, |a, gam| k.shell[a * nsh + a] += 2.0 * s.qsh[a] * gam);
+    }
+
+    fn kernel_apply(&self, geo: &Geometry<'_>, _c: &(), s: &SccMoments<'_>, ds: &SccMoments<'_>, dv: &mut Potentials) {
+        self.for_shells(geo.mol, |a, gam| dv.shell[a] += 2.0 * s.qsh[a] * gam * ds.qsh[a]);
+    }
+
+    fn second_derivatives(
+        &self,
+        _geo: &Geometry<'_>,
+        _c: &(),
+        _s: &SccMoments<'_>,
+        _dv: Option<&mut PotentialDerivative>,
+        _h: Option<&mut Chain2<'_>>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// GFN2-xTB's damped anisotropic electrostatics; the damping radii depend on the GFN2-xTB
+/// coordination number. The cache is the radii and the damped pair kernels.
+impl MomentTerm for DampedMultipole {
+    type Cache = MultipoleCache;
+
+    fn names(&self) -> &[&'static str] {
+        &["anisotropic"]
+    }
+
+    fn needs(&self) -> Needs {
+        Needs { atom: true, dipole: true, quadrupole: true, ..Needs::default() }
+    }
+
+    fn partitions_energy(&self) -> bool {
+        true
+    }
+
+    fn slots(&self) -> &[Slot] {
+        std::slice::from_ref(&self.cn)
+    }
+
+    fn update(&self, geo: &Geometry<'_>) -> Result<MultipoleCache> {
+        Ok(self.cache(geo.mol, geo.value(self.cn)))
+    }
+
+    fn energy(&self, geo: &Geometry<'_>, c: &MultipoleCache, s: &SccMoments<'_>, e: &mut TermEnergy<'_>) {
+        let mut own = Vec::new();
+        let atoms = e.atoms_or(&mut own, geo.mol.nat());
+        self.atom_energies(geo.mol, c, s.qat, s.dip, s.quad, atoms, geo.parallel);
+        let total = atoms.iter().sum();
+        e.pieces[0] = total;
+    }
+
+    fn potential(&self, geo: &Geometry<'_>, c: &MultipoleCache, s: &SccMoments<'_>, v: &mut Potentials) {
+        self.add_potentials(
+            geo.mol,
+            c,
+            s.qat,
+            s.dip,
+            s.quad,
+            &mut v.atom,
+            &mut v.dipole,
+            &mut v.quadrupole,
+            geo.parallel,
+        );
+    }
+
+    fn gradient(&self, geo: &Geometry<'_>, c: &MultipoleCache, s: &SccMoments<'_>, chain: &mut Chain) {
+        self.add_gradient(geo, c, s.qat, s.dip, s.quad, chain);
+    }
+
+    fn kernel(&self, geo: &Geometry<'_>, c: &MultipoleCache, _s: &SccMoments<'_>, k: &mut Kernel) {
+        self.add_kernel(geo.mol, c, &mut k.multipole);
+    }
+
+    /// The energy is bilinear in the moments: the kernel times δs is the potential of δs.
+    fn kernel_apply(
+        &self,
+        geo: &Geometry<'_>,
+        c: &MultipoleCache,
+        _s: &SccMoments<'_>,
+        ds: &SccMoments<'_>,
+        dv: &mut Potentials,
+    ) {
+        self.potential(geo, c, ds, dv);
+    }
+
+    /// The potential derivatives at fixed coordination numbers to the atomic rows, through the
+    /// damping radii to the rows with respect to the CN; the Hessian with its CN chain rule.
+    fn second_derivatives(
+        &self,
+        geo: &Geometry<'_>,
+        c: &MultipoleCache,
+        s: &SccMoments<'_>,
+        dv: Option<&mut PotentialDerivative>,
+        h: Option<&mut Chain2<'_>>,
+    ) -> Result<()> {
+        let mol = geo.mol;
+        let nat = mol.nat();
+        if let Some(dv) = dv {
+            let mut dvcn = vec![0.0; 10 * nat * nat];
+            self.potential_derivative(mol, c, s.qat, s.dip, s.quad, &mut dv.atomic, &mut dvcn);
+            // (0 + x is x but for -0, and the model's chain rule skips zeros)
+            for (x, y) in dv.wrt(self.cn, 10 * nat, nat).iter_mut().zip(dvcn) {
+                *x += y;
+            }
+        }
+        if let Some(h) = h {
+            let jac = h.jacobians.get(self.cn);
+            self.add_hessian(mol, c, geo.value(self.cn), jac, s.qat, s.dip, s.quad, h.h);
+        }
+        Ok(())
     }
 }

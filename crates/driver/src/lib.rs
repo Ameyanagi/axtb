@@ -1,11 +1,15 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! axtb-driver: the one request/response layer of the axtb front ends.
 //!
 //! The CLI fills a [`Request`] from its arguments or a JSON request, Python from keyword
 //! arguments; [`run`] checks it, dispatches it to GFN2-xTB (`axtb`), g-xTB and its solvation
-//! composite (`axtb-gxtb`, feature `gxtb`) or GFN-FF (`axtb-gfnff`), and returns a
+//! composite (`axtb-gxtb`) or GFN-FF (`axtb-gfnff`), and returns a
 //! [`Response`] with the same fields for every front end (the CLI writes it as JSON, Python
-//! returns it as a dict). A stateful [`Calculator`] (Python's `axtb.Calculator`) runs a [`Task`]
-//! at one geometry after another.
+//! returns it as a dict). A stateful [`Calculator`] (under Python's `axtb.Session`) builds the
+//! request's method behind axtb-base's `Method` trait and runs a [`Task`] at one geometry
+//! after another, each SCF from the previous geometry's [`Wavefunction`] as the method's
+//! restart policy says; its forks ([`Calculator::fork`]) share the method's setup and compute
+//! beside it (a session's lineages side by side).
 //!
 //! Rules every front end gets from here:
 //! - one alias rule for names ([`names`]): case and anything but letters and digits are
@@ -14,15 +18,31 @@
 //!   Hessian's step without a Hessian) are [`Error::Input`], never ignored;
 //! - one error type with kinds (input, unsupported element, topology, SCF not converged,
 //!   numerical), [`Error::kind`];
-//! - at least one thread, no clamps; warnings about more than 8 threads for an SCF method's
-//!   single point ([`threads_warning`]), about unpaired electrons for GFN-FF ([`uhf_warning`])
-//!   and about a run-time LAPACK that was not used ([`eigensolver_warning`]) are the front
-//!   ends' to print;
+//! - at least one thread, no clamps; a one-off task ([`run`]) of a molecule small enough that
+//!   threads only cost runs on one ([`task_threads`]: the same results); axtb's internal cap
+//!   on the threads one calculation uses by method, calculation and size ([`thread_cap`],
+//!   applied by Python; the CLI runs on the threads a request gives, default 1); warnings about
+//!   more
+//!   than 8 threads for an SCF method's single point ([`threads_warning`]), about unpaired
+//!   electrons for GFN-FF ([`uhf_warning`]) and about a run-time LAPACK that was not used
+//!   ([`eigensolver_warning`]) are the front ends' to print;
 //! - XYZ files in Ångström are converted with the factor of the method's conventions
-//!   ([`read_xyz`]).
+//!   ([`read_xyz`]);
+//! - every response names the numerics identity of what it ran ([`numerics`]).
 //!
-//! License: LGPL-3.0-or-later code; built with the default feature `gxtb` it includes the
-//! GPL-3.0 crate `axtb-gxtb` (g-xTB).
+//! # Numerics epochs
+//!
+//! [`numerics`] gives the identity of the code that produced a result, per method (afh-stack
+//! decision 29): `"<method>:<epoch>"`, e.g. `"gfn2:1"`, `"gxtb-v1.1:1"`, `"gxtb-v2.0.1:1"`,
+//! `"gfnff:1"`, and for the g-xTB solvation composite its parts joined, `"gxtb-v2.0.1:1+gfn2:1"`.
+//! A method's epoch changes with every commit whose results for an unchanged request of that
+//! method may change (classed R, round-off, or M, a model or default change, in the changelog),
+//! and never with a commit that keeps every result bit for bit (B). One epoch covers every
+//! conventions of a method: a change in any of them bumps it. GFN2-xTB in solvent is GFN2-xTB's.
+//! The vibrational analysis belongs to every method's numbers (a change there bumps every
+//! method), and the analysis of a given Hessian has its own epoch ([`ANALYSIS_NUMERICS`]). Thread
+//! counts and a run-time LAPACK move results only by round-off and are not part of it. The
+//! epochs start at 1 with alpha 1 of 0.2; their history is in the changelog.
 
 mod calculator;
 mod error;
@@ -31,34 +51,137 @@ mod request;
 mod response;
 mod task;
 
-pub use calculator::{gxtb_solvent_hint, Calculator, ScfState};
+pub use calculator::{gxtb_solvent_hint, Calculator, Wavefunction};
 pub use error::{Error, Result};
-pub use names::{canonical_method, Method};
-pub use request::{Request, Temperatures};
+pub use names::{
+    canonical, canonical_method, shell_layout, supported_elements, valence_electrons, Method, ShellLayout,
+};
+pub use request::{Request, ScfRetry, Temperatures};
 pub use response::{
-    Attempt, Components, Composite, CompositeEtemp, CompositeInfo, Contribution, Gfnff, HessianPart, Matrix, Named,
-    Part, Parts, Response, Scf, Thermo, ThermoPoint, Topology, Vibrations, PROGRAM, VERSION,
+    Attempt, Composite, Contribution, Details, Gfnff, HessianPart, Matrix, Named, Part, Parts, Response, Retried, Scf,
+    Thermo, ThermoPoint, Topology, Vibrations, PROGRAM, VERSION,
 };
 pub use task::{HessianTask, MoldenTask, Task, ThermoSettings, VibSettings};
 
 use axtb::units::{reference::MCTC_AATOAU, AATOAU};
 use std::time::Instant;
 
+/// The numerics epoch of each method ([`numerics`], "Numerics epochs" above): bumped by every
+/// commit classed R or M that changes that method's results, never by a B commit.
+pub const NUMERICS_EPOCHS: [(Method, u32); 4] =
+    [(Method::Gfn2, 1), (Method::GxtbV1_1, 1), (Method::GxtbV2_0_1, 1), (Method::Gfnff, 1)];
+
+/// The numerics identity of the analysis of a given Hessian (`analyze_hessian`).
+pub const ANALYSIS_NUMERICS: &str = "analysis:1";
+
+/// The numerics identity of `method` (afh-stack decision 29; "Numerics epochs" above):
+/// `"<canonical name>:<epoch>"`, the same for every conventions of the method; with `composite`,
+/// the g-xTB solvation composite (a g-xTB method with `solvation_correction`), its parts joined by
+/// `+`, the g-xTB part first: `"gxtb-v2.0.1:1+gfn2:1"` (`composite` means nothing for the other
+/// methods: GFN2-xTB in solvent is GFN2-xTB's).
+pub fn numerics(method: Method, composite: bool) -> String {
+    let one = |m: Method| {
+        let epoch = NUMERICS_EPOCHS.iter().find(|(x, _)| *x == m).map(|(_, e)| *e).expect("every method has an epoch");
+        format!("{}:{epoch}", m.name())
+    };
+    if composite && method.is_gxtb() {
+        format!("{}+{}", one(method), one(Method::Gfn2))
+    } else {
+        one(method)
+    }
+}
+
 /// Run a request: the calculation it describes, or with `analyze_hessian` the vibrational
 /// analysis of the given Hessian ([`analyze`]). `seconds` of the response includes the
-/// setup.
+/// setup. The calculation runs on [`task_threads`] threads.
 pub fn run(req: &Request) -> Result<Response> {
     let t0 = Instant::now();
     let mut out = if req.analyze_hessian.is_some() {
         analyze(req)?
     } else {
-        let method = Method::parse(req.method.as_deref().unwrap_or("gfn2"))?;
-        let task = Task::from_request(req, method)?;
-        let mut calc = Calculator::new(req)?;
+        let task = Task::from_request(req)?;
+        let threads = task_threads(req, &task);
+        let mut calc = if req.threads.is_some_and(|t| t != threads) {
+            Calculator::new(&Request { threads: Some(threads), ..req.clone() })?
+        } else {
+            Calculator::new(req)?
+        };
         calc.compute(&req.positions, &task)?
     };
     out.seconds = Some(t0.elapsed().as_secs_f64());
     Ok(out)
+}
+
+/// The threads one task of `req` runs on in [`run`]: the requested ones, or one for a molecule
+/// of at most [`single_thread_atoms`] atoms, where starting the pool and synchronizing its
+/// parallel loops cost more than they save. Systems that small (far below 200 basis functions)
+/// give the same bits on any thread count. A [`Calculator`] of its own (under Python's
+/// `axtb.Session`) keeps the requested threads: its tasks vary.
+pub fn task_threads(req: &Request, task: &Task) -> usize {
+    let threads = req.threads.unwrap_or(1);
+    if threads <= 1 {
+        // (zero threads is the calculator's input error)
+        return threads;
+    }
+    match Method::parse(req.method.as_deref().unwrap_or("gfn2")) {
+        Ok(method) if req.numbers.len() <= single_thread_atoms(method, task.hessian.is_some()) => 1,
+        _ => threads,
+    }
+}
+
+/// The largest molecule (atoms) whose single point (`hessian` false) or Hessian of `method`
+/// runs on one thread in [`run`]: up to this size one thread was faster than 8 for every
+/// molecule measured (laptop, i9-11900H; energy + gradient: water, methane, ammonium, ethanol,
+/// glycine, benzene, caffeine, ferrocene, taxol and alkanes up to 152 atoms for GFN-FF; the
+/// method's default Hessian). g-xTB's Hessians gain from threads at every size.
+pub fn single_thread_atoms(method: Method, hessian: bool) -> usize {
+    match (method, hessian) {
+        (Method::Gfn2, false) => 10,
+        (Method::Gfn2, true) => 6,
+        (Method::GxtbV2_0_1, false) => 9,
+        (Method::GxtbV1_1, false) => 6,
+        (Method::GxtbV1_1 | Method::GxtbV2_0_1, true) => 0,
+        (Method::Gfnff, false) => 100,
+        (Method::Gfnff, true) => 10,
+    }
+}
+
+/// Thread caps ([`THREAD_CAPS`]): (from this many atoms, at most this many threads), from 0
+/// atoms on.
+pub type Caps = &'static [(usize, usize)];
+
+/// axtb's internal cap on the threads of one energy or gradient, per method, by size: at most
+/// this many of the threads a calculation is given, where more do not make it faster (the
+/// plateau: the fewest threads within about 10 % of the fastest wall time measured), and never
+/// more than 8, since beyond 8 the SCF eigensolver only gets slower ([`thread_cap`]). Measured
+/// with the release CLI 0.2.0a1 on an AMD Threadripper PRO 9985WX node, 1 to 16 threads (mb33,
+/// beni-acetone, caffeine, gh106, taxol, (H2O)100: 16 to 300 atoms; the CLI's whole process): 1
+/// thread up to about 40 atoms (more were slower, or gained within the noise of a few
+/// milliseconds), 4 at taxol (113 atoms: g-xTB 2.0.1 218 ms on 1 thread, 126 ms on 4, 134 ms on
+/// 8; a 119-atom gradient 245 ms on 1, 140 ms on 8, 187 ms on 64), 8 from (H2O)100 (300 atoms:
+/// g-xTB 2.0.1 912 ms on 1, 408 ms on 8). GFN-FF on an Intel i9-11900H laptop: no gain to 300
+/// atoms, 4 from crambin (640 atoms: 79 ms on 1, 58 ms on 4, 57 ms on 8, 78 ms on 16).
+pub const THREAD_CAPS: [(Method, Caps); 4] = [
+    (Method::Gfn2, &[(0, 1), (60, 4), (300, 8)]),
+    (Method::GxtbV2_0_1, &[(0, 1), (60, 4), (300, 8)]),
+    (Method::GxtbV1_1, &[(0, 1), (60, 4), (300, 8)]),
+    (Method::Gfnff, &[(0, 1), (600, 4)]),
+];
+
+/// The most threads one energy or gradient (`hessian` false) or Hessian of `method` for a
+/// molecule of `atoms` atoms uses of the threads it is given (`None`: all of them): 1 at or
+/// below [`single_thread_atoms`]; an energy or gradient its [`THREAD_CAPS`] band; a Hessian, whose
+/// displacements and perturbations run side by side, no cap. Python's `axtb.compute` and
+/// `axtb.Session` apply it; the CLI runs on the threads a request gives ([`task_threads`]).
+pub fn thread_cap(method: Method, hessian: bool, atoms: usize) -> Option<usize> {
+    if atoms <= single_thread_atoms(method, hessian) {
+        return Some(1);
+    }
+    if hessian {
+        return None;
+    }
+    let (_, caps) = THREAD_CAPS.iter().find(|(m, _)| *m == method).expect("every method has thread caps");
+    caps.iter().rev().find(|(from, _)| atoms >= *from).map(|&(_, n)| n)
 }
 
 /// The vibrational analysis of a given Hessian (`analyze_hessian`, 3N x 3N, Eh/bohr²) at
@@ -78,6 +201,7 @@ pub fn analyze(req: &Request) -> Result<Response> {
         ("accuracy", req.accuracy.is_some()),
         ("etemp", req.etemp.is_some()),
         ("max_iter", req.max_iter.is_some()),
+        ("scf_retries", req.scf_retries.is_some()),
         ("threads", req.threads.is_some()),
         ("dispersion", req.dispersion.is_some()),
         ("mixer", req.mixer.is_some()),
@@ -88,6 +212,7 @@ pub fn analyze(req: &Request) -> Result<Response> {
         ("solvation_correction", req.solvation_correction.is_some()),
         ("correction_conventions", req.correction_conventions.is_some()),
         ("guess", req.guess.is_some()),
+        ("restart", req.restart.is_some()),
         ("fragment_charges", req.fragment_charges.is_some()),
         ("topology_positions", req.topology_positions.is_some()),
         ("gradient", req.gradient),
@@ -97,6 +222,8 @@ pub fn analyze(req: &Request) -> Result<Response> {
         ("hessian_accuracy", req.hessian_accuracy.is_some()),
         ("molden", req.molden || req.molden_file.is_some() || req.molden_cartesian),
         ("bond_orders", req.bond_orders),
+        ("overlap", req.overlap),
+        ("hamiltonian", req.hamiltonian),
         ("vibrations", req.vibrations.is_some()),
     ];
     let given: Vec<&str> = calculation.iter().filter(|(_, g)| *g).map(|(k, _)| *k).collect();
@@ -119,13 +246,15 @@ pub fn analyze(req: &Request) -> Result<Response> {
     }
     let flat: Vec<f64> = h.iter().flatten().copied().collect();
     let settings = VibSettings::from_request(req)?;
-    let opts = settings.options(axtb::vibrations::Conventions::Axtb, false);
+    let defaults = axtb::method::AnalysisDefaults { conventions: Default::default(), xtb_frequency_scale: None };
+    let opts = settings.options(&defaults);
     let v = axtb::vibrations::analyze(&req.numbers, &req.positions, &flat, req.dipole_derivatives.as_deref(), &opts)?;
     Ok(Response {
         program: PROGRAM,
         version: VERSION,
         method: None,
         conventions: v.conventions.label(),
+        numerics: ANALYSIS_NUMERICS.into(),
         energy: req.energy,
         vibrations: Some(Vibrations::new(v, req.energy)),
         seconds: Some(t0.elapsed().as_secs_f64()),
@@ -145,27 +274,20 @@ pub fn read_xyz(text: &str, method: Method, conventions: Option<&str>) -> Result
             _ => MCTC_AATOAU,
         },
         Method::Gfnff => {
-            let (_, analysis, _) = names::gfnff_conventions(conventions.unwrap_or("axtb"))?;
-            if analysis.is_xtb() {
+            if names::gfnff_conventions(conventions.unwrap_or("axtb"))?.is_xtb() {
                 MCTC_AATOAU
             } else {
                 AATOAU
             }
         }
-        #[cfg(feature = "gxtb")]
         Method::GxtbV1_1 => {
             let mol = axtb_gxtb::read_xyz(text, 0.0, None)?;
             return Ok((mol.numbers, mol.positions));
         }
-        #[cfg(feature = "gxtb")]
         Method::GxtbV2_0_1 => {
             let c = conventions.map(names::gxtb_conventions).transpose()?.unwrap_or_default();
-            let mol = axtb_gxtb::v2::read_xyz(text, 0.0, None, c)?;
+            let mol = axtb_gxtb::model::read_xyz(text, 0.0, None, c)?;
             return Ok((mol.numbers, mol.positions));
-        }
-        #[cfg(not(feature = "gxtb"))]
-        Method::GxtbV1_1 | Method::GxtbV2_0_1 => {
-            return Err(Error::Input(format!("{method}: this axtb was built without g-xTB (feature `gxtb`)")))
         }
     };
     Ok(axtb::io::read_xyz(text, aatoau)?)
@@ -180,6 +302,28 @@ pub fn threads_warning(method: Method, threads: usize, hessian: bool) -> Option<
     } else {
         None
     }
+}
+
+/// The warnings of a response whose result came from a rung of `scf_retries`: "converged on
+/// retry 2 of 2: etemp 3000 K, max_iter 1000"; the composite: one per part whose single point
+/// converged on a rung ("the gxtb part converged on ..."), and one per part whose Hessian
+/// converged on another rung than its single point ("the gxtb part's Hessian converged on ...").
+pub fn retry_warnings(response: &Response) -> Vec<String> {
+    let Some(r) = &response.scf_retry else { return Vec::new() };
+    let Some(c) = &response.composite else {
+        return r.label.iter().map(|l| format!("converged on {l}")).collect();
+    };
+    fn fired(p: &Part) -> Option<&str> {
+        p.rung.is_some_and(|i| i > 0).then_some(p.retry.as_deref()).flatten()
+    }
+    let mut out: Vec<String> =
+        c.parts.0.iter().filter_map(|(k, p)| fired(p).map(|l| format!("the {k} part converged on {l}"))).collect();
+    for (k, p) in c.hessian_parts.iter().flat_map(|h| &h.0) {
+        if let Some(l) = fired(p).filter(|_| c.parts.get(k).is_none_or(|s| s.rung != p.rung)) {
+            out.push(format!("the {k} part's Hessian converged on {l}"));
+        }
+    }
+    out
 }
 
 /// The warning for unpaired electrons given to GFN-FF, which has no electronic structure, so

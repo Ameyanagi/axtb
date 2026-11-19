@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Energy and analytic gradient of GFN-FF at one geometry with a fixed topology: a port
 //! of xtb's `gfnff_eg` (`src/gfnff/gfnff_eg.f90`) for molecules.
 //!
@@ -11,15 +12,16 @@
 use crate::cells::CellList;
 use crate::cn::LogCn;
 use crate::data;
-use crate::error::Result;
-use crate::linalg::Lu;
+use crate::error::{Error, Result};
 use crate::param::{self, Gen, Param, Thresholds, TSQRT2PI};
 use crate::real::{erf, V3};
 use crate::setup_util::jth_nb;
 use crate::terms::{self, BondPar, HbPar};
 use crate::topology::Topology;
-use faer::{Mat, Par};
-use rayon::prelude::*;
+use axtb_base::eeq::{ChargeEquations, ChargeSolver, Constraints};
+use axtb_base::threads::Threads;
+use axtb_d4::data::{MAX_REF, NFREQ};
+use faer::Par;
 
 /// Number of interleaved chunks of the parallel pair loops (fixed, so that their sums do not
 /// depend on the thread count).
@@ -58,8 +60,10 @@ impl Energies {
     }
 }
 
-/// D3-type dispersion model of GFN-FF (`newD3Model`): D4 reference polarizabilities without
-/// charge scaling, integrated to C6 per reference pair.
+/// D3-type dispersion model of GFN-FF (`newD3Model`): dftd4's reference polarizabilities
+/// without charge scaling, integrated to C6 per reference pair. The reference data and the
+/// Casimir-Polder integration are axtb-d4's (dftd4 4.3.1, the tables xtb carries in
+/// `include/param_ref.fh`), with xtb's gap: no references for Fr-Rg (`d4_nref`).
 #[derive(Clone, Debug)]
 pub struct DispModel {
     /// per element (Z-1): reference CNs
@@ -68,20 +72,15 @@ pub struct DispModel {
     pub c6: std::collections::HashMap<(usize, usize), Vec<f64>>,
 }
 
-/// `trapzd` of xtb's D4 code: Casimir-Polder integration weights.
-fn trapzd_weights() -> [f64; 23] {
-    let freq: [f64; 23] = [
-        0.000001, 0.050000, 0.100000, 0.200000, 0.300000, 0.400000, 0.500000, 0.600000, 0.700000, 0.800000, 0.900000,
-        1.000000, 1.200000, 1.400000, 1.600000, 1.800000, 2.000000, 2.500000, 3.000000, 4.000000, 5.000000, 7.500000,
-        10.00000,
-    ];
-    let mut w = [0.0; 23];
-    w[0] = 0.5 * (freq[1] - freq[0]);
-    for k in 1..22 {
-        w[k] = 0.5 * ((freq[k] - freq[k - 1]) + (freq[k + 1] - freq[k]));
+/// Number of D4 reference systems of element `z` in xtb's GFN-FF: dftd4's, except none for
+/// Fr-Rg (Z = 87-111), which xtb's tables leave empty (dftd4 4.3.1 has references there; of
+/// these elements GFN-FF takes Fr-Lr, whose C6 is therefore zero).
+fn d4_nref(z: usize) -> usize {
+    if (87..=111).contains(&z) {
+        0
+    } else {
+        axtb_d4::data::REFN[z - 1] as usize
     }
-    w[22] = 0.5 * (freq[22] - freq[21]);
-    w
 }
 
 impl DispModel {
@@ -89,44 +88,25 @@ impl DispModel {
         let mut zs: Vec<usize> = numbers.to_vec();
         zs.sort_unstable();
         zs.dedup();
-        let thopi = 3.0 / param::PI;
-        let w = trapzd_weights();
-        let mut alpha: std::collections::HashMap<usize, Vec<[f64; 23]>> = std::collections::HashMap::new();
+        let nref: Vec<usize> = zs.iter().map(|&z| d4_nref(z)).collect();
+        let alpha: Vec<[[f64; NFREQ]; MAX_REF]> = zs
+            .iter()
+            .zip(&nref)
+            .map(|(&z, &n)| if n > 0 { axtb_d4::reference_alpha(z, |_, _| 1.0) } else { [[0.0; NFREQ]; MAX_REF] })
+            .collect();
         let mut refcn = vec![Vec::new(); 118];
-        for &z in &zs {
-            let ia = z - 1;
-            let nref = data::D4_REFN[ia];
-            let mut al = Vec::with_capacity(nref);
-            for j in 0..nref {
-                let is = data::D4_REFSYS[ia][j] - 1;
-                let mut a = [0.0; 23];
-                for f in 0..23 {
-                    let sec = data::D4_SSCALE[is] * data::D4_SECAIW[is][f];
-                    a[f] =
-                        (data::D4_ASCALE[ia][j] * (data::D4_ALPHAIW[ia][j][f] - data::D4_HCOUNT[ia][j] * sec)).max(0.0);
-                }
-                al.push(a);
-                refcn[ia].push(data::D4_REFCN[ia][j]);
-            }
-            alpha.insert(z, al);
+        for (&z, &n) in zs.iter().zip(&nref) {
+            refcn[z - 1] = axtb_d4::data::REFCN[z - 1][..n].to_vec();
         }
+        // the species ascend in Z, so each product is formed with the larger element first, as
+        // in xtb
+        let c6ref = axtb_d4::reference_c6_table(&nref, &alpha);
+        let nsp = zs.len();
         let mut c6 = std::collections::HashMap::new();
-        for &zi in &zs {
-            for &zj in &zs {
-                let ai = &alpha[&zi];
-                let aj = &alpha[&zj];
-                let mut tab = vec![0.0; ai.len() * aj.len()];
-                for ii in 0..ai.len() {
-                    for jj in 0..aj.len() {
-                        // xtb integrates with the larger element first; the product commutes
-                        let (p, q) = if zi >= zj { (&ai[ii], &aj[jj]) } else { (&aj[jj], &ai[ii]) };
-                        let mut s = 0.0;
-                        for f in 0..23 {
-                            s += p[f] * q[f] * w[f];
-                        }
-                        tab[ii * aj.len() + jj] = thopi * s;
-                    }
-                }
+        for (isp, &zi) in zs.iter().enumerate() {
+            for (jsp, &zj) in zs.iter().enumerate() {
+                let block = &c6ref[isp * nsp + jsp];
+                let tab: Vec<f64> = (0..nref[isp]).flat_map(|ii| block[ii][..nref[jsp]].iter().copied()).collect();
                 c6.insert((zi, zj), tab);
             }
         }
@@ -251,7 +231,12 @@ pub struct HbLists {
     pub xb: Vec<[usize; 3]>,
 }
 
-pub fn hb_lists(topo: &Topology, model: &Model, xyz: &[[f64; 3]], cells: &CellList) -> HbLists {
+/// The H-bond triplets (A, B, H) of `gfnff_hbset` (and the halogen bonds) at `xyz`. Per
+/// acceptor-capable atom i (in order) its partners j < i (ascending) and, per pair, the
+/// candidate H in ascending order: the H near i, the H bonded to i and the H bonded to j. With
+/// `threads` parallel the atoms i run in fixed chunks whose lists are joined in order: the
+/// same lists in the same order on any thread count.
+pub fn hb_lists(topo: &Topology, model: &Model, xyz: &[[f64; 3]], cells: &CellList, threads: &Threads) -> HbLists {
     let n = topo.natoms();
     let thr1 = model.thr.hb1;
     let thr2 = model.thr.hb2;
@@ -261,50 +246,87 @@ pub fn hb_lists(topo: &Topology, model: &Model, xyz: &[[f64; 3]], cells: &CellLi
         d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
     };
     if !topo.hb_h.is_empty() {
-        let mut cand = Vec::new();
-        let mut hcand = Vec::new();
-        for i in 0..n {
-            if !topo.hb_ab[i] {
-                continue;
-            }
-            cells.candidates(i, thr1.sqrt() * (1.0 + 1e-12) + 1e-9, |j| j < i && topo.hb_ab[j], &mut cand);
-            let mut hnear_done = false;
+        // the triplets of the atoms i in `range`: (hb1, hb2)
+        let atoms = |range: std::ops::Range<usize>| {
+            let (mut hb1, mut hb2) = (Vec::new(), Vec::new());
+            let mut cand = Vec::new();
             let mut hnear: Vec<usize> = Vec::new();
-            for &j in &cand {
-                if topo.hbbas[i] * topo.hbaci[j] < 1.0e-6 && topo.hbaci[i] * topo.hbbas[j] < 1.0e-6 {
+            // d2(H, i) of the H in `hnear`
+            let mut rnear: Vec<f64> = Vec::new();
+            let mut bonded: Vec<usize> = Vec::new();
+            for i in range {
+                if !topo.hb_ab[i] {
                     continue;
                 }
-                let rab = d2(i, j);
-                if rab > thr1 {
-                    continue;
-                }
-                if !hnear_done {
-                    cells.candidates(i, thr2.sqrt() * (1.0 + 1e-12) + 1e-9, |h| model.is_hb_h[h], &mut hnear);
-                    hnear_done = true;
-                }
-                let ijnonbond = topo.bpair.get(j, i) != 1;
-                hcand.clear();
-                hcand.extend_from_slice(&hnear);
-                hcand.extend_from_slice(&model.bonded_h[i]);
-                hcand.extend_from_slice(&model.bonded_h[j]);
-                hcand.sort_unstable();
-                hcand.dedup();
-                for &nh in &hcand {
-                    let rih = d2(nh, i);
-                    let rjh = d2(nh, j);
-                    if topo.bpair.get(i, nh) == 1 && ijnonbond {
-                        out.hb2.push([i, j, nh]);
+                cells.candidates(i, thr1.sqrt() * (1.0 + 1e-12) + 1e-9, |j| j < i && topo.hb_ab[j], &mut cand);
+                let mut hnear_done = false;
+                for &j in &cand {
+                    if topo.hbbas[i] * topo.hbaci[j] < 1.0e-6 && topo.hbaci[i] * topo.hbbas[j] < 1.0e-6 {
                         continue;
                     }
-                    if topo.bpair.get(j, nh) == 1 && ijnonbond {
-                        out.hb2.push([j, i, nh]);
+                    let rab = d2(i, j);
+                    if rab > thr1 {
                         continue;
                     }
-                    if rab + rih + rjh < thr2 {
-                        out.hb1.push([i, j, nh]);
+                    if !hnear_done {
+                        // ascending (`CellList::candidates`)
+                        cells.candidates(i, thr2.sqrt() * (1.0 + 1e-12) + 1e-9, |h| model.is_hb_h[h], &mut hnear);
+                        rnear.clear();
+                        rnear.extend(hnear.iter().map(|&h| d2(h, i)));
+                        hnear_done = true;
+                    }
+                    let ijnonbond = topo.bpair.get(j, i) != 1;
+                    // the H bonded to i or j, ascending and unique (each list is sorted)
+                    bonded.clear();
+                    bonded.extend_from_slice(&model.bonded_h[i]);
+                    bonded.extend_from_slice(&model.bonded_h[j]);
+                    bonded.sort_unstable();
+                    bonded.dedup();
+                    // the union with `hnear`, ascending: an H bonded to i or j takes the checks
+                    // of the bonded H; any other H can only make an hb1 triplet, whose test
+                    // (rab + rih) + rjh < thr2 fails when rab + rih alone does not pass (rjh >= 0)
+                    let (mut a, mut b) = (0, 0);
+                    while a < hnear.len() || b < bonded.len() {
+                        let next_near = hnear.get(a).copied().unwrap_or(usize::MAX);
+                        let next_bonded = bonded.get(b).copied().unwrap_or(usize::MAX);
+                        if next_bonded <= next_near {
+                            let nh = next_bonded;
+                            b += 1;
+                            if next_near == nh {
+                                a += 1;
+                            }
+                            let rih = d2(nh, i);
+                            let rjh = d2(nh, j);
+                            if topo.bpair.get(i, nh) == 1 && ijnonbond {
+                                hb2.push([i, j, nh]);
+                                continue;
+                            }
+                            if topo.bpair.get(j, nh) == 1 && ijnonbond {
+                                hb2.push([j, i, nh]);
+                                continue;
+                            }
+                            if rab + rih + rjh < thr2 {
+                                hb1.push([i, j, nh]);
+                            }
+                        } else {
+                            let (nh, rih) = (next_near, rnear[a]);
+                            a += 1;
+                            let s = rab + rih;
+                            if s.partial_cmp(&thr2) != Some(std::cmp::Ordering::Less) {
+                                continue;
+                            }
+                            if s + d2(nh, j) < thr2 {
+                                hb1.push([i, j, nh]);
+                            }
+                        }
                     }
                 }
             }
+            (hb1, hb2)
+        };
+        for (hb1, hb2) in threads.install(|| axtb_base::threads::map_chunks(n, threads.parallel(), atoms)) {
+            out.hb1.extend(hb1);
+            out.hb2.extend(hb2);
         }
     }
     if !topo.xb_ax.is_empty() {
@@ -392,19 +414,6 @@ pub struct Eval {
     pub timings: Vec<(&'static str, f64)>,
 }
 
-/// Run `f(chunk)` for the fixed chunks, in parallel inside `pool` if given; results in
-/// chunk order.
-pub fn map_chunks<R: Send>(
-    pool: Option<&rayon::ThreadPool>,
-    nchunks: usize,
-    f: impl Fn(usize) -> R + Sync + Send,
-) -> Vec<R> {
-    match pool {
-        Some(p) => p.install(|| (0..nchunks).into_par_iter().map(&f).collect()),
-        None => (0..nchunks).map(f).collect(),
-    }
-}
-
 fn add_grad(g: &mut [[f64; 3]], other: &[[f64; 3]]) {
     for (a, b) in g.iter_mut().zip(other) {
         a[0] += b[0];
@@ -443,22 +452,15 @@ pub struct State {
     pub lcn: LogCn,
     pub hbcn: HbCn,
     pub charges: Vec<f64>,
-    /// LU factors of the bordered EEQ matrix
-    pub eeq_lu: Lu,
+    /// The factorized bordered EEQ matrix
+    pub eeq: ChargeSolver,
     /// dE/dCN of every atom (all CN-dependent terms)
     pub w_cn: Vec<f64>,
 }
 
 /// Energy (and gradient) at `xyz` (bohr).
-pub fn evaluate(
-    topo: &Topology,
-    model: &Model,
-    xyz: &[[f64; 3]],
-    want_grad: bool,
-    pool: Option<&rayon::ThreadPool>,
-    par: Par,
-) -> Result<Eval> {
-    Ok(evaluate_full(topo, model, xyz, want_grad, false, pool, par)?.0)
+pub fn evaluate(topo: &Topology, model: &Model, xyz: &[[f64; 3]], want_grad: bool, threads: &Threads) -> Result<Eval> {
+    Ok(evaluate_full(topo, model, xyz, want_grad, false, threads)?.0)
 }
 
 /// Energy (and gradient) at `xyz`, optionally keeping the intermediate [`State`].
@@ -468,8 +470,7 @@ pub fn evaluate_full(
     xyz: &[[f64; 3]],
     want_grad: bool,
     keep_state: bool,
-    pool: Option<&rayon::ThreadPool>,
-    par: Par,
+    threads: &Threads,
 ) -> Result<(Eval, Option<State>)> {
     let n = topo.natoms();
     let at = &topo.numbers;
@@ -487,14 +488,14 @@ pub fn evaluate_full(
     let nch = NCHUNK.min(n.max(1));
 
     // HB/XB lists
-    let lists = hb_lists(topo, model, xyz, &cells);
+    let lists = hb_lists(topo, model, xyz, &cells, threads);
     lap("hb lists", &mut t);
 
     // non-bonded repulsion
     {
         let repthr = thr.rep;
         let rc = repthr.sqrt() * (1.0 + 1e-12) + 1e-9;
-        let parts = map_chunks(pool, nch, |c| {
+        let parts = threads.map(nch, |c| {
             let mut gl = if want_grad { vec![[0.0; 3]; n] } else { Vec::new() };
             let mut er = 0.0;
             let mut cand = Vec::new();
@@ -540,25 +541,16 @@ pub fn evaluate_full(
     lap("cn", &mut t);
 
     // EEQ charges and electrostatics
-    let (q, es, eeq_lu) = eeq(topo, xyz, cn, par)?;
+    let (q, es, eeq_solver) = eeq(topo, xyz, cn, threads.par())?;
     e.electrostatic = es;
     lap("eeq solve", &mut t);
     if want_grad {
-        let sqrtpi = param::sqrtpi();
-        let parts = map_chunks(pool, nch, |c| {
+        let parts = threads.map(nch, |c| {
             let mut gl = vec![[0.0; 3]; n];
             let mut i = c;
             while i < n {
                 for j in 0..i {
-                    let d = [xyz[i][0] - xyz[j][0], xyz[i][1] - xyz[j][1], xyz[i][2] - xyz[j][2]];
-                    let r2 = d[0].powi(2) + d[1].powi(2) + d[2].powi(2);
-                    let rab = r2.sqrt();
-                    let gammij = 1. / (topo.alpeeq[i] + topo.alpeeq[j]).sqrt();
-                    let erff = erf(gammij * rab);
-                    let dd = (2.0e0 * gammij * (-(gammij.powi(2) * r2)).exp() / (sqrtpi * r2) - erff / (rab * r2))
-                        * q[i]
-                        * q[j];
-                    let r3 = [d[0] * dd, d[1] * dd, d[2] * dd];
+                    let r3 = terms::eeq_pair_grad(xyz[i], xyz[j], topo.alpeeq[i], topo.alpeeq[j], q[i], q[j]);
                     addv(&mut gl[i], r3);
                     addv(&mut gl[j], [-r3[0], -r3[1], -r3[2]]);
                 }
@@ -581,7 +573,7 @@ pub fn evaluate_full(
         let dispthr = thr.disp;
         let rc = dispthr.sqrt() * (1.0 + 1e-12) + 1e-9;
         let weights: Vec<(Vec<f64>, Vec<f64>)> = (0..n).map(|i| model.disp.weights(at[i], cn[i])).collect();
-        let parts = map_chunks(pool, nch, |c| {
+        let parts = threads.map(nch, |c| {
             let mut gl = if want_grad { vec![[0.0; 3]; n] } else { Vec::new() };
             let mut wl = if want_grad { vec![0.0; n] } else { Vec::new() };
             let mut ed = 0.0;
@@ -817,7 +809,7 @@ pub fn evaluate_full(
         nxb: lists.xb.len(),
         timings,
     };
-    let state = if keep_state { Some(State { lists, lcn, hbcn, charges: q, eeq_lu, w_cn }) } else { None };
+    let state = if keep_state { Some(State { lists, lcn, hbcn, charges: q, eeq: eeq_solver, w_cn }) } else { None };
     Ok((ev, state))
 }
 
@@ -943,42 +935,29 @@ pub fn hb2_term(
     Some((ev, atoms, g))
 }
 
-/// Geometry-dependent EEQ (`goed_gfnff`): charges, electrostatic energy and the LU factors
-/// of the bordered EEQ matrix.
-pub fn eeq(topo: &Topology, xyz: &[[f64; 3]], cn: &[f64], par: Par) -> Result<(Vec<f64>, f64, Lu)> {
+/// Geometry-dependent EEQ (`goed_gfnff`): charges, electrostatic energy and the factorized
+/// bordered EEQ matrix (one charge constraint per fragment; kept for the charge response of the
+/// Hessian).
+pub fn eeq(topo: &Topology, xyz: &[[f64; 3]], cn: &[f64], par: Par) -> Result<(Vec<f64>, f64, ChargeSolver)> {
     let n = topo.natoms();
     let at = &topo.numbers;
     let nf = topo.nfrag;
-    let m = n + nf;
-    let mut a = Mat::<f64>::zeros(m, m);
-    let mut x = vec![0.0; m];
-    for i in 0..n {
-        x[i] = topo.chieeq[i] + data::CNF[at[i] - 1] * cn[i].sqrt();
-    }
-    for i in 0..n {
-        a[(i, i)] = TSQRT2PI / topo.alpeeq[i].sqrt() + topo.gameeq[i];
-        for j in 0..i {
+    let eqs = ChargeEquations::new(
+        n,
+        Constraints::Fragments { fragment: &topo.fraglist, count: nf },
+        |i| TSQRT2PI / topo.alpeeq[i].sqrt() + topo.gameeq[i],
+        |i, j| {
             let d = [xyz[i][0] - xyz[j][0], xyz[i][1] - xyz[j][1], xyz[i][2] - xyz[j][2]];
             let r = (d[0].powi(2) + d[1].powi(2) + d[2].powi(2)).sqrt();
             let gammij = 1. / (topo.alpeeq[i] + topo.alpeeq[j]).sqrt();
             let tmp = erf(gammij * r);
-            let v = tmp / r;
-            a[(j, i)] = v;
-            a[(i, j)] = v;
-        }
-    }
-    for f in 0..nf {
-        x[n + f] = topo.qfrag[f];
-        for j in 0..n {
-            if topo.fraglist[j] == f + 1 {
-                a[(n + f, j)] = 1.0;
-                a[(j, n + f)] = 1.0;
-            }
-        }
-    }
-    let lu = Lu::new(a, par)?;
-    let sol = lu.solve_vec(&x);
-    let mut q: Vec<f64> = sol[..n].to_vec();
+            tmp / r
+        },
+    );
+    let solver = eqs.try_factorize(par).ok_or_else(|| Error::Numerical("singular EEQ matrix".into()))?;
+    let mut x: Vec<f64> = (0..n).map(|i| topo.chieeq[i] + data::CNF[at[i] - 1] * cn[i].sqrt()).collect();
+    x.extend_from_slice(&topo.qfrag[..nf]);
+    let mut q = solver.charges(&x);
     if n == 1 {
         q[0] = topo.charge;
     }
@@ -994,7 +973,7 @@ pub fn eeq(topo: &Topology, xyz: &[[f64; 3]], cn: &[f64], par: Par) -> Result<(V
         es = es - q[i] * (topo.chieeq[i] + data::CNF[at[i] - 1] * cn[i].sqrt())
             + q[i] * q[i] * 0.5e0 * (topo.gameeq[i] + TSQRT2PI / topo.alpeeq[i].sqrt());
     }
-    Ok((q, es, lu))
+    Ok((q, es, solver))
 }
 
 impl DispModel {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The xtb 6.8.0 conventions with one setting at a time put back to its xtb 6.7.1 value
 //! (`tests/xtb680_changes.py` compares each with the xtb 6.8.0 program): how much each
 //! documented 6.7.1 quirk would move the result.
@@ -10,10 +11,11 @@
 //!     cargo run --release -p axtb --example conventions_ablation < mol.txt
 
 use axtb::conventions::{ConventionParams, SccGradient, SccResidual};
+use axtb::method::Want;
 use axtb::param::xtb_data::{
     XTB671_ATOMIC_RAD, XTB671_COVALENT_RAD_D3, XTB671_D4_EN, XTB671_D4_RCOV, XTB671_PAULING_EN,
 };
-use axtb::{Conventions, Method, Molecule, Options, ReferenceState, SolvationModel, SolvationSpec};
+use axtb::{Conventions, Hamiltonian, Molecule, Options, ReferenceState, SolvationModel, SolvationSpec};
 use std::io::Read;
 
 type Variant = (&'static str, fn(&mut ConventionParams));
@@ -86,11 +88,12 @@ fn main() {
             ..Default::default()
         };
         opts.scf.accuracy = accuracy;
-        opts.scf.etemp = etemp;
-        match axtb::singlepoint(Method::Gfn2, &mol, &opts, true) {
+        opts.scf.etemp = Some(etemp);
+        match axtb::singlepoint(Hamiltonian::Gfn2, &mol, &opts, &Want::gradient(true)) {
             Ok(sp) => {
-                let g: Vec<String> = sp.gradient.unwrap().iter().flatten().map(|x| format!("{x:.17e}")).collect();
-                println!("{name}\t{:.17e}\t{}\t{}", sp.energy, sp.iterations, g.join(" "));
+                let g: Vec<String> =
+                    sp.gradient.as_ref().unwrap().iter().flatten().map(|x| format!("{x:.17e}")).collect();
+                println!("{name}\t{:.17e}\t{}\t{}", sp.energy, sp.scf().unwrap().iterations, g.join(" "));
             }
             Err(e) => println!("{name}\terror\t{e}"),
         }

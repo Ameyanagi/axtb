@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Vibrational analysis of a nuclear Hessian: harmonic frequencies, normal modes, reduced
 //! masses, IR intensities and quasi-RRHO thermochemistry ([`thermo`]).
 //!
@@ -47,10 +48,9 @@ pub mod masses;
 pub mod symmetry;
 pub mod thermo;
 
-use crate::error::{Error, Result};
+use crate::linalg::sym_eig;
 use crate::units;
-use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::linalg::evd::{self_adjoint_evd, self_adjoint_evd_scratch, ComputeEigenvectors};
+use crate::{Error, Result};
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Mat, MatRef, Par};
 
@@ -92,79 +92,32 @@ pub(crate) mod xtbc {
 }
 
 /// Constants, masses and projection of the analysis (see the module documentation).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Conventions {
-    /// CODATA 2022 constants, standard atomic masses, mass-weighted projection.
-    #[default]
-    Axtb,
-    /// The xtb 6.8.0 program.
-    Xtb,
-    /// The xtb 6.7.1 program (also what the g-xTB 2.0.1 program, a 6.7.1-based xtb build,
-    /// does).
-    Xtb671,
-}
+pub use axtb_base::method::AnalysisConventions as Conventions;
 
-impl Conventions {
-    /// `axtb`, `xtb` or `xtb-6.7.1`, as parsed.
-    pub fn label(self) -> &'static str {
-        match self {
-            Conventions::Axtb => "axtb",
-            Conventions::Xtb => "xtb",
-            Conventions::Xtb671 => "xtb-6.7.1",
-        }
-    }
-
-    /// Whether these are one of the xtb programs' conventions.
-    pub fn is_xtb(self) -> bool {
-        self != Conventions::Axtb
-    }
-
-    /// The settings of these conventions.
-    pub fn params(self) -> AnalysisParams {
-        match self {
-            Conventions::Axtb => AnalysisParams {
-                masses: &masses::STANDARD,
-                projection: Projection::Complement,
-                linear: LinearTest::PrincipalMoments,
-                thermo_bohr: None,
-                ir_factor: units::AU_TO_KM_PER_MOL,
-            },
-            Conventions::Xtb => AnalysisParams {
-                masses: &masses::XTB,
-                projection: Projection::MassWeighted,
-                linear: LinearTest::UnitMassMoments,
-                thermo_bohr: Some(xtbc::AUTOAA_680),
-                ir_factor: xtbc::AUTOKMMOL,
-            },
-            Conventions::Xtb671 => AnalysisParams {
-                masses: &masses::XTB,
-                projection: Projection::Cartesian,
-                linear: LinearTest::Axis,
-                thermo_bohr: Some(xtbc::AUTOAA),
-                ir_factor: xtbc::AUTOKMMOL,
-            },
-        }
-    }
-}
-
-impl std::fmt::Display for Conventions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-impl std::str::FromStr for Conventions {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "axtb" | "default" => Ok(Conventions::Axtb),
-            "xtb" | "xtb-6.8.0" => Ok(Conventions::Xtb),
-            // the g-xTB 2.0.1 program is a 6.7.1-based xtb build
-            "xtb-6.7.1" | "gxtb" => Ok(Conventions::Xtb671),
-            other => Err(Error::Input(format!(
-                "unknown vibrational-analysis conventions {other:?} (axtb, xtb or xtb-6.7.1)"
-            ))),
-        }
+/// The settings of the analysis conventions `conventions`.
+pub fn params(conventions: Conventions) -> AnalysisParams {
+    match conventions {
+        Conventions::Axtb => AnalysisParams {
+            masses: &masses::STANDARD,
+            projection: Projection::Complement,
+            linear: LinearTest::PrincipalMoments,
+            thermo_bohr: None,
+            ir_factor: units::AU_TO_KM_PER_MOL,
+        },
+        Conventions::Xtb => AnalysisParams {
+            masses: &masses::XTB,
+            projection: Projection::MassWeighted,
+            linear: LinearTest::UnitMassMoments,
+            thermo_bohr: Some(xtbc::AUTOAA_680),
+            ir_factor: xtbc::AUTOKMMOL,
+        },
+        Conventions::Xtb671 => AnalysisParams {
+            masses: &masses::XTB,
+            projection: Projection::Cartesian,
+            linear: LinearTest::Axis,
+            thermo_bohr: Some(xtbc::AUTOAA),
+            ir_factor: xtbc::AUTOKMMOL,
+        },
     }
 }
 
@@ -258,16 +211,15 @@ pub struct VibAnalysis {
     pub thermo: Option<Thermo>,
 }
 
-/// Symmetric eigendecomposition (ascending) of an n x n matrix.
+/// Symmetric eigendecomposition (ascending) of an n x n matrix, on this thread (the analysis
+/// runs outside the calculator's pool). An empty matrix (an atom has no vibrations) has no
+/// eigenpairs: faer 0.22 sizes the eigenvector workspace with `n - 1` and overflows for n = 0
+/// (a panic with overflow checks, the default profile's).
 fn eigh(a: &Mat<f64>) -> Result<(Vec<f64>, Mat<f64>)> {
-    let n = a.nrows();
-    let par = Par::Seq;
-    let mut s = faer::diag::Diag::<f64>::zeros(n);
-    let mut u = Mat::<f64>::zeros(n, n);
-    let mut mem = MemBuffer::new(self_adjoint_evd_scratch::<f64>(n, ComputeEigenvectors::Yes, par, Default::default()));
-    self_adjoint_evd(a.as_ref(), s.as_mut(), Some(u.as_mut()), par, MemStack::new(&mut mem), Default::default())
-        .map_err(|_| Error::Numerical("eigensolver failed to converge".into()))?;
-    Ok(((0..n).map(|i| s[i]).collect(), u))
+    if a.nrows() == 0 {
+        return Ok((Vec::new(), Mat::zeros(0, 0)));
+    }
+    sym_eig(a.as_ref(), Par::Seq)
 }
 
 /// The product `a b` on this thread. faer's `*` runs on its global parallelism, which is every
@@ -288,8 +240,9 @@ struct Modes {
     to_wavenumber: f64,
 }
 
+/// The symmetric part of a row-major Hessian as a matrix.
 fn symmetrized(h: &[f64], n3: usize) -> Mat<f64> {
-    Mat::from_fn(n3, n3, |i, j| 0.5 * (h[i * n3 + j] + h[j * n3 + i]))
+    Mat::from_fn(n3, n3, |i, j| axtb_base::fd::symmetric_part(h, n3, i, j))
 }
 
 /// Gram-Schmidt orthonormalization (vectors below `eps` in squared norm after projection
@@ -632,7 +585,7 @@ pub fn analyze(
             return Err(Error::Input(format!("{} dipole derivatives, expected {n3} (one per coordinate)", d.len())));
         }
     }
-    let params = opts.conventions.params();
+    let params = params(opts.conventions);
     let masses = match &opts.masses {
         Some(m) => {
             if m.len() != nat || m.iter().any(|x| !(x.is_finite() && *x > 0.0)) {
@@ -715,7 +668,7 @@ pub fn project_xtb(
     }
     let masses = masses::masses(numbers, &masses::XTB)?;
     let mut hs = symmetrized(hessian, n3);
-    match conventions.params().projection {
+    match params(conventions).projection {
         Projection::Cartesian => {
             if nat > 1 && !linear_xtb(&masses, positions) {
                 hs = trproj(positions, &hs);

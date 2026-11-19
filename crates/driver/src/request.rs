@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The request: what the CLI reads from argv or JSON and Python from keyword arguments.
 
 use serde::Deserialize;
@@ -17,6 +18,21 @@ impl Temperatures {
             Temperatures::One(t) => vec![*t],
             Temperatures::Many(v) => v.clone(),
         }
+    }
+}
+
+/// One rung of an SCF retry ladder (`scf_retries`): a fresh SCF with another electronic
+/// temperature (K) or iteration limit; a missing value keeps the calculation's.
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ScfRetry {
+    pub etemp: Option<f64>,
+    pub max_iter: Option<usize>,
+}
+
+impl From<ScfRetry> for axtb::method::Retry {
+    fn from(r: ScfRetry) -> Self {
+        Self { etemp: r.etemp, max_iter: r.max_iter }
     }
 }
 
@@ -53,6 +69,11 @@ pub struct Request {
     pub etemp: Option<f64>,
     /// SCF iteration limit (SCF methods; default: GFN2-xTB and g-xTB 2.0.1 250, g-xTB v1.1 1000).
     pub max_iter: Option<usize>,
+    /// SCF retries (SCF methods; default none): after an SCF that fails (does not converge, or
+    /// breaks down), a fresh SCF at each rung in order until one converges. With `etemp`, no
+    /// rung may go below it. The g-xTB solvation composite: they replace its built-in ladders,
+    /// for each part.
+    pub scf_retries: Option<Vec<ScfRetry>>,
     /// Threads (default 1; at least 1).
     pub threads: Option<usize>,
     /// `false` leaves out the dispersion (GFN2-xTB only, for validation).
@@ -74,8 +95,14 @@ pub struct Request {
     pub correction_conventions: Option<String>,
     /// Where the SCFs of a calculator start: `previous` (the previous geometry's state), `fresh`
     /// (the method's own start at every geometry), or a named start at every geometry: `eeq` or
-    /// `sad` (GFN2-xTB), `eeq-bc` (g-xTB); default: the conventions' choice.
+    /// `sad` (GFN2-xTB), `eeq-bc` (g-xTB); default: the conventions' choice. With `restart`, only
+    /// the named start (where an SCF starts without a previous state).
     pub guess: Option<String>,
+    /// Whether a calculator's SCFs start from the previous geometry's state: `previous` (also
+    /// `restart`) or `fresh` (also `off`); default: the conventions' choice (or `guess`'s). With it,
+    /// `guess` names the start alone, so that e.g. GFN2-xTB's neutral-atom start (`sad`) and
+    /// restarts from the previous state go together.
+    pub restart: Option<String>,
     /// GFN-FF: charges of the molecular fragments, in the order of their first atoms (one per
     /// fragment, summing to the total charge).
     pub fragment_charges: Option<Vec<f64>>,
@@ -106,6 +133,13 @@ pub struct Request {
     /// Add the Mayer-Wiberg bond orders (N x N) to the response (SCF methods).
     #[serde(default)]
     pub bond_orders: bool,
+    /// Add the AO overlap matrix of the SCF to the response (SCF methods).
+    #[serde(default)]
+    pub overlap: bool,
+    /// Add the Hamiltonian whose eigenvectors are the orbitals, and the overlap, to the response
+    /// (SCF methods; not g-xTB 2.0.1 in the program's conventions).
+    #[serde(default)]
+    pub hamiltonian: bool,
 
     /// `false` skips the vibrational analysis of the Hessian.
     pub vibrations: Option<bool>,

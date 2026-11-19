@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Structure input.
 
-use crate::error::{Error, Result};
+use crate::{Error, Result};
 
 const SYMBOLS: [&str; 118] = [
     "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",

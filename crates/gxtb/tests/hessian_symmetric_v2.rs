@@ -1,12 +1,14 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The analytic g-xTB 2.0.1 Hessian's symmetric response terms
 //! ([`AnalyticOptions::symmetric`]): at the default solver tolerance (1e-6) the Hessian equals
 //! that of a tight solve (1e-12) to well below the analytic Hessian's accuracy, while the same
 //! tolerance without the symmetric form is visibly off. Closed and open shells, 0 K and a
 //! finite electronic temperature, both conventions.
 
-use axtb_gxtb::v2::hessian::{symmetrize, AnalyticOptions};
-use axtb_gxtb::v2::response::CpksOptions;
-use axtb_gxtb::v2::scf::Setup;
+use axtb_base::fd::symmetrize;
+use axtb_gxtb::hessian::AnalyticOptions;
+use axtb_gxtb::response::CpksOptions;
+use axtb_gxtb::scf::Setup;
 use axtb_gxtb::{Conventions, ScfOptions};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -21,7 +23,7 @@ fn molecule(rel: &str, conv: Conventions) -> axtb::Molecule {
     let charge = input["charge"].as_f64().unwrap();
     let uhf = input["uhf"].as_u64().unwrap() as usize;
     let xyz = std::fs::read_to_string(dir.join("mol.xyz")).unwrap();
-    axtb_gxtb::v2::read_xyz(&xyz, charge, Some(uhf), conv).unwrap()
+    axtb_gxtb::model::read_xyz(&xyz, charge, Some(uhf), conv).unwrap()
 }
 
 fn maxdiff(a: &[f64], b: &[f64]) -> f64 {
@@ -37,14 +39,14 @@ fn symmetric_response_terms_match_a_tight_solve() {
         ("reference/tetrachlorocuprate", Conventions::Axtb, 3000.0),
     ] {
         let mol = molecule(rel, conv);
-        let mut setup = Setup::new(&mol, conv).unwrap();
+        let mut setup = Setup::new(&mol, axtb_gxtb::model::Model::v2_0_1(conv)).unwrap();
         let opts = ScfOptions {
             conventions: conv,
             etemp,
             energy_tol: Some(1e-12),
             residual_tol: Some(1e-11),
             max_iter: 500,
-            keep_orbitals: true,
+            all_orbitals: true,
             ..Default::default()
         };
         let r = setup.scf(&opts).unwrap();

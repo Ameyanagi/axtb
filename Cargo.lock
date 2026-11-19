@@ -79,8 +79,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "axtb"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
+ "axtb-base",
  "axtb-d4",
  "axtb-solvation",
  "faer",
@@ -88,8 +89,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "axtb-base"
+version = "0.2.0"
+dependencies = [
+ "faer",
+ "rayon",
+]
+
+[[package]]
 name = "axtb-cli"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "axtb",
  "axtb-driver",
@@ -102,18 +111,20 @@ dependencies = [
 
 [[package]]
 name = "axtb-d4"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
+ "axtb-base",
  "rayon",
 ]
 
 [[package]]
 name = "axtb-driver"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "axtb",
  "axtb-gfnff",
  "axtb-gxtb",
+ "axtb-solvation",
  "faer",
  "serde",
  "serde_json",
@@ -121,18 +132,20 @@ dependencies = [
 
 [[package]]
 name = "axtb-gfnff"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
+ "axtb-base",
+ "axtb-d4",
  "faer",
- "rayon",
  "serde_json",
 ]
 
 [[package]]
 name = "axtb-gxtb"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "axtb",
+ "axtb-base",
  "axtb-d4",
  "faer",
  "rayon",
@@ -141,18 +154,23 @@ dependencies = [
 
 [[package]]
 name = "axtb-py"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "axtb",
  "axtb-driver",
+ "axtb-solvation",
  "numpy",
  "pyo3",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "axtb-solvation"
-version = "0.1.2"
+version = "0.2.0"
+dependencies = [
+ "axtb-base",
+]
 
 [[package]]
 name = "bitflags"

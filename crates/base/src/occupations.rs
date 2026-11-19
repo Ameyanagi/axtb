@@ -1,0 +1,341 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//! Orbital occupations: the 0 K Aufbau filling, the Fermi smearing of tblite and xtb at a finite
+//! electronic temperature with tblite's electronic entropy term −TS, and the exact filling with
+//! its entropy term, written once for the methods that use them.
+//!
+//! The programs' rules differ in their tolerance, in whether the electron count is tested before
+//! or after the Newton step and in the derivative's operand order; they are reproduction
+//! conventions, so each is its own function here, with the parameters that differ explicit and
+//! its arithmetic exactly as the program computes it. The exact filling is axtb's own: the
+//! Fermi level to round-off.
+//!
+//! | rule | function and parameters | used by | from |
+//! |---|---|---|---|
+//! | tblite | [`fill_tblite`], [`Newton::XTB680`] | GFN2-xTB (every convention); the Hückel step of GFN-FF as xtb 6.8.0 computes it | tblite `get_fermi_filling`, xtb 6.8.0 `fermismear` (`src/scc_core.f90`) |
+//! | xtb `fermismear` | [`fill_fermismear`], [`Newton::XTB671`] | the Hückel step of GFN-FF as xtb 6.7.1 computes it | xtb 6.7.1 `fermismear` |
+//! | exact | [`fill_exact`], [`EXACT_MAX_STEPS`] | g-xTB (both versions) in the default conventions | axtb |
+//!
+//! The two forms differ in what they promise. The programs' Newton searches stop once the
+//! occupations hold the electron count to a tolerance (tblite: 1e5 ε ≈ 2.2e-11 electrons; the
+//! g-xTB 2.0.1 program: √ε ≈ 1.5e-8), so the occupations are those of a Fermi level a little
+//! off the one that holds the electron count, and the free energy E − TS is stationary in them
+//! only to that tolerance. The exact filling finds the Fermi
+//! level to round-off (Newton steps safeguarded by bisection, the occupations and 1 − f without
+//! cancellation, [`fermi_pair`]), so that E − TS is variational in the occupations; its
+//! entropy term [`entropy_exact`] is evaluated from the Fermi level. GFN2-xTB keeps tblite's rule
+//! in every convention.
+//!
+//! [`aufbau`] is the 0 K filling the searches start from (and tblite's HOMO index);
+//! [`entropy_tblite`] is tblite's entropy term kT Σ ln(f^f (1 − f)^(1 − f)) (≤ 0);
+//! [`fermismear_iterate`] is the Newton iteration of xtb's `fermismear` for other programs'
+//! arithmetic. The g-xTB programs' own rules live in `axtb-gxtb` (its `occupations` module), on
+//! these pieces.
+//!
+//! Which rule a method uses in which conventions is the method's choice, as is its Boltzmann
+//! constant: the levels may be in any unit (GFN-FF's Hückel levels are in eV), and kT is in the
+//! same unit ([`crate::units::KB_HARTREE`], [`crate::units::reference::KB_XTB_TBLITE`]).
+
+/// When a Newton search for the Fermi level stops.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Newton {
+    /// The search stops once the occupations hold the target electron count to within `tol`.
+    pub tol: f64,
+    /// At most this many evaluations of the occupations (each with its Newton step).
+    pub max_steps: usize,
+}
+
+impl Newton {
+    /// xtb 6.8.0's `fermismear` and tblite's `get_fermi_filling` as GFN2-xTB runs it:
+    /// min(√ε, 1e5 ε) = 1e5 ε ≈ 2.2e-11 electrons, 200 steps.
+    pub const XTB680: Newton = Newton { tol: 1e5 * f64::EPSILON, max_steps: 200 };
+    /// xtb 6.7.1's `fermismear`: 1e-9 electrons, 200 steps.
+    pub const XTB671: Newton = Newton { tol: 1e-9, max_steps: 200 };
+}
+
+/// The 0 K filling of `nel` electrons of one spin (`nel` > −1) over the levels of `occ`
+/// (lowest first): 1 for the first ⌊nel⌋, the remainder for the next, 0 above. Returns
+/// tblite's HOMO index (1-based): ⌊nel⌋, plus 1 when the remainder exceeds ½ (0: no HOMO).
+pub fn aufbau(nel: f64, occ: &mut [f64]) -> usize {
+    let n = occ.len();
+    let full = nel.floor() as usize;
+    for (i, o) in occ.iter_mut().enumerate() {
+        *o = if i < full { 1.0 } else { 0.0 };
+    }
+    // nel % 1 = nel − ⌊nel⌋ exactly for nel > −1
+    let rem = nel % 1.0;
+    if full < n {
+        occ[full] = rem;
+    }
+    full + usize::from(rem > 0.5)
+}
+
+/// tblite's and xtb 6.8.0's Fermi function at `arg = (ε − ε_F)/kT`: the occupation and its
+/// derivative with respect to ε, −f (1 − f)/kT (exactly 0 or 1 with zero derivative beyond
+/// |arg| > 50).
+#[inline]
+pub fn fermi(arg: f64, kt: f64) -> (f64, f64) {
+    if arg > 50.0 {
+        (0.0, 0.0)
+    } else if arg < -50.0 {
+        (1.0, 0.0)
+    } else {
+        let f = 1.0 / (arg.exp() + 1.0);
+        (f, -f * (1.0 - f) / kt)
+    }
+}
+
+/// tblite's Fermi filling of `nel` (real) electrons of one spin over the levels `emo` at `kt`
+/// (GFN2-xTB; xtb 6.8.0's `fermismear`). `occ` (as long as `emo`) receives the Aufbau
+/// occupations, and when `nel` > 0 and `kt` > 0 the Fermi-smeared ones. Newton steps for the
+/// Fermi level with the target `nel`, from the midpoint of the HOMO and the level above it
+/// ([`aufbau`]'s index): the Fermi function [`fermi`]; stop when |nel − Σ f| ≤ `newton.tol`
+/// (tested before the step), when Σ f' ≤ √tiny, or after `newton.max_steps`. Returns the Fermi
+/// level of the occupations, the last one evaluated (`None` for the Aufbau occupations).
+pub fn fill_tblite(nel: f64, kt: f64, emo: &[f64], occ: &mut [f64], newton: Newton) -> Option<f64> {
+    let homo = aufbau(nel, occ);
+    if !(nel > 0.0 && kt > 0.0) {
+        return None;
+    }
+    let nao = emo.len();
+    let sqrttiny = f64::MIN_POSITIVE.sqrt();
+    let i0 = homo.max(1) - 1;
+    let i1 = (homo + 1).min(nao) - 1;
+    let mut ef = 0.5 * (emo[i0] + emo[i1]);
+    let mut ef_used = ef;
+    for _ in 0..newton.max_steps {
+        let mut total = 0.0;
+        let mut dtotal = 0.0;
+        ef_used = ef;
+        for i in 0..nao {
+            let (f, df) = fermi((emo[i] - ef) / kt, kt);
+            occ[i] = f;
+            total += f;
+            dtotal -= df;
+        }
+        if (nel - total).abs() <= newton.tol {
+            break;
+        }
+        if dtotal > sqrttiny {
+            ef += (nel - total) / dtotal;
+        } else {
+            break;
+        }
+    }
+    Some(ef_used)
+}
+
+/// xtb 6.7.1's `fermismear`: the Fermi-smeared occupations `occ` (as long as `emo`,
+/// overwritten) of `nel` electrons of one spin over the levels `emo` at `kt`, for an integer
+/// count with 1 ≤ `nel` < `emo.len()` (the callers keep the Aufbau occupations otherwise).
+/// [`fermismear_iterate`] with the levels summed in order, f = 1/(eˣ + 1) and
+/// f' = eˣ/(kT ((eˣ + 1)(eˣ + 1))) for x = (ε − μ)/kT < 50, else f = f' = 0 (no lower cutoff), and
+/// the step μ += (nel − Σ f)/Σ f'. Returns the Fermi level the occupations were computed with.
+pub fn fill_fermismear(nel: usize, kt: f64, emo: &[f64], occ: &mut [f64], newton: Newton) -> f64 {
+    fermismear_iterate(nel, emo, newton, |ef| {
+        let mut total = 0.0;
+        let mut dtotal = 0.0;
+        for i in 0..emo.len() {
+            let x = (emo[i] - ef) / kt;
+            let (f, df) = if x < 50.0 {
+                let ex = x.exp();
+                (1.0 / (ex + 1.0), ex / (kt * (ex + 1.0).powi(2)))
+            } else {
+                (0.0, 0.0)
+            };
+            occ[i] = f;
+            total += f;
+            dtotal += df;
+        }
+        (total, dtotal)
+    })
+}
+
+/// The Newton iteration of xtb's `fermismear` for an integer count `nel` (1 ≤ `nel` <
+/// `emo.len()`) over the levels `emo`, with one program's arithmetic in `count`: from
+/// μ = ½ (ε_nel + ε_nel+1), `count(μ)` writes the occupations at μ and returns Σ f and the
+/// denominator of the step (xtb: Σ f'); μ += (nel − Σ f)/denominator, then stop when
+/// |nel − Σ f| ≤ `newton.tol` (tested after the step, so the occupations are those before it)
+/// or after `newton.max_steps`. Returns the Fermi level the last occupations were computed with
+/// (the programs keep the level after one more step).
+#[inline]
+pub fn fermismear_iterate(nel: usize, emo: &[f64], newton: Newton, mut count: impl FnMut(f64) -> (f64, f64)) -> f64 {
+    let occt = nel as f64;
+    let mut ef = 0.5 * (emo[nel - 1] + emo[nel]);
+    let mut ef_used = ef;
+    for _ in 0..newton.max_steps {
+        ef_used = ef;
+        let (total, denominator) = count(ef);
+        let diff = occt - total;
+        ef += diff / denominator;
+        if diff.abs() <= newton.tol {
+            break;
+        }
+    }
+    ef_used
+}
+
+/// tblite's entropy term of one spin's occupations at `kt`: kT Σ ln(f^f (1 − f)^(1 − f)) (≤ 0;
+/// GFN2-xTB, the g-xTB 2.0.1 program).
+pub fn entropy_tblite(occ: &[f64], kt: f64) -> f64 {
+    occ.iter().map(|&o| (o.powf(o) * (1.0 - o).powf(1.0 - o)).ln()).sum::<f64>() * kt
+}
+
+/// Steps of the exact search ([`fill_exact`]); it reaches round-off long before.
+pub const EXACT_MAX_STEPS: usize = 500;
+
+/// Fermi occupation f = 1/(1 + eˣ) and 1 − f = eˣ/(1 + eˣ), both without cancellation
+/// (the exact filling).
+#[inline]
+pub fn fermi_pair(x: f64) -> (f64, f64) {
+    if x > 0.0 {
+        let e = (-x).exp();
+        (e / (1.0 + e), 1.0 / (1.0 + e))
+    } else {
+        let e = x.exp();
+        (1.0 / (1.0 + e), e / (1.0 + e))
+    }
+}
+
+/// Exact filling of `nel` (real) electrons of one spin over the levels `emo` at `kt` > 0:
+/// the occupations `occ` (as long as `emo`) at the Fermi level μ with Σ f = nel to round-off,
+/// and μ. Σ f increases monotonically with μ: a bracket around the solution, then Newton steps
+/// from the midpoint of the levels ⌈nel⌉ and ⌈nel⌉ + 1, replaced by bisection when they leave
+/// the bracket; stop when |Σ f − nel| ≤ 4 ε max(nel, 1), when the step leaves μ unchanged or the
+/// bracket is narrower than 2 ε max(|μ|, kT), or after `max_steps` ([`EXACT_MAX_STEPS`]).
+/// No electrons: empty levels and μ 50 kT below the first; every level full: μ 50 kT above the
+/// last.
+pub fn fill_exact(nel: f64, kt: f64, emo: &[f64], occ: &mut [f64], max_steps: usize) -> f64 {
+    let n = emo.len();
+    let count = |mu: f64| -> (f64, f64) {
+        let mut s = 0.0;
+        let mut ds = 0.0;
+        for &e in emo {
+            let (f, g) = fermi_pair((e - mu) / kt);
+            s += f;
+            ds += f * g / kt;
+        }
+        (s, ds)
+    };
+    if n == 0 || nel <= 0.0 {
+        occ.fill(0.0);
+        return emo.first().copied().unwrap_or(0.0) - 50.0 * kt;
+    }
+    if nel >= n as f64 {
+        occ.fill(1.0);
+        return emo[n - 1] + 50.0 * kt;
+    }
+    let emin = emo.iter().copied().fold(f64::INFINITY, f64::min);
+    let emax = emo.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let (mut lo, mut hi) = (emin - kt, emax + kt);
+    while count(lo).0 > nel {
+        lo -= (hi - lo).max(kt);
+    }
+    while count(hi).0 < nel {
+        hi += (hi - lo).max(kt);
+    }
+    let k = nel.ceil() as usize;
+    let mut mu = if k >= 1 && k < n { 0.5 * (emo[k - 1] + emo[k]) } else { 0.5 * (lo + hi) };
+    if !(mu > lo && mu < hi) {
+        mu = 0.5 * (lo + hi);
+    }
+    let tol = 4.0 * f64::EPSILON * nel.max(1.0);
+    for _ in 0..max_steps {
+        let (s, ds) = count(mu);
+        let r = s - nel;
+        if r.abs() <= tol {
+            break;
+        }
+        if r > 0.0 {
+            hi = mu;
+        } else {
+            lo = mu;
+        }
+        let newton = if ds > 0.0 { mu - r / ds } else { f64::NAN };
+        let next = if newton > lo && newton < hi { newton } else { 0.5 * (lo + hi) };
+        if next == mu || hi - lo <= 2.0 * f64::EPSILON * mu.abs().max(kt) {
+            mu = next;
+            break;
+        }
+        mu = next;
+    }
+    for (o, &e) in occ.iter_mut().zip(emo) {
+        *o = fermi_pair((e - mu) / kt).0;
+    }
+    mu
+}
+
+/// Entropy term kT Σ [f ln f + (1 − f) ln(1 − f)] of the levels `emo` filled at the Fermi level
+/// `mu` (the exact filling; f and 1 − f from [`fermi_pair`]; ≤ 0).
+pub fn entropy_exact(emo: &[f64], mu: f64, kt: f64) -> f64 {
+    let mut s = 0.0;
+    for &e in emo {
+        let (f, g) = fermi_pair((e - mu) / kt);
+        if f > 0.0 {
+            s += f * f.ln();
+        }
+        if g > 0.0 {
+            s += g * g.ln();
+        }
+    }
+    kt * s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::reference::KB_XTB_TBLITE;
+
+    #[test]
+    fn tolerance_is_the_programs_expression() {
+        assert_eq!(Newton::XTB680.tol.to_bits(), f64::EPSILON.sqrt().min(1e5 * f64::EPSILON).to_bits());
+    }
+
+    #[test]
+    fn aufbau_fills_and_finds_the_homo() {
+        let mut occ = [9.0; 5];
+        assert_eq!(aufbau(2.75, &mut occ), 3);
+        assert_eq!(occ, [1.0, 1.0, 0.75, 0.0, 0.0]);
+        assert_eq!(aufbau(2.25, &mut occ), 2);
+        assert_eq!(aufbau(7.0, &mut occ), 7);
+        assert_eq!(occ, [1.0; 5]);
+        assert_eq!(aufbau(0.0, &mut occ), 0);
+        assert_eq!(occ, [0.0; 5]);
+        // a count just below zero (g-xTB 2.0.1's program count with every electron unpaired)
+        assert_eq!(aufbau(-2e-11, &mut occ), 0);
+        assert_eq!(occ[0], -2e-11);
+    }
+
+    #[test]
+    fn newton_searches_place_the_electrons() {
+        let emo = [-1.07, -0.54, -0.48, -0.47, 0.29, 0.32];
+        let kt = 3000.0 * KB_XTB_TBLITE;
+        let mut occ = [0.0; 6];
+        assert!(fill_tblite(3.0, kt, &emo, &mut occ, Newton::XTB680).is_some());
+        assert!((occ.iter().sum::<f64>() - 3.0).abs() <= Newton::XTB680.tol);
+        assert!(occ[2] < 1.0 && occ[3] > 0.0);
+        assert!(entropy_tblite(&occ, kt) < 0.0);
+        fill_fermismear(3, kt, &emo, &mut occ, Newton::XTB671);
+        assert!((occ.iter().sum::<f64>() - 3.0).abs() <= Newton::XTB671.tol);
+        // no smearing without electrons or temperature: the Aufbau occupations
+        assert!(fill_tblite(0.0, kt, &emo, &mut occ, Newton::XTB680).is_none());
+        assert!(fill_tblite(3.5, 0.0, &emo, &mut occ, Newton::XTB680).is_none());
+        assert_eq!(occ, [1.0, 1.0, 1.0, 0.5, 0.0, 0.0]);
+        // integer occupations carry no entropy
+        aufbau(3.0, &mut occ);
+        assert_eq!(entropy_tblite(&occ, kt), 0.0);
+    }
+
+    #[test]
+    fn exact_filling_places_the_electrons() {
+        let emo = [-0.9, -0.5, -0.31, -0.30, -0.29, 0.1, 0.2];
+        let mut occ = [0.0; 7];
+        for kt in [1e-4, 3e-3, 1.6e-2, 0.2] {
+            for nel in [1.0, 3.0, 4.0, 6.0] {
+                let mu = fill_exact(nel, kt, &emo, &mut occ, EXACT_MAX_STEPS);
+                let s: f64 = occ.iter().sum();
+                assert!((s - nel).abs() < 1e-13, "kt {kt} nel {nel}: {s}");
+                assert!(entropy_exact(&emo, mu, kt) <= 0.0);
+            }
+        }
+    }
+}

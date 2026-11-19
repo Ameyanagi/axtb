@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The response: what the CLI writes as JSON and Python returns as a dict, with the same
 //! fields. A field is present when it was computed (`skip` when `None`), except
 //! `homo_lumo_gap`, which is `null` without a LUMO.
@@ -78,12 +79,54 @@ impl Serialize for Named {
     }
 }
 
-/// One SCF attempt (GFN2-xTB: mixer, iterations, converged).
-#[derive(Serialize, Clone, Debug, PartialEq)]
+/// One SCF attempt: GFN2-xTB's mixers (mixer, iterations, converged); with `scf_retries` every
+/// try of the ladder, with its rung (`retry`: 0 the calculation's own settings, i the i-th
+/// retry), electronic temperature (K), iteration limit and start (a converged try: where its SCF
+/// started), the part and whether it was the part's Hessian (the composite), and the error code
+/// of a failed try (`scf_not_converged`, `numerical_failure`). The fields a try does not have are
+/// left out.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
 pub struct Attempt {
-    pub mixer: &'static str,
-    pub iterations: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hessian: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub etemp: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iter: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mixer: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<usize>,
     pub converged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<&'static str>,
+}
+
+impl Attempt {
+    /// One of GFN2-xTB's mixer attempts.
+    pub(crate) fn mixer(a: &axtb::method::Attempt) -> Self {
+        Self { mixer: Some(a.mixer), iterations: Some(a.iterations), converged: a.converged, ..Self::default() }
+    }
+}
+
+/// How the SCF retry ladder of a request with `scf_retries` went.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Retried {
+    /// The rung that gave the result: 0 the calculation's own settings, i the i-th of the
+    /// retries (the composite: the highest of its parts').
+    pub rung: usize,
+    /// The retries given.
+    pub of: usize,
+    /// The rung's label (`retry i of n: etemp T K, max_iter N`); not for rung 0, nor for the
+    /// composite, whose parts have theirs (`retry`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// What every SCF method reports besides energy and charges.
@@ -96,11 +139,17 @@ pub struct Scf {
     /// GFN2-xTB: the mixer that produced the result (`broyden`, `diis`, `diis-fallback`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mixer_used: Option<&'static str>,
-    /// GFN2-xTB: every SCF attempt.
+    /// GFN2-xTB: every SCF attempt; with `scf_retries`, every try of the ladder (every
+    /// method; the composite: of every part).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scf_attempts: Option<Vec<Attempt>>,
     /// HOMO-LUMO gap (Eh); `null` without a LUMO.
     pub homo_lumo_gap: Option<f64>,
+    /// Fermi levels (Eh) of the alpha and beta electrons; `null` where the occupations are the
+    /// Aufbau filling (0 K). A closed shell has the same level in both.
+    pub fermi_levels: [Option<f64>; 2],
+    /// Electronic temperature (K) of the occupations; 0 for the Aufbau filling.
+    pub electronic_temperature: f64,
     /// Molecular quadrupole about the origin (xx, xy, yy, xz, yz, zz; e bohr², traceless;
     /// tblite's form in the `tblite` and g-xTB 2.0.1 `gxtb` conventions).
     pub quadrupole: [f64; 6],
@@ -118,6 +167,33 @@ pub struct Scf {
     /// Mayer-Wiberg bond orders (N x N), when asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bond_orders: Option<Matrix>,
+    /// The AO overlap matrix of the SCF (n x n, with its screening; g-xTB: of the SCF basis),
+    /// when asked for or with the Hamiltonian. The AO order is axtb's (atom by atom, shell by
+    /// shell, m = -l..l, p as y, z, x), not the Molden file's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<Matrix>,
+    /// The Hamiltonian whose generalized eigenvectors with the overlap are the orbitals (n x n,
+    /// the operator of one build at the last input), one per spin channel of the orbitals:
+    /// GFN2-xTB one (open shells included: one spin-averaged Hamiltonian), g-xTB one for a closed
+    /// shell, alpha and beta for an open shell; when asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hamiltonian: Option<Vec<Matrix>>,
+    /// For the Python binding (not in the CLI's JSON): the electrons of each atom outside the
+    /// valence-only orbitals; Mulliken shell populations (electrons) with each shell's atom,
+    /// angular momentum and reference occupation; the traceless (Buckingham) molecular quadrupole
+    /// in every conventions.
+    #[serde(skip)]
+    pub core_electrons: Vec<usize>,
+    #[serde(skip)]
+    pub shell_populations: Vec<f64>,
+    #[serde(skip)]
+    pub shell_atoms: Vec<usize>,
+    #[serde(skip)]
+    pub shell_angular_momenta: Vec<usize>,
+    #[serde(skip)]
+    pub reference_shell_occupations: Vec<f64>,
+    #[serde(skip)]
+    pub quadrupole_traceless: [f64; 6],
 }
 
 /// The GFN-FF topology (0-based atom indices).
@@ -232,6 +308,14 @@ pub struct Thermo {
     pub n_modes: usize,
     pub n_inverted: usize,
     pub n_dropped: usize,
+    /// For the Python binding (not in the CLI's JSON): the imaginary frequencies (cm⁻¹) inverted
+    /// and left out, and the average moment of inertia B_av (kg m²) of the rotor interpolation.
+    #[serde(skip)]
+    pub inverted_frequencies: Vec<f64>,
+    #[serde(skip)]
+    pub dropped_frequencies: Vec<f64>,
+    #[serde(skip)]
+    pub average_moment: f64,
     pub zpve: f64,
     pub pressure: f64,
     pub rotor_cutoff: f64,
@@ -278,6 +362,9 @@ impl Vibrations {
             n_modes: t.n_modes,
             n_inverted: t.n_inverted,
             n_dropped: t.n_dropped,
+            inverted_frequencies: t.inverted_frequencies.clone(),
+            dropped_frequencies: t.dropped_frequencies.clone(),
+            average_moment: t.average_moment,
             zpve: t.zpve,
             pressure: t.pressure,
             rotor_cutoff: t.rotor_cutoff,
@@ -300,37 +387,42 @@ impl Vibrations {
     }
 }
 
-/// Electronic temperatures (K) of the composite's g-xTB and GFN2 parts.
-#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
-pub struct CompositeEtemp {
-    pub gxtb: f64,
-    pub gfn2: f64,
+/// Named values of a composite's description (its definition and settings), written as an
+/// object in their order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Details(pub Vec<(&'static str, axtb::method::Detail)>);
+
+impl Serialize for Details {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(self.0.len()))?;
+        for (k, v) in &self.0 {
+            m.serialize_entry(k, &DetailRef(v))?;
+        }
+        m.end()
+    }
 }
 
-/// The g-xTB solvation composite's definition and settings.
-#[derive(Serialize, Clone, Debug, Default, PartialEq)]
-pub struct CompositeInfo {
-    pub definition: String,
-    pub method: &'static str,
-    pub solvation_correction: &'static str,
-    pub solvation_model: &'static str,
-    pub solvent: String,
-    pub solvation_state: &'static str,
-    pub conventions: &'static str,
-    pub correction_conventions: &'static str,
-    pub etemp: CompositeEtemp,
-    pub reuse_guess: bool,
-    pub gxtb_reuse_guess: bool,
-    pub retries: bool,
-}
+/// One value of [`Details`] as JSON: text and names as strings, numbers, flags, groups as
+/// objects.
+struct DetailRef<'a>(&'a axtb::method::Detail);
 
-/// Energies (Eh) of the composite's parts.
-#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
-pub struct Components {
-    pub gxtb: f64,
-    pub gfn2_solvated: f64,
-    pub gfn2_gas: f64,
-    pub solvation_correction: f64,
+impl Serialize for DetailRef<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use axtb::method::Detail;
+        match self.0 {
+            Detail::Text(t) => s.serialize_str(t),
+            Detail::Name(n) => s.serialize_str(n),
+            Detail::Number(x) => s.serialize_f64(*x),
+            Detail::Flag(b) => s.serialize_bool(*b),
+            Detail::Group(g) => {
+                let mut m = s.serialize_map(Some(g.len()))?;
+                for (k, v) in g {
+                    m.serialize_entry(k, &DetailRef(v))?;
+                }
+                m.end()
+            }
+        }
+    }
 }
 
 /// How one part of the composite converged.
@@ -346,26 +438,43 @@ pub struct Part {
     pub max_iter: usize,
     /// The retry that converged it, if any.
     pub retry: Option<String>,
+    /// With `scf_retries`: the index of that retry (0: the first try).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rung: Option<usize>,
     pub seconds: f64,
     /// The part's Hessian method (in `hessian_parts`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hessian_method: Option<&'static str>,
 }
 
-/// The composite's three parts.
-#[derive(Serialize, Clone, Debug, Default, PartialEq)]
-pub struct Parts {
-    pub gxtb: Part,
-    pub gfn2_solvated: Part,
-    pub gfn2_gas: Part,
+/// A composite's parts by key, written as an object in their order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Parts(pub Vec<(&'static str, Part)>);
+
+impl Parts {
+    /// The part `key`.
+    pub fn get(&self, key: &str) -> Option<&Part> {
+        self.0.iter().find(|(k, _)| *k == key).map(|(_, p)| p)
+    }
 }
 
-/// What the g-xTB solvation composite adds.
+impl Serialize for Parts {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(self.0.len()))?;
+        for (k, v) in &self.0 {
+            m.serialize_entry(k, v)?;
+        }
+        m.end()
+    }
+}
+
+/// What a composite adds (the g-xTB solvation composite: its definition and settings, the
+/// energies of g-xTB, the GFN2 halves and the correction, how each part converged).
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
 pub struct Composite {
-    pub composite: CompositeInfo,
-    /// The single point's parts.
-    pub components: Components,
+    pub composite: Details,
+    /// The energies of the single point's parts and corrections (Eh).
+    pub components: Named,
     pub parts: Parts,
     /// The parts of the Hessian, with their Hessian methods.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,8 +484,8 @@ pub struct Composite {
 /// The response to a [`crate::Request`], the same for every front end.
 ///
 /// Every response has `program`, `version`, `method` (canonical; `null` for an analysis of a
-/// given Hessian) and `conventions` (the method's, canonical; the analysis conventions for an
-/// analysis); SCF methods add `eigensolver` (`SinglePoint::eigensolver`: `faer`, or the run-time
+/// given Hessian), `conventions` (the method's, canonical; the analysis conventions for an
+/// analysis) and `numerics` (the numerics identity, [`crate::numerics`]); SCF methods add `eigensolver` (`SinglePoint::eigensolver`: `faer`, or the run-time
 /// LAPACK library). A calculation has `energy`, `charges`, `dipole`, `terms`, `timings` and
 /// `seconds`, and `gradient` when asked for or with a Hessian; the groups below are present
 /// when they apply.
@@ -386,6 +495,9 @@ pub struct Response {
     pub version: &'static str,
     pub method: Option<&'static str>,
     pub conventions: &'static str,
+    /// The numerics identity of the calculation ([`crate::numerics`]): `"gfn2:1"`,
+    /// `"gxtb-v2.0.1:1+gfn2:1"` for the composite, [`crate::ANALYSIS_NUMERICS`] for an analysis.
+    pub numerics: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eigensolver: Option<String>,
     /// Eh (an analysis: the given energy).
@@ -400,9 +512,15 @@ pub struct Response {
     /// Dipole moment about the origin (e bohr).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dipole: Option<[f64; 3]>,
-    /// Energy terms (Eh), named as the method's program reports them.
+    /// Energy terms (Eh), named as the method's program reports them: pieces, which add up to
+    /// the energy, and the subtotals named in `subtotals`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terms: Option<Named>,
+    /// The names of the terms that are subtotals of other terms (GFN2-xTB's and g-xTB's
+    /// `electronic`); every other term is a piece of the partition of the energy. For the Python
+    /// binding (not in the CLI's JSON).
+    #[serde(skip)]
+    pub subtotals: Vec<&'static str>,
     #[serde(flatten)]
     pub scf: Option<Scf>,
     #[serde(flatten)]
@@ -419,10 +537,17 @@ pub struct Response {
     pub vibrations: Option<Vibrations>,
     #[serde(flatten)]
     pub composite: Option<Composite>,
+    /// With `scf_retries`: the rung that gave the result ([`crate::retry_warnings`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scf_retry: Option<Retried>,
+    /// The orbitals with their basis (`Task::orbitals`), structured, for the Python binding (not
+    /// in the CLI's JSON).
+    #[serde(skip)]
+    pub orbitals: Option<axtb::Orbitals>,
     /// Wall time per phase of the single point (s).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timings: Option<Named>,
-    /// Wall time of the request (s; the CLI and `axtb.singlepoint`: with the setup).
+    /// Wall time of the request (s; the CLI and `axtb.compute`: with the setup).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
 }

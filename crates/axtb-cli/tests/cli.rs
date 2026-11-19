@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The command line itself: help and version, usage errors (exit code 2), JSON errors with
 //! their kinds (exit code 1), the response's header, the one alias rule, settings that do not
 //! apply, and XYZ files converted with the factor of the conventions.
@@ -109,13 +110,21 @@ fn json_errors_have_kinds() {
         serde_json::json!({"solvation_state": "gsolv"}),
         serde_json::json!({"temperature": 300.0}),
         serde_json::json!({"hessian": true, "hessian_method": "analytic", "hessian_step": 0.01}),
-        serde_json::json!({"method": "gfnff", "bond_orders": true}),
         serde_json::json!({"method": "gfnff", "accuracy": 1.0}),
         serde_json::json!({"method": "gfn1"}),
         serde_json::json!({"molden_cartesian": true}),
     ] {
         let (k, e) = kind(with(water(), extra.clone()));
         assert_eq!(k, "input", "{extra}: {e}");
+    }
+    // outputs the method does not have
+    for extra in [
+        serde_json::json!({"method": "gfnff", "bond_orders": true}),
+        serde_json::json!({"method": "gfnff", "molden": true}),
+        serde_json::json!({"method": "gfnff", "overlap": true}),
+    ] {
+        let (k, e) = kind(with(water(), extra.clone()));
+        assert_eq!(k, "not_applicable", "{extra}: {e}");
     }
     // an analysis of a given Hessian takes no calculation settings
     let h = vec![vec![0.0; 9]; 9];
@@ -161,4 +170,33 @@ fn xyz_units_follow_the_conventions() {
         assert_eq!(file["energy"], r["energy"], "{conventions}");
         assert_eq!(file["gradient"], r["gradient"], "{conventions}");
     }
+}
+
+/// `--scf-retry` is the request's `scf_retries`, repeated in order; its warning goes to stderr;
+/// malformed rungs are usage errors. (Water needs 8 iterations: 5 fail, the rung's 250 converge.)
+#[test]
+fn scf_retry_flags() {
+    let file = structure("water.xyz");
+    let xyz = file.to_str().unwrap();
+    let base = ["--grad", "--max-iter", "5"];
+    let ladder = ["--scf-retry", "etemp=1000,max_iter=250", "--scf-retry", "max_iter=1000"];
+    let out = axtb(&[&[xyz][..], &base, &ladder].concat(), None);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let r: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        r["scf_retry"],
+        serde_json::json!({"rung": 1, "of": 2, "label": "retry 1 of 2: etemp 1000 K, max_iter 250"})
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("warning: converged on retry 1 of 2: etemp 1000 K, max_iter 250"), "{stderr}");
+    for bad in ["etemp", "temp=3", "etemp=hot", "max_iter=1.5", "etemp=1,etemp=2"] {
+        let out = axtb(&[xyz, "--scf-retry", bad], None);
+        assert_eq!(out.status.code(), Some(2), "{bad}");
+    }
+    // refused by the driver: below --etemp, or for GFN-FF
+    let out = axtb(&[xyz, "--etemp", "1000", "--scf-retry", "etemp=300"], None);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("below"));
+    let (code, r) = json(with(water(), serde_json::json!({"method": "gfnff", "scf_retries": [{"etemp": 1000.0}]})));
+    assert_eq!((code, r["error"]["kind"].as_str()), (1, Some("input")));
 }

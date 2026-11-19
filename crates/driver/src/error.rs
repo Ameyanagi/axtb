@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The one error type of the front ends.
 
+use crate::response::Attempt;
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 use std::fmt;
@@ -16,15 +18,19 @@ pub enum Error {
     /// GFN-FF could not set up the topology of the structure (an input problem: xtb stops too).
     Topology(String),
     /// The SCF did not converge: the last attempt's iterations, energy change (Eh) and
-    /// residual.
-    ScfNotConverged { iterations: usize, energy_change: f64, residual: f64 },
+    /// residual; with `scf_retries`, every try of the ladder (empty without).
+    ScfNotConverged { iterations: usize, energy_change: f64, residual: f64, attempts: Vec<Attempt> },
     /// A numerical failure (singular matrices, non-finite results).
     Numerical(String),
+    /// A request the method or its conventions cannot honour by design, refused before the
+    /// calculation runs (e.g. a Hamiltonian matrix of g-xTB 2.0.1 in the program's conventions,
+    /// orbitals or AO matrices of GFN-FF): qcdata's `not_applicable`.
+    NotApplicable(String),
 }
 
 impl Error {
     /// The kind as the front ends name it: `input`, `unsupported_element`, `topology`,
-    /// `scf_not_converged` or `numerical`.
+    /// `scf_not_converged`, `numerical` or `not_applicable`.
     pub fn kind(&self) -> &'static str {
         match self {
             Error::Input(_) => "input",
@@ -32,13 +38,30 @@ impl Error {
             Error::Topology(_) => "topology",
             Error::ScfNotConverged { .. } => "scf_not_converged",
             Error::Numerical(_) => "numerical",
+            Error::NotApplicable(_) => "not_applicable",
         }
     }
 
-    /// Whether the request is at fault (input, unsupported element, topology): Python raises
-    /// `axtb.InputError`, a `ValueError`.
+    /// A stable machine-readable code of the error, for the Python binding (not in the CLI's
+    /// JSON, whose `kind` stays): `invalid_input`, `unsupported_element`, `topology_failed`,
+    /// `scf_not_converged`, `numerical_failure` or `not_applicable`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::Input(_) => "invalid_input",
+            Error::UnsupportedElement { .. } => "unsupported_element",
+            Error::Topology(_) => "topology_failed",
+            Error::ScfNotConverged { .. } => "scf_not_converged",
+            Error::Numerical(_) => "numerical_failure",
+            Error::NotApplicable(_) => "not_applicable",
+        }
+    }
+
+    /// Whether the request is at fault (input, unsupported element, topology, not applicable).
     pub fn is_input(&self) -> bool {
-        matches!(self, Error::Input(_) | Error::UnsupportedElement { .. } | Error::Topology(_))
+        matches!(
+            self,
+            Error::Input(_) | Error::UnsupportedElement { .. } | Error::Topology(_) | Error::NotApplicable(_)
+        )
     }
 }
 
@@ -48,11 +71,12 @@ impl fmt::Display for Error {
             Error::Input(msg) => write!(f, "invalid input: {msg}"),
             Error::UnsupportedElement { message, .. } => f.write_str(message),
             Error::Topology(msg) => write!(f, "GFN-FF topology setup failed: {msg}"),
-            Error::ScfNotConverged { iterations, energy_change, residual } => write!(
+            Error::ScfNotConverged { iterations, energy_change, residual, .. } => write!(
                 f,
                 "SCF not converged in {iterations} iterations (last energy change {energy_change:.3e} Eh, residual {residual:.3e})"
             ),
             Error::Numerical(msg) => write!(f, "numerical failure: {msg}"),
+            Error::NotApplicable(msg) => write!(f, "not applicable: {msg}"),
         }
     }
 }
@@ -60,7 +84,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// The error as the CLI writes it: `kind`, `message` and the kind's own fields (`z`;
-/// `iterations`, `energy_change`, `residual`).
+/// `iterations`, `energy_change`, `residual`, and with `scf_retries` the ladder's `attempts`).
 impl Serialize for Error {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         let mut m = s.serialize_map(None)?;
@@ -68,10 +92,13 @@ impl Serialize for Error {
         m.serialize_entry("message", &self.to_string())?;
         match self {
             Error::UnsupportedElement { z, .. } => m.serialize_entry("z", z)?,
-            Error::ScfNotConverged { iterations, energy_change, residual } => {
+            Error::ScfNotConverged { iterations, energy_change, residual, attempts } => {
                 m.serialize_entry("iterations", iterations)?;
                 m.serialize_entry("energy_change", energy_change)?;
                 m.serialize_entry("residual", residual)?;
+                if !attempts.is_empty() {
+                    m.serialize_entry("attempts", attempts)?;
+                }
             }
             _ => {}
         }
@@ -85,20 +112,11 @@ impl From<axtb::Error> for Error {
             axtb::Error::Input(msg) => Error::Input(msg),
             axtb::Error::UnsupportedElement { z, .. } => Error::UnsupportedElement { z, message: e.to_string() },
             axtb::Error::ScfNotConverged { iterations, energy_change, residual } => {
-                Error::ScfNotConverged { iterations, energy_change, residual }
+                Error::ScfNotConverged { iterations, energy_change, residual, attempts: Vec::new() }
             }
+            axtb::Error::Topology(msg) => Error::Topology(msg),
             axtb::Error::Numerical(msg) => Error::Numerical(msg),
-        }
-    }
-}
-
-impl From<axtb_gfnff::Error> for Error {
-    fn from(e: axtb_gfnff::Error) -> Self {
-        match e {
-            axtb_gfnff::Error::Input(msg) => Error::Input(msg),
-            axtb_gfnff::Error::UnsupportedElement(z) => Error::UnsupportedElement { z, message: e.to_string() },
-            axtb_gfnff::Error::Topology(msg) => Error::Topology(msg),
-            axtb_gfnff::Error::Numerical(msg) => Error::Numerical(msg),
+            axtb::Error::NotApplicable(msg) => Error::NotApplicable(msg),
         }
     }
 }

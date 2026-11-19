@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Analytic Hessian of GFN-FF: the exact derivative of xtb's analytic gradient.
 //!
 //! Every column (one Cartesian coordinate of one atom) is the forward-mode derivative
@@ -15,7 +16,6 @@
 //! gradient, i.e. what finite differences of xtb's or axtb's gradient converge to; it is
 //! symmetrized at the end (`max_asymmetry` reports how far it was from symmetric).
 
-use crate::cn::{derf_count, dlog_cn, erf_count, log_cn};
 use crate::data;
 use crate::energy::{self, bond_par, hb2_eval, hb2_kind, Hb2Kind, Model, State};
 use crate::error::{Error, Result};
@@ -23,12 +23,14 @@ use crate::param;
 use crate::real::{Dual, Real, V3};
 use crate::terms;
 use crate::topology::Topology;
-use faer::{Mat, Par};
-use rayon::prelude::*;
+use axtb_base::fd;
+use axtb_base::ncoord::{dlog_cap, log_cap, XtbErf};
+use axtb_base::threads::{for_slices, Threads};
+use faer::Mat;
 
 /// A nuclear Hessian.
 #[derive(Clone, Debug)]
-pub struct Hessian {
+pub(crate) struct FfHessian {
     /// Energy at the geometry (Eh).
     pub energy: f64,
     /// Gradient at the geometry (Eh/bohr).
@@ -154,7 +156,7 @@ impl<'a> Ctx<'a> {
             hb2_of,
             xb_of,
             wts_dual,
-            ddlog: (0..n).map(|a| dlog_cn(Dual::new(st.lcn.cn_raw[a], 1.0), model.param.cnmax).d).collect(),
+            ddlog: (0..n).map(|a| dlog_cap(Dual::new(st.lcn.cn_raw[a], 1.0), model.param.cnmax).d).collect(),
             hb_entries_of_h,
         }
     }
@@ -216,7 +218,7 @@ impl<'a> Ctx<'a> {
             let xi = self.xd(i, k, c);
             let xj = self.xd(j, k, c);
             let r = crate::real::norm2(crate::real::sub(xi, xj));
-            let e = erf_count(r, r0);
+            let e = XtbErf::GFNFF.count_of(r, r0);
             rawd[i] += e.d;
             rawd[j] += e.d;
             // partners whose CN moves by less than 1e-14 per bohr are left out (their
@@ -235,7 +237,7 @@ impl<'a> Ctx<'a> {
         }
         let cn_dual = |a: usize| -> Dual {
             if in_a[a] {
-                log_cn(Dual::new(st.lcn.cn_raw[a], rawd[a]), p.cnmax)
+                log_cap(Dual::new(st.lcn.cn_raw[a], rawd[a]), p.cnmax)
             } else {
                 Dual::new(st.lcn.cn[a], 0.0)
             }
@@ -428,7 +430,7 @@ impl<'a> Ctx<'a> {
                 let d = crate::real::sub(xi, xj);
                 let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                 let r0 = p.rcov[at[i] - 1] + p.rcov[at[j] - 1];
-                let der = derf_count(r, r0);
+                let der = XtbErf::GFNFF.dcount_of(r, r0);
                 for cc in 0..3 {
                     let dv = der * (xj[cc] - xi[cc]) / r;
                     let v = sd * dv.v + s * dv.d;
@@ -556,7 +558,6 @@ impl<'a> Ctx<'a> {
         let xyz = self.xyz;
         let n = topo.natoms();
         let q = &st.charges;
-        let sqrtpi = param::sqrtpi();
         let mut r = Mat::<f64>::zeros(n + topo.nfrag, 3 * n);
         for i in 0..n {
             for j in 0..i {
@@ -564,8 +565,7 @@ impl<'a> Ctx<'a> {
                 let r2 = d[0].powi(2) + d[1].powi(2) + d[2].powi(2);
                 let rab = r2.sqrt();
                 let gammij = 1. / (topo.alpeeq[i] + topo.alpeeq[j]).sqrt();
-                let erff = crate::real::erf(gammij * rab);
-                let dd = 2.0e0 * gammij * (-(gammij.powi(2) * r2)).exp() / (sqrtpi * r2) - erff / (rab * r2);
+                let dd = terms::eeq_kernel_dd(r2, rab, gammij);
                 for c in 0..3 {
                     let t = dd * d[c];
                     // d A_ij / d x_i = t, d A_ij / d x_j = -t
@@ -595,29 +595,20 @@ impl<'a> Ctx<'a> {
 }
 
 /// Analytic Hessian at `xyz` (bohr).
-pub fn hessian(
-    topo: &Topology,
-    model: &Model,
-    xyz: &[[f64; 3]],
-    pool: Option<&rayon::ThreadPool>,
-    par: Par,
-) -> Result<Hessian> {
+pub(crate) fn hessian(topo: &Topology, model: &Model, xyz: &[[f64; 3]], threads: &Threads) -> Result<FfHessian> {
     let n = topo.natoms();
     let n3 = 3 * n;
     let mut timings = Vec::new();
     let t0 = std::time::Instant::now();
-    let (ev, st) = energy::evaluate_full(topo, model, xyz, true, true, pool, par)?;
+    let (ev, st) = energy::evaluate_full(topo, model, xyz, true, true, threads)?;
     let st = st.unwrap();
     timings.push(("energy+gradient", t0.elapsed().as_secs_f64()));
     let t1 = std::time::Instant::now();
     let ctx = Ctx::new(topo, model, xyz, &st);
     // columns written straight into one column-major buffer (column col = chunk col)
     let mut hbuf = vec![0.0f64; n3 * n3];
-    let fill = |(col, chunk): (usize, &mut [f64])| chunk.copy_from_slice(&ctx.column(col / 3, col % 3));
-    match pool {
-        Some(p) => p.install(|| hbuf.par_chunks_mut(n3.max(1)).enumerate().for_each(fill)),
-        None => hbuf.chunks_mut(n3.max(1)).enumerate().for_each(fill),
-    }
+    let fill = |col: usize, chunk: &mut [f64]| chunk.copy_from_slice(&ctx.column(col / 3, col % 3));
+    threads.install(|| for_slices(&mut hbuf, n3.max(1), threads.parallel(), fill));
     timings.push(("columns", t1.elapsed().as_secs_f64()));
     let t2 = std::time::Instant::now();
     // EEQ charge response: H -= R^T [M^-1 R]_q
@@ -625,12 +616,13 @@ pub fn hessian(
     {
         let mut h = faer::MatMut::from_column_major_slice_mut(&mut hbuf, n3, n3);
         let r = ctx.eeq_r();
+        let par = threads.par();
         let block = 384;
         let mut start = 0;
         while start < n3 {
             let w = block.min(n3 - start);
             let mut x = r.as_ref().subcols(start, w).to_owned();
-            st.eeq_lu.solve(&mut x);
+            st.eeq.solve_in_place(x.as_mut());
             let rt = r.as_ref().subrows(0, n).transpose();
             let xq = x.as_ref().subrows(0, n);
             faer::linalg::matmul::matmul(h.as_mut().subcols_mut(start, w), faer::Accum::Add, rt, xq, -1.0, par);
@@ -653,21 +645,11 @@ pub fn hessian(
     }
     timings.push(("eeq response", t2.elapsed().as_secs_f64()));
     // symmetrize in place (the buffer is then the same in row- and column-major order)
-    let mut maxasym: f64 = 0.0;
-    for i in 0..n3 {
-        for j in 0..i {
-            let a = hbuf[i * n3 + j];
-            let b = hbuf[j * n3 + i];
-            maxasym = maxasym.max((a - b).abs());
-            let m = 0.5 * (a + b);
-            hbuf[i * n3 + j] = m;
-            hbuf[j * n3 + i] = m;
-        }
-    }
+    let maxasym = fd::symmetrize(&mut hbuf, n3);
     if hbuf.iter().any(|v| !v.is_finite()) {
         return Err(not_finite(&ctx, &hbuf));
     }
-    Ok(Hessian {
+    Ok(FfHessian {
         energy: ev.energies.total,
         gradient: ev.gradient.unwrap(),
         hessian: hbuf,
@@ -717,70 +699,40 @@ fn not_finite(ctx: &Ctx, h: &[f64]) -> Error {
 
 /// Hessian by central differences (`step` bohr) of the analytic gradient with the fixed
 /// topology, as `xtb --hess` (step 0.005) computes it: symmetrized, with the dipole
-/// derivatives from the EEQ dipoles of the displaced structures. 6N gradient evaluations,
-/// parallel over the displacements, each column written straight into the result.
-pub fn numerical_hessian(
+/// derivatives from the EEQ dipoles of the displaced structures. 6N gradient evaluations
+/// ([`fd::numerical_hessian`], each coordinate moved to x + h and x - h), parallel over the
+/// displacements, each column written straight into the result.
+pub(crate) fn numerical_hessian(
     topo: &Topology,
     model: &Model,
     xyz: &[[f64; 3]],
     step: f64,
-    pool: Option<&rayon::ThreadPool>,
-    par: Par,
-) -> Result<Hessian> {
-    let n = topo.natoms();
-    let n3 = 3 * n;
+    threads: &Threads,
+) -> Result<FfHessian> {
     let t0 = std::time::Instant::now();
-    let reference = energy::evaluate(topo, model, xyz, true, pool, par)?;
+    let reference = energy::evaluate(topo, model, xyz, true, threads)?;
     let mut timings = vec![("energy+gradient", t0.elapsed().as_secs_f64())];
     let t1 = std::time::Instant::now();
-    let dipole = |x: &[[f64; 3]], q: &[f64]| -> [f64; 3] {
+    // gradient and EEQ dipole (about the origin) of a displaced structure
+    let point = |x: &[[f64; 3]]| -> Result<(Vec<[f64; 3]>, [f64; 3])> {
+        let e = energy::evaluate(topo, model, x, true, &Threads::sequential())?;
         let mut d = [0.0; 3];
-        for (xi, qi) in x.iter().zip(q) {
-            for e in 0..3 {
-                d[e] += xi[e] * qi;
+        for (xi, qi) in x.iter().zip(&e.charges) {
+            for k in 0..3 {
+                d[k] += xi[k] * qi;
             }
         }
-        d
+        Ok((e.gradient.unwrap(), d))
     };
-    // column k of the (column-major) buffer; returns the dipole derivative of coordinate k
-    let fill = |(k, col): (usize, &mut [f64])| -> Result<[f64; 3]> {
-        let mut xp = xyz.to_vec();
-        let mut xm = xyz.to_vec();
-        xp[k / 3][k % 3] += step;
-        xm[k / 3][k % 3] -= step;
-        let ep = energy::evaluate(topo, model, &xp, true, None, Par::Seq)?;
-        let em = energy::evaluate(topo, model, &xm, true, None, Par::Seq)?;
-        let (gp, gm) = (ep.gradient.as_ref().unwrap(), em.gradient.as_ref().unwrap());
-        for (r, h) in col.iter_mut().enumerate() {
-            *h = (gp[r / 3][r % 3] - gm[r / 3][r % 3]) / (2.0 * step);
-        }
-        let (dp, dm) = (dipole(&xp, &ep.charges), dipole(&xm, &em.charges));
-        Ok([0, 1, 2].map(|e| (dp[e] - dm[e]) / (2.0 * step)))
-    };
-    let mut out = vec![0.0; n3 * n3];
-    let dipd: Vec<Result<[f64; 3]>> = match pool {
-        Some(p) => p.install(|| out.par_chunks_mut(n3).enumerate().map(fill).collect()),
-        None => out.chunks_mut(n3).enumerate().map(fill).collect(),
-    };
-    // the first failed displacement in coordinate order
-    let dipd = dipd.into_iter().collect::<Result<Vec<_>>>()?;
-    // symmetrize in place (the same in row- and column-major order)
-    let mut maxasym: f64 = 0.0;
-    for i in 0..n3 {
-        for j in 0..i {
-            let (a, b) = (out[i * n3 + j], out[j * n3 + i]);
-            maxasym = maxasym.max((a - b).abs());
-            out[i * n3 + j] = 0.5 * (a + b);
-            out[j * n3 + i] = 0.5 * (a + b);
-        }
-    }
+    let parallel = threads.parallel();
+    let nh = threads.install(|| fd::numerical_hessian(xyz, step, fd::Displacement::FromReference, parallel, point))?;
     timings.push(("displacements", t1.elapsed().as_secs_f64()));
-    Ok(Hessian {
+    Ok(FfHessian {
         energy: reference.energies.total,
         gradient: reference.gradient.unwrap(),
-        hessian: out,
-        max_asymmetry: maxasym,
-        dipole_derivatives: dipd,
+        hessian: nh.hessian,
+        max_asymmetry: nh.max_asymmetry,
+        dipole_derivatives: nh.dipole_derivatives,
         timings,
     })
 }

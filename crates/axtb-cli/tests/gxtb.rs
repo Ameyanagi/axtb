@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The CLI's g-xTB v1.1 results (energies and gradients) equal the Rust API's
 //! (axtb_gxtb::Calculator) bit for bit, XYZ input reproduces the g-xTB 1.1.0 program, and
 //! GFN2-only settings are rejected.
 
-#![cfg(feature = "gxtb")]
-
+use axtb::method::{Method, Want};
+use axtb::ToMolden;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -50,31 +51,32 @@ fn cli_energies_equal_rust_api() {
             Default::default(),
         )
         .unwrap();
-        let rust = calc.singlepoint(&mol.positions, true).unwrap();
+        let rust = calc.singlepoint(&mol.positions, &Want::gradient(true)).unwrap();
         let req = serde_json::json!({"numbers": mol.numbers, "positions": mol.positions, "charge": charge, "uhf": uhf,
                                      "method": "gxtb-v1.1", "gradient": true});
         // program conventions through the CLI equal the Rust API's too
-        let opts = axtb_gxtb::ScfOptions { conventions: axtb_gxtb::Conventions::Gxtb, ..Default::default() };
+        let opts = axtb_gxtb::Options { conventions: axtb_gxtb::Conventions::Gxtb, ..Default::default() };
         let mut pcalc =
             axtb_gxtb::Calculator::new(axtb_gxtb::Version::V1_1, &mol.numbers, &mol.positions, charge, Some(uhf), opts)
                 .unwrap();
-        let prust = pcalc.singlepoint(&mol.positions, true).unwrap();
+        let prust = pcalc.singlepoint(&mol.positions, &Want::gradient(true)).unwrap();
         let mut preq = req.clone();
         preq["conventions"] = "gxtb".into();
         let (ok, out, err) = cli_json(&preq);
         assert!(ok, "{err}");
         let r: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(r["energy"].as_f64().unwrap(), prust.singlepoint.energy, "{name}");
+        assert_eq!(r["energy"].as_f64().unwrap(), prust.energy, "{name}");
         let grad: Vec<[f64; 3]> = serde_json::from_value(r["gradient"].clone()).unwrap();
-        assert_eq!(&grad, prust.singlepoint.gradient.as_ref().unwrap(), "{name}");
+        assert_eq!(&grad, prust.gradient.as_ref().unwrap(), "{name}");
         let (ok, out, err) = cli_json(&req);
         assert!(ok, "{err}");
         let r: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(r["energy"].as_f64().unwrap(), rust.singlepoint.energy, "{name}");
+        assert_eq!(r["energy"].as_f64().unwrap(), rust.energy, "{name}");
         let grad: Vec<[f64; 3]> = serde_json::from_value(r["gradient"].clone()).unwrap();
-        assert_eq!(&grad, rust.singlepoint.gradient.as_ref().unwrap(), "{name}");
-        assert_eq!(r["iterations"].as_u64().unwrap() as usize, rust.singlepoint.iterations);
-        for (k, v) in rust.energies.named() {
+        assert_eq!(&grad, rust.gradient.as_ref().unwrap(), "{name}");
+        assert_eq!(r["iterations"].as_u64().unwrap() as usize, rust.scf().unwrap().iterations);
+        for t in &rust.terms {
+            let (k, v) = (t.name, t.value);
             assert_eq!(r["terms"][k].as_f64().unwrap(), v, "{name}: {k}");
         }
         // XYZ file: the program's own Angstrom-to-bohr factor and conventions, so the
@@ -128,7 +130,7 @@ fn reference_v2_dir(rel: &str) -> std::path::PathBuf {
 /// `--conventions gxtb` reproduces the 2.0.1 program.
 #[test]
 fn cli_v2_equals_rust_api_and_program() {
-    use axtb_gxtb::{Calculator, Conventions, ScfOptions, Version};
+    use axtb_gxtb::{Calculator, Conventions, Options, Version};
     for (rel, charge, uhf) in
         [("reference/water", 0.0, 0usize), ("reference/tetrachlorocuprate", -2.0, 1), ("elements/GdCl3", 0.0, 7)]
     {
@@ -136,21 +138,22 @@ fn cli_v2_equals_rust_api_and_program() {
         let text = std::fs::read_to_string(dir.join("mol.xyz")).unwrap();
         for conv in ["gxtb", "axtb"] {
             let c: Conventions = conv.parse().unwrap();
-            let mol = axtb_gxtb::v2::read_xyz(&text, charge, Some(uhf), c).unwrap();
-            let opts = ScfOptions { conventions: c, ..Default::default() };
+            let mol = axtb_gxtb::model::read_xyz(&text, charge, Some(uhf), c).unwrap();
+            let opts = Options { conventions: c, ..Default::default() };
             let mut calc =
                 Calculator::new(Version::V2_0_1, &mol.numbers, &mol.positions, charge, Some(uhf), opts).unwrap();
-            let rust = calc.singlepoint(&mol.positions, true).unwrap();
+            let rust = calc.singlepoint(&mol.positions, &Want::gradient(true)).unwrap();
             let req = serde_json::json!({"numbers": mol.numbers, "positions": mol.positions, "charge": charge, "uhf": uhf,
                                          "method": "gxtb-v2.0.1", "gradient": true, "conventions": conv});
             let (ok, out, err) = cli_json(&req);
             assert!(ok, "{err}");
             let r: serde_json::Value = serde_json::from_str(&out).unwrap();
-            assert_eq!(r["energy"].as_f64().unwrap(), rust.singlepoint.energy, "{rel} {conv}");
+            assert_eq!(r["energy"].as_f64().unwrap(), rust.energy, "{rel} {conv}");
             let grad: Vec<[f64; 3]> = serde_json::from_value(r["gradient"].clone()).unwrap();
-            assert_eq!(&grad, rust.singlepoint.gradient.as_ref().unwrap(), "{rel} {conv}");
-            assert_eq!(r["iterations"].as_u64().unwrap() as usize, rust.singlepoint.iterations);
-            for (k, v) in rust.energies.named() {
+            assert_eq!(&grad, rust.gradient.as_ref().unwrap(), "{rel} {conv}");
+            assert_eq!(r["iterations"].as_u64().unwrap() as usize, rust.scf().unwrap().iterations);
+            for t in &rust.terms {
+                let (k, v) = (t.name, t.value);
                 assert_eq!(r["terms"][k].as_f64().unwrap(), v, "{rel}: {k}");
             }
             // XYZ file through the CLI
@@ -170,7 +173,7 @@ fn cli_v2_equals_rust_api_and_program() {
                 .unwrap();
             assert!(out.status.success());
             let r: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-            assert_eq!(r["energy"].as_f64().unwrap(), rust.singlepoint.energy, "{rel} {conv} (xyz)");
+            assert_eq!(r["energy"].as_f64().unwrap(), rust.energy, "{rel} {conv} (xyz)");
             if conv == "gxtb" {
                 let printout = std::fs::read_to_string(dir.join("xtb.out")).unwrap();
                 let line = printout.lines().find(|l| l.contains(":: total energy")).unwrap();
@@ -207,9 +210,9 @@ fn cli_v2_equals_rust_api_and_program() {
         assert!(ok, "{err}");
         let r: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(r["hessian_method"], name);
-        let mut calc = Calculator::new(Version::V2_0_1, &[8, 1, 1], &water, 0.0, None, ScfOptions::default()).unwrap();
+        let mut calc = Calculator::new(Version::V2_0_1, &[8, 1, 1], &water, 0.0, None, Options::default()).unwrap();
         let hm = if name == "response" { axtb::HessianMethod::Response } else { axtb::HessianMethod::Analytic };
-        let h = calc.hessian(&water, &axtb::HessianOptions { method: hm, step: None, accuracy: None }).unwrap();
+        let h = calc.hessian(&water, &axtb::HessianOptions { method: Some(hm), step: None, accuracy: None }).unwrap();
         let cli_h: Vec<f64> = r["hessian"]
             .as_array()
             .unwrap()
@@ -218,7 +221,12 @@ fn cli_v2_equals_rust_api_and_program() {
             .collect();
         assert_eq!(cli_h, h.hessian);
     }
+    // g-xTB v1.1's response Hessian: available in the axtb conventions, refused in the program's
     let req = serde_json::json!({"numbers": [8, 1, 1], "positions": water, "method": "gxtb-v1.1", "hessian": true, "hessian_method": "response"});
+    let (ok, out, err) = cli_json(&req);
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
+    assert!(ok && r["hessian_method"] == "response" && r["hessian"].as_array().is_some_and(|h| h.len() == 9), "{err}");
+    let req = serde_json::json!({"numbers": [8, 1, 1], "positions": water, "method": "gxtb-v1.1", "hessian": true, "hessian_method": "response", "conventions": "gxtb"});
     let (ok, _, err) = cli_json(&req);
     assert!(!ok && err.contains("gxtb-v1.1 Hessians: the Response method is not available"), "{err}");
 }
@@ -240,15 +248,17 @@ fn cli_molden_equals_rust_api() {
             assert!(ok, "{err}");
             let r: serde_json::Value = serde_json::from_str(&out).unwrap();
             let orbitals = if method == "gfn2" {
-                let mut opts = axtb::Options::default();
-                opts.scf.keep_orbitals = true;
+                let opts = axtb::Options::default();
+                let want = axtb::method::Want { orbitals: true, ..axtb::method::Want::ENERGY };
                 let mol = axtb::Molecule::new(&numbers, &cu, -2.0, Some(1)).unwrap();
-                axtb::singlepoint(axtb::Method::Gfn2, &mol, &opts, false).unwrap().orbitals.unwrap()
+                let sp = axtb::singlepoint(axtb::Hamiltonian::Gfn2, &mol, &opts, &want).unwrap();
+                sp.electronic.unwrap().orbitals.unwrap()
             } else {
                 let version = axtb_gxtb::Version::from_method(method).unwrap();
-                let opts = axtb_gxtb::ScfOptions { keep_orbitals: true, ..Default::default() };
+                let opts = axtb_gxtb::Options::default();
                 let mut calc = axtb_gxtb::Calculator::new(version, &numbers, &cu, -2.0, Some(1), opts).unwrap();
-                calc.singlepoint(&cu, false).unwrap().singlepoint.orbitals.unwrap()
+                let want = Want { orbitals: true, ..Want::ENERGY };
+                calc.singlepoint(&cu, &want).unwrap().electronic.unwrap().orbitals.unwrap()
             };
             let functions = if cartesian { axtb::MoldenFunctions::Cartesian } else { axtb::MoldenFunctions::Spherical };
             let title = format!("axtb {} {method}", env!("CARGO_PKG_VERSION"));
@@ -269,7 +279,7 @@ fn cli_molden_equals_rust_api() {
 /// gradient; the result equals the Rust API's bit for bit.
 #[test]
 fn cli_etemp_reproduces_programs() {
-    use axtb_gxtb::{Calculator, Conventions, ScfOptions, Version};
+    use axtb_gxtb::{Calculator, Conventions, Options, Version};
     let rows = |path: &str| -> Vec<serde_json::Value> {
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap())
@@ -302,10 +312,11 @@ fn cli_etemp_reproduces_programs() {
             }
         }
         let text = std::fs::read_to_string(dir.join("mol.xyz")).unwrap();
-        let mol = axtb_gxtb::v2::read_xyz(&text, charge, Some(uhf), Conventions::Gxtb).unwrap();
-        let opts = ScfOptions { conventions: Conventions::Gxtb, etemp: 1000.0, ..Default::default() };
+        let mol = axtb_gxtb::model::read_xyz(&text, charge, Some(uhf), Conventions::Gxtb).unwrap();
+        let scf = axtb::method::ScfSettings { etemp: Some(1000.0), ..Default::default() };
+        let opts = Options { conventions: Conventions::Gxtb, scf, ..Default::default() };
         let mut calc = Calculator::new(Version::V2_0_1, &mol.numbers, &mol.positions, charge, Some(uhf), opts).unwrap();
-        assert_eq!(calc.singlepoint(&mol.positions, false).unwrap().singlepoint.energy, e, "{name}");
+        assert_eq!(calc.singlepoint(&mol.positions, &Want::gradient(false)).unwrap().energy, e, "{name}");
         // 1.1.0
         let r1 = v1.iter().find(|r| r["name"] == name && r["etemp"] == 1000.0).unwrap();
         let out = Command::new(env!("CARGO_BIN_EXE_axtb"))

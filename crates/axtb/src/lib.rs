@@ -1,6 +1,16 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! axtb: extended tight-binding quantum chemistry. This crate holds GFN2-xTB and what the
-//! methods of the workspace share (molecule, basis, integrals, eigensolver, Molden files,
-//! properties, vibrational analysis); g-xTB is `axtb-gxtb`, GFN-FF `axtb-gfnff`.
+//! methods of the workspace share (basis, integrals, Molden files, properties, vibrational
+//! analysis; the molecule, the eigensolver and the [`Method`] trait from `axtb-base`,
+//! re-exported); g-xTB is `axtb-gxtb`, GFN-FF `axtb-gfnff`.
+//!
+//! **Use.** [`Calculator`] implements [`Method`]: `Calculator::new(Hamiltonian::Gfn2, numbers,
+//! positions, charge, uhf, Options::default())`, then [`Method::singlepoint`] (energy, terms,
+//! charges, dipole; the gradient, orbitals and bond orders as [`method::Want`] asks) and
+//! [`Method::hessian`] (analytic by default, response or numerical). [`Options`] holds the
+//! settings: [`Options::scf`] the SCF settings every SCF method shares
+//! ([`method::ScfSettings`]), the rest GFN2-xTB's own. [`ToMolden`] writes the orbitals of a
+//! single point as a Molden file.
 //!
 //! Design rules:
 //! - no implicit threading: every parallel region runs on the calculator's own rayon pool of
@@ -12,59 +22,66 @@
 //! - every parameter table is generated from the reference sources (`scripts/gen_data.py`).
 
 pub(crate) mod analytic;
+pub mod ao;
 pub mod basis;
 mod calculator;
 pub mod conventions;
 pub(crate) mod coulomb;
 pub(crate) mod dispersion;
 pub(crate) mod eeq;
-mod error;
 pub(crate) mod gfn2;
 pub(crate) mod hamiltonian;
 mod hessian;
 pub mod integrals;
 pub mod io;
-pub(crate) mod lapack;
-pub mod linalg;
-mod mixer;
 pub mod molden;
-pub mod molecule;
 pub(crate) mod ncoord;
 pub mod param;
 pub mod properties;
 pub(crate) mod repulsion;
-pub(crate) mod response;
+pub mod response;
+pub mod scf;
 mod solvation;
+pub mod terms;
 #[cfg(test)]
 mod tests_response;
 pub mod threads;
-pub(crate) mod tridiag;
-pub mod units;
 pub mod vibrations;
 mod xtb;
 
-pub use calculator::{Calculator, Hessian};
+pub use axtb_base::method::SinglePoint;
+pub use calculator::{Calculator, Hessian, ANALYTIC_ACCURACY, NUMERICAL_ACCURACY, NUMERICAL_STEP, RESPONSE_STEP};
 pub use conventions::{ConventionParams, Conventions};
-pub use error::{Error, Result};
 pub use hessian::{HessianMethod, HessianOptions};
-pub use mixer::{MixerKind, ScfAttempt};
-pub use molden::{MoldenFunctions, Orbitals};
-pub use molecule::{Molecule, MIN_ATOM_DISTANCE};
+pub use molden::{MoldenFunctions, Orbitals, ToMolden};
 pub use properties::{GapRule, OrbitalLevels, QuadrupoleForm};
+pub use scf::mixing::{MixerKind, ScfAttempt};
 pub use solvation::{ReferenceState, SolvationModel, SolvationSpec};
-pub use xtb::{EnergyTerms, InitialGuess, ScfGuess, ScfOptions, SinglePoint};
+pub use xtb::{InitialGuess, DAMPING, ETEMP, MAX_ITER};
 
-/// Available methods.
+pub use axtb_base::linalg;
+pub use axtb_base::method;
+pub use axtb_base::threads::Threads;
+pub use axtb_base::units;
+pub use axtb_base::{Error, Method, Molecule, Result, MIN_ATOM_DISTANCE};
+
+/// The molecule and the 3-vector helpers (from `axtb-base`).
+pub mod molecule {
+    pub use axtb_base::math::{dot3, norm2_sq, sub3};
+    pub use axtb_base::{Molecule, MIN_ATOM_DISTANCE};
+}
+
+/// The tight-binding Hamiltonians of this crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Method {
+pub enum Hamiltonian {
     Gfn2,
 }
 
-impl std::str::FromStr for Method {
+impl std::str::FromStr for Hamiltonian {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
         match s.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
-            "gfn2" | "gfn2xtb" => Ok(Method::Gfn2),
+            "gfn2" | "gfn2xtb" => Ok(Hamiltonian::Gfn2),
             other => Err(Error::Input(format!("unknown method {other:?}"))),
         }
     }
@@ -73,7 +90,19 @@ impl std::str::FromStr for Method {
 /// Options of a calculation.
 #[derive(Clone, Debug)]
 pub struct Options {
-    pub scf: ScfOptions,
+    /// The SCF settings every SCF method has ([`MAX_ITER`] and [`ETEMP`] by default).
+    pub scf: method::ScfSettings,
+    /// The mixer of the SCC variables and its damping.
+    pub mixing: Mixing,
+    /// Starting point of an SCF without a previous wavefunction.
+    pub initial_guess: InitialGuess,
+    /// Print every SCF iteration (energy, energy change, residual) to stderr, for debugging
+    /// SCFs that do not converge.
+    pub trace: bool,
+    /// Threads of the calculation (at least 1; 1 = sequential): integrals, Fock matrix,
+    /// potentials, dispersion and dense linear algebra, and the displacements or
+    /// perturbations of a Hessian; the calculator's pool, fixed when it is built.
+    pub threads: usize,
     /// Include dispersion (always on for production use; off only for validation).
     pub dispersion: bool,
     /// Numerical conventions (axtb's corrected default, or exact xtb/tblite reproduction).
@@ -90,7 +119,11 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            scf: ScfOptions::default(),
+            scf: method::ScfSettings::default(),
+            mixing: Mixing::default(),
+            initial_guess: InitialGuess::Eeq,
+            trace: false,
+            threads: 1,
             dispersion: true,
             conventions: Conventions::Axtb,
             params: None,
@@ -99,33 +132,76 @@ impl Default for Options {
     }
 }
 
-/// Build the Hamiltonian of `method` for `mol` and its charge-dependent extra terms
-/// (dispersion, solvation).
+impl Options {
+    /// The SCF settings of one calculation on `threads` threads with `want`.
+    pub(crate) fn run(&self, threads: usize, want: &method::Want) -> xtb::ScfOptions {
+        xtb::ScfOptions {
+            accuracy: self.scf.accuracy,
+            max_iter: self.scf.max_iter.unwrap_or(MAX_ITER),
+            etemp: self.scf.etemp.unwrap_or(ETEMP),
+            damping: self.mixing.damping,
+            mixer: self.mixing.mixer,
+            threads,
+            guess: self.initial_guess,
+            keep_orbitals: want.orbitals,
+            bond_orders: want.bond_orders,
+            keep_overlap: want.overlap || want.hamiltonian,
+            keep_hamiltonian: want.hamiltonian,
+            trace: self.trace,
+        }
+    }
+}
+
+/// How GFN2-xTB mixes its SCC variables.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mixing {
+    /// Mixer of the SCC variables; `None` uses the conventions' choice
+    /// ([`ConventionParams::mixer`]). With [`MixerKind::Auto`] an SCF that Broyden mixing does
+    /// not converge within the iteration limit starts again from the initial guess with DIIS
+    /// and another as many iterations.
+    pub mixer: Option<MixerKind>,
+    /// Damping of the mixer (Broyden: of the residual; DIIS: of the combined residual), in
+    /// (0, 1].
+    pub damping: f64,
+}
+
+impl Default for Mixing {
+    fn default() -> Self {
+        Self { mixer: None, damping: DAMPING }
+    }
+}
+
+/// Build `hamiltonian` for `mol` and its charge-dependent extra terms (dispersion, solvation).
 pub(crate) fn build_method(
-    method: Method,
+    hamiltonian: Hamiltonian,
     mol: &Molecule,
     opts: &Options,
-) -> Result<(xtb::XtbModel, Vec<Box<dyn xtb::ChargeDependentTerm>>)> {
-    match method {
-        Method::Gfn2 => {
+) -> Result<(xtb::XtbModel, Vec<std::sync::Arc<dyn terms::AnyMomentTerm>>)> {
+    match hamiltonian {
+        Hamiltonian::Gfn2 => {
             let params = opts.params.unwrap_or_else(|| opts.conventions.params());
             let model = gfn2::build(mol, opts.scf.accuracy, &params)?;
-            let mut extra: Vec<Box<dyn xtb::ChargeDependentTerm>> = Vec::new();
+            let mut extra: Vec<std::sync::Arc<dyn terms::AnyMomentTerm>> = Vec::new();
             if opts.dispersion {
-                extra.push(Box::new(dispersion::D4Term::gfn2(mol, &params)?));
+                extra.push(std::sync::Arc::new(dispersion::D4Term::gfn2(mol, &params)?));
             }
             if let Some(spec) = &opts.solvation {
-                extra.push(Box::new(solvation::SolvationTerm::new(mol, spec, params.solvation)?));
+                extra.push(std::sync::Arc::new(solvation::SolvationTerm::new(mol, spec, params.solvation)?));
             }
             Ok((model, extra))
         }
     }
 }
 
-/// Energy (and optionally gradient) of `mol` with `method`, without keeping state.
-pub fn singlepoint(method: Method, mol: &Molecule, opts: &Options, gradient: bool) -> Result<SinglePoint> {
-    let mut calc = Calculator::new(method, &mol.numbers, &mol.positions, mol.charge, mol.uhf, opts.clone())?;
-    calc.singlepoint(&mol.positions, gradient)
+/// Energy and what `want` asks for of `mol` with `hamiltonian`, without keeping state.
+pub fn singlepoint(
+    hamiltonian: Hamiltonian,
+    mol: &Molecule,
+    opts: &Options,
+    want: &method::Want,
+) -> Result<method::SinglePoint> {
+    let mut calc = Calculator::new(hamiltonian, &mol.numbers, &mol.positions, mol.charge, mol.uhf, opts.clone())?;
+    calc.singlepoint(&mol.positions, want)
 }
 
 /// GFN2-xTB's core Hamiltonian H0 and overlap S of `mol` (dense, basis functions x basis

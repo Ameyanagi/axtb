@@ -42,9 +42,10 @@ KB_RATIO = 3.166808578545117e-06 / 3.1668115634564e-6  # program kB / CODATA 202
 # (also docs/validation.md, g-xTB at finite electronic temperature), the rounding-sensitive runs
 # left out. 2.0.1, default thresholds: energies <= 1.8e-12 Eh, (H2O)100 1.1e-11, the same
 # iterations, gradients <= 4.7e-11 Eh/bohr; tight: energies <= 2.0e-12 Eh, (H2O)100 9.1e-12,
-# gradients <= 2.9e-11, failures as the program's; v1.1: energies <= 2e-11 Eh, the same
-# iterations. Default conventions: the kB part <= 4.5e-8 Eh (EuCl3 at 5000 K), the whole
-# difference to the program <= 1.9e-6 Eh ((H2O)100, the revD4 three-body tail).
+# gradients <= 2.9e-11, failures as the program's; v1.1: energies <= 2e-11 Eh (2.7e-12
+# measured), the same iterations. Default conventions: the kB part <= 4.5e-8
+# Eh (EuCl3 at 5000 K), the whole difference to the program <= 1.9e-6 Eh ((H2O)100, the revD4
+# three-body tail).
 LIMITS = {
     "v2 default max_abs_dE": 1.8e-12, "v2 default max_abs_dE water100": 1.1e-11, "v2 default max_dgrad": 4.7e-11,
     "v2 default iteration_mismatches": 0, "v2 default failures": 0,
@@ -67,6 +68,9 @@ KNOWN_DIFFERENCES = {
     "v2 tight N2_stretched 5000 K": "iteration counts move with the round-off, energies equal to 1e-12 Eh",
     "v2 tight EuCl3 5000 K": "102-250 iterations depending on the round-off; the program stops at 250",
     "v1.1 Fe4": "as for 2.0.1: slowly converging SCFs whose last digits, or convergence, follow the round-off",
+    "v1.1 nickel_tetracarbonyl 5000 K": "exactly tetrahedral: the SCF path follows the eigensolver's vectors within degenerate "
+    "levels, so iterations and the last ~1e-10 Eh depend on the CPU (14 and 3.7e-11, or 13 and 2.2e-10; shifted by "
+    "1e-13 A: 14 and 2e-13); converged tightly the exact and shifted structures agree to 5e-13 Eh",
 }
 
 

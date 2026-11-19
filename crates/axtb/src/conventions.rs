@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Numerical conventions: axtb's corrected default, or exact reproduction of the xtb 6.8.0,
 //! xtb 6.7.1 and tblite 0.8.0 programs. Everything that differs between them is one table,
 //! [`ConventionParams`], resolved once when a calculation is set up; the rest of the code
@@ -5,14 +6,14 @@
 
 use crate::basis::{integral_cutoff, integral_cutoff_xtb, Basis};
 pub use crate::eeq::EeqCn;
-use crate::error::{Error, Result};
-use crate::mixer::MixerKind;
 use crate::param::xtb_data::{
     XTB671_ATOMIC_RAD, XTB671_COVALENT_RAD_D3, XTB671_D4_EN, XTB671_D4_RCOV, XTB671_PAULING_EN, XTB_ATOMIC_RAD,
     XTB_COVALENT_RAD_D3, XTB_D4_EN, XTB_D4_RCOV, XTB_PAULING_EN,
 };
 use crate::param::{atomic_rad, atomic_rad_codata2022, covalent_rad_d3, covalent_rad_d3_codata2022, pauling_en};
+use crate::scf::mixing::MixerKind;
 use crate::units::{reference::KB_XTB_TBLITE, KB_HARTREE};
+use crate::{Error, Result};
 use axtb_d4::RealspaceCutoff;
 use axtb_solvation::Conventions as SolvConventions;
 
@@ -189,7 +190,7 @@ pub struct ConventionParams {
     /// Implicit solvation variant (xtb 6.8.0's, xtb 6.7.1's with its two bugs, or the
     /// corrected model).
     pub solvation: SolvConventions,
-    /// Mixer of the SCC variables when [`ScfOptions::mixer`](crate::ScfOptions::mixer) does
+    /// Mixer of the SCC variables when [`Mixing::mixer`](crate::Mixing::mixer) does
     /// not choose one. xtb and tblite: their modified Broyden mixing alone, so the
     /// iterations, the SCF solution where there are several, and the failures are theirs;
     /// axtb: [`MixerKind::Auto`], Broyden with a DIIS fallback for SCFs Broyden does not
@@ -210,12 +211,14 @@ pub struct ConventionParams {
     pub scc_gradient: SccGradient,
     /// Diagonalize the SCF's Fock matrices for the orbitals that enter the density only (those
     /// with an occupation above [`OCCUPATION_CUTOFF`], as xtb 6.8.0 builds its density,
-    /// grimme-lab/xtb#1466; [`GenEigSolver::solve_lowest`](crate::linalg::GenEigSolver::solve_lowest))
-    /// unless all orbitals are needed (Molden files, Hessians, open-shell bond orders), and
-    /// build the density matrices as triangular products (`linalg::weighted_outer_sym`, the
-    /// syrk of grimme-lab/xtb#1466: half the flops, rounded differently). The program
-    /// conventions keep the full eigensolver and the full products, so that their results
-    /// stay bit for bit.
+    /// grimme-lab/xtb#1466; [`GenEigSolver::solve_lowest`](crate::linalg::GenEigSolver::solve_lowest)),
+    /// whatever the calculation asks for: where the other orbitals are needed (the orbitals of
+    /// a single point, a Hessian's response) they are computed once after the SCF from its last
+    /// Fock matrix ([`GenEigSolver::solve_rest`](crate::linalg::GenEigSolver::solve_rest)), so that
+    /// asking for them changes no other number. Build the density matrices as triangular
+    /// products (`linalg::weighted_outer_sym`, the syrk of grimme-lab/xtb#1466: half the flops,
+    /// rounded differently). The program conventions keep the full eigensolver and the full
+    /// products, so that their results stay bit for bit.
     pub occupied_orbitals_only: bool,
     /// D4 three-body energy and gradient by pair sums (xtb 6.8.0, grimme-lab/xtb#1464,
     /// [`D4Dispersion::with_pair_sums`](axtb_d4::D4Dispersion::with_pair_sums)); the program

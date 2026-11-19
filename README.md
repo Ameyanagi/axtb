@@ -6,10 +6,11 @@ conventions it reproduces that program's numbers to the last digits (xtb 6.8.0 a
 tblite 0.8.0, the g-xTB 1.1.0 and 2.0.1 programs); its default conventions correct the bugs
 found on the way. It runs faster than the programs and is safe to run many at once: every
 calculation runs on exactly the threads it is given. axtb is a Rust library, a command-line
-program (JSON in and out), a Python package and a codec for qccompute.
+program (JSON in and out) and a Python package that is a program of the qc* stack: a
+`qcdata.ProgramInput` in, a `qcdata.ProgramOutput` out, and qccompute runs it like any other
+program.
 
-License: LGPL-3.0-or-later for the core crates; GPL-3.0-only for g-xTB and for the default
-builds of the CLI and the Python package, which include it ([License](#license)).
+License: LGPL-3.0-or-later, every crate, the CLI and the Python package ([License](#license)).
 
 ## Status
 
@@ -26,8 +27,10 @@ builds of the CLI and the Python package, which include it ([License](#license))
 | Molden files of the converged orbitals | the programs' own Molden files |
 | restarts from the previous geometry's wavefunction; Mayer–Wiberg bond orders, orbital levels, HOMO–LUMO gap, molecular quadrupole | the programs' restarts, `wbo` files and printouts |
 
-Every feature is available from Rust, Python and the qccodec codec, and all but restarts from
-the CLI (one geometry per call).
+Every feature is available from Rust and the CLI (all but restarts there: one geometry per
+call), and from Python (`axtb.compute`, `axtb.Session`, qccompute) all but Molden text and the
+analysis of a given Hessian, which Python leaves to the orbitals in qcdata's wavefunction and to
+the CLI.
 [docs/validation.md](docs/validation.md) has the agreement with each program, the test sets
 and the timings; `scripts/check.sh` reruns the checks (see [Checks](#checks)). Not
 implemented: periodic systems, GFN1-xTB, implicit solvation with GFN-FF, PDB residue charges.
@@ -41,12 +44,13 @@ Cargo: no Fortran compiler, no BLAS or LAPACK. It is developed and tested on x86
 other platforms are untested.
 
 **Released builds.** The Python package from PyPI, with wheels for x86-64 Linux
-(manylinux_2_28: glibc 2.28 or newer; Python 3.10 or newer, one abi3 wheel for all versions);
-elsewhere pip builds it from the source distribution, which needs Rust:
+(manylinux_2_28: glibc 2.28 or newer; Python 3.11 or newer, one abi3 wheel for all versions);
+elsewhere pip builds it from the source distribution, which needs Rust. It needs qcdata 0.24,
+which pip installs with it:
 
 ```bash
 pip install axtb
-pip install "axtb[qc]"                     # with qccodec and qcdata, for the codec
+pip install "axtb[test]"                   # with pytest and qccompute, for the package's tests
 ```
 
 The CLI from crates.io, or as the stripped `axtb` binary attached to each GitHub release:
@@ -67,18 +71,18 @@ The release profile keeps line tables (`debug = 1`) for profiling, which makes t
 several times larger; the `dist` profile (root `Cargo.toml`) is the release profile without
 them and stripped, as the release binaries are built. The two give the same numbers.
 
-The Python package (Python 3.10 or newer, numpy) from a wheel built with
+The Python package (Python 3.11 or newer, numpy, qcdata 0.24) from a wheel built with
 [maturin](https://www.maturin.rs) (stripped, `crates/axtb-py/pyproject.toml`):
 
 ```bash
 pip install maturin
 maturin build --release --compatibility linux -m crates/axtb-py/Cargo.toml -o dist
 pip install dist/axtb-*.whl
-pip install qccompute                      # for the qccodec codec (optional)
+pip install "qccompute>=0.23"            # to run axtb through qccompute (optional)
 ```
 
-`pip install ./crates/axtb-py` builds and installs it in one step. The codec registers itself
-with qccodec when both are installed. `--compatibility linux` builds a wheel for this machine;
+`pip install ./crates/axtb-py` builds and installs it in one step. qccompute finds it through
+its entry point when both are installed. `--compatibility linux` builds a wheel for this machine;
 without it maturin builds the release's manylinux_2_28 wheel, which on a system newer than
 glibc 2.28 needs the manylinux_2_28 container or `--zig` (`pip install ziglang`).
 
@@ -104,11 +108,6 @@ RUSTFLAGS="-C target-cpu=x86-64" maturin build --release --compatibility linux -
 axtb-cli` from crates.io does not see `.cargo/config.toml` and builds for the baseline x86-64
 unless you ask for more: `RUSTFLAGS="-C target-cpu=x86-64-v3" cargo install axtb-cli`.
 
-**Without g-xTB.** `--no-default-features` leaves out g-xTB and gives an LGPL-3.0-or-later
-build: `cargo build --release -p axtb-cli --no-default-features`,
-`cargo install axtb-cli --no-default-features`, and
-`maturin build --release --compatibility linux --no-default-features -m crates/axtb-py/Cargo.toml -o dist`.
-
 **As a Rust library.** Depend on the crates from crates.io: `axtb` (GFN2-xTB), `axtb-gxtb`
 (g-xTB), `axtb-gfnff` (GFN-FF), or `axtb-driver` (the request/response layer of the front
 ends); `axtb-d4` and `axtb-solvation` come with `axtb`. The workspace patches two dependencies
@@ -119,82 +118,73 @@ machines.
 
 ## Use
 
-The CLI, the Python module and the qccodec codec share one request/response layer
-(`crates/driver`, `axtb_driver`): the same settings under the same names, the same checks and
-the same response. `None` (or an absent setting) means the method's default. Names of methods,
-conventions and settings ignore case and anything but letters and digits (`"GFN2-xTB"`,
-`"g-xTB 2.0"`, `"XTB 6.7.1"`); responses carry the canonical names (`axtb.canonical_method`).
+The CLI and the Python package run one request/response layer (`crates/driver`,
+`axtb_driver`): the CLI takes the flat request below; Python checks a `qcdata.ProgramInput`
+against its keyword table and turns it into the same request, so both compute the same numbers,
+bit for bit (`scripts/golden_python.py`). `None` (or an absent setting) means the method's
+default. Names of methods, conventions and settings ignore case and anything but letters and
+digits (`"GFN2-xTB"`, `"g-xTB 2.0"`, `"XTB 6.7.1"`); responses carry the canonical names
+(Python: `resolved.settings` and `record`).
 A setting that does not apply to the method (a GFN-FF option for GFN2-xTB, an SCF option for
 GFN-FF, a solvent's reference state without a solvent, a Hessian's step without a Hessian or
 with an analytic one, ...) is an error, never ignored. `threads` must be at least 1.
 
-Python (see [Install](#install); type stubs included):
+Python (see [Install](#install); [docs/python.md](docs/python.md) is the reference: keywords,
+outputs, record, errors, sessions, threads, accuracy targets):
 
 ```python
-import numpy as np, axtb
-r = axtb.singlepoint(numbers, positions_bohr, charge=0, method="gfn2", gradient=True)  # any array-like (N, 3)
-calc = axtb.Calculator("gfn2", numbers, positions_bohr, threads=8)   # reuses setup and wavefunction
-r = calc.singlepoint(new_positions, gradient=True)                  # the gradient only when asked for
-h = calc.hessian(positions_bohr)                 # the single point there, the Hessian and its analysis
-h["hessian"], h["hessian_method"], h["frequencies"]                 # (3N, 3N) Eh/bohr², "analytic", cm⁻¹
-h = calc.hessian(positions_bohr, method="numerical", step=0.005)    # or "response"
-# r also holds the converged moments (shell_charges, atomic_dipoles, atomic_quadrupoles);
-# calc.set_guess(...) starts the next SCF from them (or from another program's moments)
-r["guess"], r["homo_lumo_gap"], r["quadrupole"], r["orbital_energies_alpha"]  # start, Eh, e·bohr²
-r = calc.singlepoint(new_positions, bond_orders=True); r["bond_orders"]       # (N, N) Mayer-Wiberg
-g = axtb.Calculator("gxtb-v2.0.1", numbers, positions_bohr)  # g-xTB too starts from the previous
-g.singlepoint(p1); g.singlepoint(p2)["guess"]                 # geometry's state: "previous"
-state = g.guess_state(); other.set_guess_state(state)         # move it to another calculator
-text = axtb.singlepoint(numbers, positions_bohr, method="gxtb-v2.0.1", molden=True)["molden"]
-open("mol.molden", "w").write(text)                                 # orbitals for Jmol, Avogadro, IboView
-h = calc.hessian(positions_bohr, temperature=[298.15, 350.0])       # with the vibrational analysis
-h["frequencies"], h["n_imaginary"], h["ir_intensities"]             # cm⁻¹ (imaginary < 0), km/mol
-h["thermo"]["g_rrho"], h["thermo"]["free_energy"]                   # qRRHO at the last temperature
-v = axtb.vibrational_analysis(numbers, positions_bohr, hessian, conventions="xtb")  # any Hessian
+import axtb
+from qcdata import ProgramError, ProgramInput, Structure
+s = Structure.open("mol.xyz")                                         # or symbols and geometry (bohr)
+inp = ProgramInput(program="axtb", calctype="gradient", structure=s, model={"method": "gfn2"},
+                   keywords={"threads": 8, "output": {"bond_orders": True}})
+out = axtb.compute(inp)                                               # raises qcdata.ProgramError
+out.results.energy, out.results.gradient, out.results.bond_orders     # Eh, Eh/bohr, Mayer-Wiberg
+out.results.wavefunction.orbitals.energies_a, out.results.quadrupole_moment  # levels; traceless, e·bohr²
+out.record["scf"], out.resolved.settings                              # start, iterations; the settings
+with axtb.Session(inp) as session:                                    # one molecule, many geometries
+    frame = session.compute(new_positions)                            # from the previous wavefunction
+    probe = session.compute(other_positions, commit=False)            # leaves the history alone
+    side = session.compute(p, lineage="forward", seed=[None])         # a lineage of its own, seeded
+h = axtb.compute(ProgramInput(program="axtb", calctype="hessian", structure=s, model={"method": "gxtb-v2.0.1"},
+                              keywords={"freq": {"temperature": [298.15, 350.0]}}))
+h.results.hessian, h.record["hessian"]["method"]                      # (3N, 3N) Eh/bohr², "analytic"
+h.results.vibrational_analysis.frequencies                            # cm⁻¹ (imaginary < 0), modes, IR
+h.results.thermochemistry[-1].total.gibbs                             # E + G(qRRHO) at 350 K
 try:
-    axtb.singlepoint(numbers, positions_bohr, max_iter=50)
-except axtb.ScfNotConvergedError as e:                              # a RuntimeError
-    e.iterations, e.energy_change, e.residual
+    axtb.compute(ProgramInput(program="axtb", calctype="energy", structure=s, model={"method": "gfn2"},
+                              keywords={"scf": {"max_iter": 3}}))
+except ProgramError as e:
+    e.error.code, e.error.details, e.output.record                    # scf_not_converged, its iterations
 ```
 
-Results are dicts with the keys of the CLI's JSON response (below), arrays as numpy arrays.
-`Calculator.singlepoint` and `axtb.singlepoint` compute the gradient only with
-`gradient=True`. `Calculator.hessian` returns what the CLI's `--hess` does: the single point at
-the geometry (g-xTB's SCF from its own start, as without the Hessian), the Hessian, its dipole
-derivatives and, unless `vibrations=False`, the vibrational analysis. Errors:
-`axtb.InputError` (a `ValueError`) for invalid input, elements without parameters and
-structures GFN-FF cannot set up; `axtb.ScfNotConvergedError` (a `RuntimeError`) with
-`iterations`, `energy_change` and `residual`; `RuntimeError` for numerical failures (and, as
-a bug report, for an internal panic); each carries `kind` as the CLI's JSON error does. The
-calculator's construction and every calculation release the GIL. Python names that differ from
-the request's or Rust's: `Calculator.guess_state()` and `set_guess_state(state)` are
-`axtb_driver::Calculator::guess()` and `set_guess()`; `Calculator.set_guess(shell_charges,
-atomic_dipoles, atomic_quadrupoles)` (GFN2-xTB moments) is `set_moments`;
-`vibrational_analysis(conventions=...)` is the request's `analysis_conventions`; `molden=True`,
-`"spherical"` or `"cartesian"` is the request's `molden` and `molden_cartesian`; the arguments
-`step`, `accuracy` and `method` of `Calculator.hessian` are `hessian_step`,
-`hessian_accuracy` and `hessian_method`.
+Results fill qcdata's typed fields, never `extras`; axtb's own detail (the SCF's start,
+iterations and mixer, the composite's parts, GFN-FF's bonds, the accuracy estimate) is in
+`record`, phase timings in `execution.timings`. The calctypes are `energy`, `gradient` and
+`hessian` (with the vibrational analysis and thermochemistry unless `freq.analysis` is `off`).
+The keywords are grouped settings with qcdata's shared names (`threads`, `scf.etemp`,
+`solvent.name`, `freq.temperature`, `output.orbitals`, ...); every request field below has one,
+and the 0.1 name of a setting is refused with its 0.2 name as the hint. Errors are
+`qcdata.ProgramError` with axtb's kind and code (`input`: `unknown_key`, `invalid_value`,
+`no_effect`, `not_applicable`, `missing_setting`, `invalid_structure`, `unsupported_element`, ...;
+`convergence`: `scf_not_converged`; `numerical`; `internal`: a panic) and the failed output
+attached. Calculations release the GIL; a session is thread-safe. Python gives the orbitals with
+their basis set (`output.orbitals`), from which qcinf writes Molden files; the Molden text itself
+and the analysis of a given Hessian are the CLI's.
 
-qccompute (the codec is registered automatically when axtb is installed):
+qccompute finds axtb through its entry point (`axtb.program`; axtb imports nothing of
+qccompute):
 
 ```python
-from qccompute import compute
-from qcdata import CalcType, Model, ProgramInput, ProgramSpec, Structure
-s = Structure.open("mol.xyz")
-out = compute(ProgramInput(program="axtb", calctype=CalcType.gradient, structure=s,
-                           model=Model(method="gfn2"), keywords={"threads": 4}))
-# optimizers (geomeTRIC, Sella) start every step's SCF from the previous step's wavefunction:
-opt = compute(ProgramInput(program="geometric", calctype=CalcType.optimization, structure=s,
-                           subprograms=[ProgramSpec(program="axtb", calctype=CalcType.gradient,
-                                                    model=Model(method="gxtb-v2.0.1"))]),
-              propagate_wfn=True)
+from qccompute import compute, session
+out = compute(inp)                     # the runner grants the threads (the `threads` keyword at most that)
+with session(inp) as s:                # qccompute's session protocol on axtb.Session
+    frame = s.compute(positions)
 ```
 
-The codec's keywords are the `axtb.Calculator` arguments and the Hessian and analysis settings
-under the request's names (`hessian_method`, `hessian_step`, `hessian_accuracy`,
-`analysis_conventions`, `temperature`, ..., `masses`, `thermo`, `dispersion`), checked per
-method and type before the calculation (`EncoderError`); the module docs of `axtb.qccodec`
-list them and where the results go (`extras`).
+`python -m qccompute.serve axtb` serves it to qccompute's workers. Optimizers on qccompute's
+sessions start every step from the previous step's wavefunction (axtb 0.1's qccodec codec and
+its `propagate_wfn` are gone; the CHANGELOG has the migration).
 
 CLI: `axtb mol.xyz [options]` runs a structure file (XYZ, Ångström), `axtb --json` a JSON
 request on stdin (positions in bohr; nothing else on the command line); either prints the
@@ -206,13 +196,16 @@ XYZ files are converted with the Ångström-to-bohr factor of the reproduced pro
 (CODATA 2018) for GFN2-xTB in the `xtb`, `xtb-6.7.1` and `tblite` conventions, GFN-FF in `xtb`
 and `xtb-6.7.1` and g-xTB 2.0.1 in `gxtb`, the 1.1.0 program's for g-xTB v1.1, CODATA 2022 in
 axtb's conventions. Errors: in `--json` mode `{"error": {"kind": ..., "message": ..., ...}}` on
-stdout (`kind`: `input`, `unsupported_element` with `z`, `topology`, `scf_not_converged` with
-`iterations`, `energy_change` and `residual`, `numerical`), otherwise `error: <message>` on
-stderr; exit code 1. Invalid arguments and unreadable files are usage errors: `error: ...` on
-stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF single point (see
-[Threads](#threads)), and a run-time LAPACK (`AXTB_LAPACK`) that was not used.
+stdout (`kind`: `input`, `unsupported_element` with `z`, `topology`, `not_applicable` (an
+output the method does not have: GFN-FF's orbitals, Molden file, bond orders and AO matrices,
+g-xTB 2.0.1's AO matrices in the `gxtb` conventions), `scf_not_converged` with `iterations`,
+`energy_change` and `residual` (and with `scf_retries` every try as `attempts`), `numerical`),
+otherwise `error: <message>` on stderr; exit code 1. Invalid arguments and unreadable files are
+usage errors: `error: ...` on stderr, exit code 2. Warnings go to stderr: more than 8 threads for
+one SCF single point (see [Threads](#threads)), a run-time LAPACK (`AXTB_LAPACK`) that was not
+used, and a result from a rung of `scf_retries` (see [SCF retries](#scf-retries)).
 
-| request field (JSON, Python keyword) | CLI | meaning |
+| request field (JSON; docs/python.md has the Python keywords) | CLI | meaning |
 |---|---|---|
 | `numbers`, `positions` | the structure file | atomic numbers; positions in bohr |
 | `charge`, `uhf` | `--chrg Q`, `--uhf N` | total charge (default 0); unpaired electrons (default 0 or 1 by the electron count; GFN-FF ignores it) |
@@ -220,15 +213,18 @@ stderr, exit code 2. Warnings go to stderr: more than 8 threads for one SCF sing
 | `conventions` | `--conventions C` | GFN2-xTB `axtb` (default), `xtb` (6.8.0), `xtb-6.7.1`, `tblite`; g-xTB `axtb`, `gxtb`; GFN-FF `axtb`, `xtb`, `xtb-6.7.1` |
 | `threads` | `--threads N` | default 1 |
 | `accuracy`, `etemp`, `max_iter` | `--acc X`, `--etemp K`, `--max-iter N` | SCF methods: accuracy multiplier (1), electronic temperature (GFN2-xTB 300 K, g-xTB 0 K), iteration limit (GFN2-xTB and g-xTB 2.0.1 250, g-xTB v1.1 1000) |
+| `scf_retries` | `--scf-retry etemp=K,max_iter=N` (repeated) | SCF methods: a ladder of fresh SCFs tried in order after one that fails, each rung `{"etemp": K, "max_iter": N}` with either key (default none), see [SCF retries](#scf-retries) |
 | `mixer`, `dispersion`, `scf_trace` | `--mixer M`, `--nodisp`, `--scf-trace` | GFN2-xTB: SCF mixer (`auto`, `broyden`, `diis`), dispersion off (validation), every SCF iteration on stderr |
 | `alpb`, `gbsa`, `solvation_state` | `--alpb S`, `--gbsa S`, `--solvation-state R` | implicit solvent and its reference state (`gsolv`, `bar1M`, `reference`) |
 | `solvation_correction`, `correction_conventions` | `--solvation-correction gfn2`, `--correction-conventions C` | g-xTB in solvent, see [g-xTB in implicit solvent](#g-xtb-in-implicit-solvent) |
 | `guess` | — | where a calculator's SCFs start, see [Restarts](#restarts-the-previous-geometrys-wavefunction) |
+| `restart` | — | `previous` or `fresh`: whether a calculator's SCFs start from the previous geometry's state; with it, `guess` names the start alone (e.g. `sad` with `previous`) |
 | `fragment_charges`, `topology_positions` | `--frag-charges Q1,Q2`, `--topology-ref ref.xyz` | GFN-FF, see [GFN-FF](#gfn-ff) |
 | `gradient` | `--grad` | the gradient |
 | `hessian`, `hessian_method`, `hessian_step`, `hessian_accuracy` | `--hess`, `--hess-method M`, `--hess-step H`, `--hess-acc X` | the Hessian, see [Hessians](#hessians) |
 | `molden`, `molden_file`, `molden_cartesian` | `--molden[=FILE]`, `--molden-cartesian` | the Molden file's text in the response; a file to write; Cartesian functions |
 | `bond_orders` | `--wbo` | Mayer-Wiberg bond orders |
+| `overlap`, `hamiltonian` | `--overlap`, `--hamiltonian` | the AO overlap matrix of the SCF; the Hamiltonian whose eigenvectors are the orbitals, with the overlap (SCF methods; not g-xTB 2.0.1 in the `gxtb` conventions, whose SCF diagonalizes a DIIS-mixed matrix last: refused as `not_applicable`) |
 | `vibrations`, `thermo`, `analysis_conventions`, `masses`, `temperature`, `pressure`, `rotor_cutoff`, `imaginary_cutoff`, `frequency_scale`, `symmetry_number`, `symmetry_threshold` | `--novib`, `--nothermo`, `--analysis-conventions C`, —, `--temp T[,T]`, `--pressure P`, `--sthr X`, `--ithr X`, `--scale X`, `--symnum N`, `--desy X` | the vibrational analysis of a Hessian, see [Vibrational analysis](#vibrational-analysis-and-thermochemistry) |
 | `analyze_hessian`, `dipole_derivatives`, `energy` | — | the analysis of a given Hessian, like `xtb thermo` (no calculation settings then) |
 
@@ -236,19 +232,22 @@ The response, for every front end (a field is present when it applies):
 
 | fields | what |
 |---|---|
-| `program`, `version`, `method`, `conventions`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the SCF's eigensolver (`faer` or the run-time LAPACK library) |
+| `program`, `version`, `method`, `conventions`, `numerics`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the numerics identity of the code that produced the numbers (`"gfn2:1"`, `"gxtb-v2.0.1:1+gfn2:1"` for the solvation composite, `"analysis:1"`; a method's epoch changes with every change of its results, see the CHANGELOG), the SCF's eigensolver (`faer` or the run-time LAPACK library) |
 | `energy`, `gradient`, `charges`, `dipole`, `terms`, `timings`, `seconds` | Eh, Eh/bohr (with `gradient`), atomic charges (Mulliken; GFN-FF: EEQ), e·bohr, energy terms (Eh), wall time per phase and of the request (s) |
-| `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB) |
+| `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `fermi_levels`, `electronic_temperature`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB; `fermi_levels`: alpha and beta, `null` for the Aufbau filling, the same level twice for a closed shell; `electronic_temperature`: K, 0 for the Aufbau filling) |
 | `n_hbonds`, `n_xbonds`, `topology` | GFN-FF |
 | `molden`, `molden_file` | Molden file |
+| `overlap`, `hamiltonian` | the AO overlap matrix S of the SCF (n x n, with the screening the SCF used; g-xTB: its SCF basis) and the Hamiltonian H (a list: one n x n matrix for GFN2-xTB, open shells included, and for a g-xTB closed shell; alpha and beta for a g-xTB open shell): the operator of one build at the last input, whose generalized eigenvectors with S are the orbitals (GFN2-xTB: H0 and the potentials of the last input moments; g-xTB: the unmixed last build). AO order: atom by atom, shell by shell, m = -l..l, p as y, z, x (not the Molden file's) |
 | `hessian`, `hessian_method`, `hessian_max_asymmetry`, `hessian_timings`, `dipole_derivatives` | Hessian |
 | `vibrational_conventions`, `frequencies`, `normal_modes`, `reduced_masses`, `force_constants`, `ir_intensities`, `n_imaginary`, `linear`, `masses`, `thermo` | vibrational analysis |
 | `composite`, `components`, `parts`, `hessian_parts` | g-xTB in solvent |
+| `scf_retry` | with `scf_retries`: the `rung` that gave the result (0: the calculation's own settings) `of` the rungs given, and its `label` (`retry 2 of 2: etemp 3000 K, max_iter 1000`); `scf_attempts` then lists every try |
 
 ## Design rules
 
-- **No implicit threading.** Every calculation runs on exactly the number of threads you
-  pass (default 1, at least 1; never clamped) inside its own pool; outer-level parallelism (Hessian displacements)
+- **No implicit threading.** Every calculation runs on at most the number of threads it is
+  given (the CLI's default 1, at least 1; Python's count and internal cap, see
+  [Threads](#threads)) inside its own pool; outer-level parallelism (Hessian displacements)
   runs inner work sequentially, so thread counts never multiply. No `OMP_NUM_THREADS`
   needed, ever. All of axtb's own reductions use fixed chunks summed in a fixed order, so
   results repeat bit for bit on a given thread count. Between thread counts they may differ
@@ -289,10 +288,19 @@ The response, for every front end (a field is present when it applies):
 
 ## Threads
 
-axtb runs every calculation on exactly the threads you ask for (default 1) and never caps
-them, but more is not always faster. Measured on a whole 64-core AMD Threadripper PRO 9985WX
-node with axtb 0.1.0 (`bench/results/cluster-9985wx`, the release run of 2026-11-07: energy +
-gradient in one Python process, xtb conventions, seconds):
+The CLI runs every calculation on the threads you ask for (default 1), but more is not always
+faster. One exception: a molecule so small that threads only cost runs on one thread, with the
+same results (GFN2-xTB single points up to 10 atoms and Hessians up to 6, g-xTB 2.0.1 single
+points up to 9 atoms, v1.1 up to 6, GFN-FF single points up to 100 atoms and Hessians up to 10;
+g-xTB's Hessians always use the threads; `axtb_driver::task_threads`). Rust's
+`axtb_driver::Calculator` keeps the threads it was built with. Python runs a calculation on the
+count it is given (the `threads` keyword, else a runner's grant, else this process's CPUs; a
+session's running requests share it) and within that at most axtb's internal cap, where more
+threads stop helping: an SCF energy or gradient at most 8 threads, fewer for small molecules;
+Hessians use all they are given (`axtb_driver::thread_cap`; docs/python.md, "Threads").
+Measured on a whole 64-core AMD Threadripper PRO 9985WX node with axtb 0.1.0
+(`bench/results/cluster-9985wx`, the release run of 2026-11-07: energy + gradient in one Python
+process, xtb conventions, seconds):
 
 | molecule (atoms) | 1 thread | 8 threads | 32 threads | 64 threads |
 |---|---|---|---|---|
@@ -302,13 +310,15 @@ gradient in one Python process, xtb conventions, seconds):
 
 - **One calculation:** use at most about 8 threads. Beyond that the SCF eigensolver gets
   slower with every library we measured (faer, OpenBLAS, MKL, AOCL), and axtb warns about a
-  single point of an SCF method (GFN2-xTB, g-xTB) on more threads (CLI: stderr; Python:
-  `RuntimeWarning`; `axtb_driver::threads_warning` and `axtb::threads` in Rust). GFN-FF has no
-  SCF and gets no warning.
+  single point of an SCF method (GFN2-xTB, g-xTB) on more threads (CLI: stderr;
+  `axtb_driver::threads_warning` and `axtb::threads` in Rust). Python warns of nothing: it caps
+  an SCF energy or gradient at 8 threads, whatever it is given. GFN-FF has no SCF and gets no
+  warning.
 - **Many calculations** (conformers, path images, batches): run them in parallel with 1
-  thread each. This always gives the most work per node; small molecules gain little from
-  threads at all (taxol in the release run: 1.1× on 8 threads, node; 1.5× on the laptop with
-  faer).
+  thread each (Python's `Session.compute_many` runs a session's lineages, e.g. path images,
+  side by side this way). This always gives the most work per node; small molecules gain
+  little from threads at all (taxol in the release run: 1.1× on 8 threads, node; 1.5× on the
+  laptop with faer).
 - **Hessians** run their perturbations or displacements in parallel and do use many threads
   well, with no warning (taxol, GFN2-xTB: analytic 2.89 s on 1 thread, 0.87 s on 8 on the
   laptop; numerical 39.7 s on 1 thread and 5.2 s on 8 on the node, `bench/results/hessian.json`;
@@ -335,7 +345,7 @@ gradient in one Python process, xtb conventions, seconds):
     enough to use them; later changes have no effect.
   - When the library cannot be loaded or is refused, faer solves instead. The CLI and the Python
     module warn ("AXTB_LAPACK not used"), and the `eigensolver` field of every response says
-    which solver ran (`faer` or the library); in Rust, `SinglePoint::eigensolver` and
+    which solver ran (`faer` or the library); in Rust, `ScfReport::eigensolver` and
     `axtb::linalg::runtime_lapack()`.
 
   Between thread counts, and against faer, the results differ by round-off (≤ 2e-12 Eh in the
@@ -378,8 +388,10 @@ The validation scripts and benchmarks read:
 has it (`6.7.1 (26dd68d)`): that build is the 6.7.1 release plus 127 later commits of the main
 branch, and the g-xTB composite's program mode (`conventions="gxtb"`) maps its GFN2 halves
 to `xtb-6.7.1`, the xtb of that build. The two rows are tables of `ConventionParams`
-(`crates/axtb/src/conventions.rs`); the names are the same in Rust (`Conventions::Xtb`, `Conventions::Xtb671`), the CLI, Python and the qccodec codec
-(`"xtb-6.8.0"` is accepted for `"xtb"`).
+(`crates/axtb/src/conventions.rs`); the names are the same in Rust (`Conventions::Xtb`, `Conventions::Xtb671`) and the CLI
+(`"xtb-6.8.0"` is accepted for `"xtb"`); Python's canonical names carry every version
+(`xtb-6.8.0`, `xtb-6.7.1`, `tblite-0.8.0`, `gxtb-1.1.0`, `gxtb-2.0.1`) and take the short ones as
+aliases.
 
 For GFN2-xTB, xtb 6.8.0 adopted tblite's numerics ("the native xtb and tblite implementations
 are now fully consistent"): at `--acc 1e-4` axtb's `tblite` conventions already reproduce
@@ -410,8 +422,9 @@ before the g-xTB build). docs/validation.md compares the `xtb-6.7.1` conventions
 ## SCF
 
 The SCC variables (shell charges, atomic dipoles and quadrupoles) are mixed between
-iterations by the mixer chosen with `mixer` (Python, CLI `--mixer`, JSON `"mixer"`, qccodec
-keyword, `ScfOptions::mixer` in Rust; default: the conventions' choice):
+iterations by the mixer chosen with `mixer` (CLI `--mixer`, JSON `"mixer"`, Python keyword
+`scf.mixer` with `broyden-then-diis` for `auto`, `axtb::Options::mixing` in Rust; default: the
+conventions' choice):
 
 - `"broyden"`: modified Broyden mixing with tblite's weights, damping 0.4 and full history.
   The `xtb`, `xtb-6.7.1` and `tblite` conventions use it alone, so they reproduce the programs' iteration
@@ -428,8 +441,8 @@ keyword, `ScfOptions::mixer` in Rust; default: the conventions' choice):
 Results say which mixer produced them: `mixer_used` (`"broyden"`, `"diis"`, or
 `"diis-fallback"` when Broyden failed and DIIS converged) and `scf_attempts` (mixer,
 iterations, converged of each attempt; `iterations` is that of the converging attempt), in
-`SinglePoint` (Rust), the result dict (Python), the CLI's JSON and the qccodec `extras`, so a
-rescued point on a path is visible.
+`ScfReport` (Rust, `SinglePoint::scf()`), the CLI's JSON and Python's `record` (`scf.mixer_used`,
+`scf.attempts`, and `contingent["scf.mixer"].fired`), so a rescued point on a path is visible.
 
 docs/validation.md has how the mixers do on a set of hard SCF cases.
 
@@ -475,27 +488,30 @@ The agreement this gives at xtb's default accuracy is in docs/validation.md.
 
 ### Restarts: the previous geometry's wavefunction
 
-A `Calculator` starts each SCF from the previous geometry's converged state: GFN2-xTB always (its
+A session (Python's `axtb.Session`, per lineage; Rust's `axtb_driver::Calculator`) starts each
+SCF from the previous geometry's converged state: GFN2-xTB always (its
 shell charges and atomic multipoles), g-xTB in the default conventions. For g-xTB that state is
 what the programs' restart files hold: v1.1 the density matrices (`gxtbrestart`), 2.0.1 the shell
 charges and magnetizations, atomic dipoles and quadrupoles and the density matrices
 (`xtbrestart`), taken over as they are although the charge- and CN-dependent q-vSZP basis of the
 new geometry differs (the programs do the same). An SCF from a previous state that does not
 converge runs once more from the program's EEQ-BC start. Results say which start produced them
-(`guess`: `previous`, `eeq-bc`, `eeq`, `sad`; Rust `SinglePoint::guess`).
+(`guess`: `previous`, `eeq-bc`, `eeq`, `sad`; Rust `ScfReport::start`).
 
 - `conventions="gxtb"` keeps the programs' fresh EEQ-BC start for every SCF, so each result is
-  that of a fresh program run. `guess="previous"` (Rust `ScfOptions::guess`) reproduces the
+  that of a fresh program run. `guess="previous"` (Python `scf.restart: previous`, Rust
+  `ScfSettings::restart`) reproduces the
   programs' restarts: a second run in the same directory or the next step of an optimization
   inside one run. Against the programs run that way (caffeine, water, triplet O2,
   [Cu(NH3)4]²⁺; the same geometry, then 0.02, 0.1 and 0.3 bohr rms displacements, each from the
   previous run's restart file): energies ≤ 4.3e-11 Eh, identical SCF iterations (2.0.1: 2 at the
   same geometry, as the program; 1.1.0: 3). The 1.1.0 program restarts without the transition
   step of its Fock mixing (v1.1 spec §4.17).
-- `guess="fresh"` starts every SCF from the method's own start in any conventions: g-xTB's
-  EEQ-BC charges (also `guess="eeq-bc"`), GFN2-xTB's EEQ charges (also `guess="eeq"`).
-  `guess="sad"` starts every GFN2-xTB SCF from neutral atoms. A named start of another method
-  is refused, and the solvation composite takes only `previous` or `fresh`.
+- `guess="fresh"` (Python `scf.restart: off`) starts every SCF from the method's own start in
+  any conventions: g-xTB's EEQ-BC charges (also `guess="eeq-bc"`), GFN2-xTB's EEQ charges (also
+  `guess="eeq"`). `guess="sad"` starts every GFN2-xTB SCF from neutral atoms. A named start of
+  another method is refused, and the solvation composite takes only `previous` or `fresh`. In
+  Python `scf.guess` names the start of an SCF without history and keeps the restart policy.
 - In the default conventions a restarted g-xTB 2.0.1 SCF converges to 0.1 × the thresholds
   (`axtb_gxtb::calculator::RESTART_ACCURACY`). A fresh 2.0.1 SCF ends with a DIIS step that
   overshoots tblite's thresholds; a restart meets them after a few iterations and would stop
@@ -505,22 +521,51 @@ converge runs once more from the program's EEQ-BC start. Results say which start
   restarted energies are 3–50 times closer to the converged ones than fresh ones and gradients
   about as close (table). v1.1 and GFN2-xTB restarts keep the thresholds: their errors are 1–4
   times a fresh SCF's but at most 8e-6 Eh/bohr, and the optimizers take the same steps.
-- Python's `Calculator.guess_state()` returns the last converged state (an `axtb.ScfState`) and
-  `set_guess_state(state)` starts another calculator for the same method and molecule from it.
-  In Rust these are `guess()` and `set_guess(state)`: of `axtb_driver::Calculator` (an
-  `axtb_driver::ScfState`, any method), `axtb::Calculator` (`ScfGuess`) and
-  `axtb_gxtb::Calculator` (`GuessState`). Python's `Calculator.set_guess(shell_charges,
-  atomic_dipoles, atomic_quadrupoles)` starts GFN2-xTB from given moments
-  (`axtb_driver::Calculator::set_moments`).
-  The codec uses this for qccompute's `propagate_wfn=True`: optimizers (geomeTRIC, Sella) start
-  every step from the previous step's wavefunction, which stays in the process's memory; outputs
-  carry its id (`extras['wavefunction_id']`). Without `propagate_wfn` codec calls stay
-  independent.
-- The CLI runs one geometry per call and always starts fresh (a g-xTB single point after a
-  Hessian too, also in Python's `Calculator.hessian`), so CLI results do not change.
+- Python's sessions keep one converged state per lineage: a request continues its lineage
+  (`lineage=`), starts from the first of its `seed` lineages with history when it has none, and
+  `commit=False` leaves the history as it was; interleaved lineages compute what separate
+  sessions compute, bit for bit. `ProgramInput.given` starts the SCF from a given result
+  (GFN2-xTB from its shell populations and atomic multipoles, g-xTB from its orbitals' density;
+  docs/python.md). In Rust these are `wavefunction()`, `set_wavefunction(wf)` and
+  `set_history(wf)` of the `Method` trait, which every calculator implements (an
+  `axtb::method::Wavefunction`; it starts only a calculator of its method and molecule: atomic
+  numbers, charge and unpaired electrons), and of `axtb_driver::Calculator`; `set_history` lets
+  the restart policy decide, as the calculator's own previous state, while a wavefunction set
+  with `set_wavefunction` starts the next SCF whatever `guess` says. After a failed calculation
+  a calculator has none. `set_moments` starts GFN2-xTB from given moments and `set_density`
+  g-xTB from a given density.
+- The CLI runs one geometry per call and always starts fresh, so CLI results do not change.
 
 docs/validation.md has what restarts save along paths and in optimizations, and where g-xTB
 has several SCF solutions, so that a restart can end on another one than a fresh start.
+
+### SCF retries
+
+`scf_retries` (CLI `--scf-retry etemp=1000,max_iter=1000`, repeated; Python `scf.retries`; default
+none) is a ladder of rungs for an SCF that fails (does not converge, or breaks down): the
+calculation runs again at each rung in order, as a fresh SCF from the method's own start with the
+rung's electronic temperature and iteration limit (a missing one: the calculation's), until one
+converges. GFN2-xTB's Broyden-then-DIIS fallback and a calculator's fresh start after a history
+that did not converge run inside each try, before any rung.
+
+```
+axtb h2o-stretched.xyz --grad --max-iter 30 --scf-retry etemp=1000,max_iter=1000 --scf-retry etemp=3000,max_iter=1000
+warning: converged on retry 1 of 2: etemp 1000 K, max_iter 1000
+```
+
+- A ladder that does not fire changes no number, and a result from a rung is the calculation at
+  the rung's settings, bit for bit (the composite's single point after its Hessian: within the SCF
+  thresholds). With `etemp` no rung may go below it.
+- A Hessian runs whole at one rung (reference, displaced and perturbed SCFs and the single point
+  of its response): a try that fails anywhere moves the whole calculation to the next rung.
+- A calculator (a session) commits the rung's state as the next geometry's history; the next
+  geometry tries the calculation's own settings first.
+- The g-xTB solvation composite climbs the given rungs per part, in place of its own retries.
+- The response says which rung gave the result (`scf_retry`) and lists every try
+  (`scf_attempts`: rung, temperature, iteration limit, outcome). When every rung fails the error
+  is the last rung's `scf_not_converged`, with every try as `attempts`.
+
+docs/python.md (SCF retries) has the details.
 
 ## Hessians
 
@@ -560,9 +605,9 @@ smoothed FD Hessian that xtb reports, without SCF noise.
 
 ## g-xTB
 
-g-xTB v1.1: `method="gxtb-v1.1"` in Python and qccodec, `--method gxtb-v1.1` in the CLI,
-`axtb_gxtb::Calculator` in Rust (same interface as `axtb::Calculator`, returns
-`axtb::SinglePoint`): energies, analytic gradients, semi-numerical Hessians. It uses the
+g-xTB v1.1: `model.method` `"gxtb-v1.1"` in Python, `--method gxtb-v1.1` in the CLI,
+`axtb_gxtb::Calculator` in Rust (implements the `Method` trait, as `axtb::Calculator`
+does): energies, analytic gradients, semi-numerical Hessians. It uses the
 g-xTB 1.1.0 program's SCF (thresholds, start density, mixing; the CLI reads XYZ files with
 the program's Ångström factor), accepts `accuracy` (multiplier of the program's SCF
 thresholds), `etemp` (Fermi smearing, see below), `max_iter`, `threads` and `conventions`, and
@@ -587,20 +632,28 @@ energy, so both conventions share the Fock matrix, the SCF (tblite's: damping, t
 the full Fock matrix) and analytic gradients without a response term.
 `conventions="gxtb"` reproduces the program: mctc-lib's Ångström factor, its fractional
 electron count (the sum of the stored reference occupations), its hard cutoffs (CNs and
-repulsion 25 bohr, revD4 50/25 bohr, integral pairs) and its gradient formula.
+repulsion 25 bohr, revD4 50/25 bohr, integral pairs), its gradient formula and the end of its
+SCF (the density of the last, DIIS-mixed Fock matrix).
 `conventions="axtb"` (default) uses CODATA 2022 units, an integer electron count and smooth
-cutoffs (1 bohr switches beyond the program's radii). The two differ by ≤ 3e-10 Eh for the
-small reference molecules (same iterations) and by ≤ 9e-10 Eh in the energy differences
-tested on them (2.3e-8 Eh for a 2 % expansion of C50H102), by ≤ 4e-11 Eh for the conformer,
-reaction, barrier and binding energies of `tests/gxtb_energy_differences.py`; for (H2O)100
-by 1.9e-6 Eh, almost all from the revD4 three-body tail beyond 25 bohr that the program cuts (`bench/results/gxtb2_reproduction.json`, from
-`python tests/gxtb2_reproduction.py`). The program's analytic gradient is wrong (by up to
+cutoffs (1 bohr switches beyond the program's radii), and ends the SCF with one more iteration
+whose Fock matrix is diagonalized unmixed (as g-xTB v1.1's programs do): its density is the
+result, the returned orbitals are the fresh eigenvectors of one Fock build, and the result is
+closer to self-consistency (energies move by up to 1e-7 Eh and gradients by up to 3.4e-5 Eh/bohr
+toward those of a tightly converged SCF; +1 iteration, +2-4 % time on one thread, ~6 % on eight). The conventions alone
+differ by ≤ 3e-10 Eh for the small reference molecules and by ≤ 9e-10 Eh in the energy
+differences tested on them (2.3e-8 Eh for a 2 % expansion of C50H102); with the extra
+iteration the default conventions differ from the program by ≤ 1.4e-7 Eh for the small
+reference molecules (one iteration more) and ≤ 2.3e-8 Eh in those energy differences, by
+≤ 4e-11 Eh for the conformer, reaction, barrier and binding energies of
+`tests/gxtb_energy_differences.py` (at accuracy 1e-4); for (H2O)100 by 1.9e-6 Eh, almost all
+from the revD4 three-body tail beyond 25 bohr that the program cuts
+(`python tests/gxtb2_reproduction.py`). The program's analytic gradient is wrong (by up to
 1.4e-4 Eh/bohr) for some complexes with bonds exactly along a coordinate axis
 ([Gd(H2O)6]³⁺, [Lu(H2O)6]³⁺; finite differences of its own energies follow axtb, spec §4.18);
 axtb's gradient is the derivative of the energy in either orientation.
 
-Electronic temperature (both versions): `etemp` (kelvin; CLI `--etemp`, Python `etemp=`,
-qccodec keyword `etemp`) smears the occupations with a Fermi distribution and adds the entropy
+Electronic temperature (both versions): `etemp` (kelvin; CLI `--etemp`, Python keyword
+`scf.etemp`) smears the occupations with a Fermi distribution and adds the entropy
 term −TS (term `entropy`) to the energy; the default is 0 K, as in the g-xTB programs (GFN2
 keeps 300 K). Energies, analytic gradients and, for 2.0.1, analytic and response Hessians
 include the response of the occupations (Fermi-level shifts). `conventions="gxtb"` follows each
@@ -627,20 +680,20 @@ three parts as three xtb program calls per gradient; axtb runs them as one calcu
 (`axtb_gxtb::CompositeCalculator`), which keeps each part's setup between geometries:
 
 ```python
-r = axtb.singlepoint(numbers, positions_bohr, method="gxtb-v2.0.1", gradient=True,
-                     alpb="water", solvation_correction="gfn2")         # or gbsa=, solvation_state=
-calc = axtb.Calculator("gxtb-v2.0.1", numbers, positions_bohr, alpb="water", solvation_correction="gfn2")
-h = calc.hessian(positions_bohr)            # H_gxtb + H_GFN2+ALPB − H_GFN2, analytic parts
-r["components"]    # gxtb, gfn2_solvated, gfn2_gas, solvation_correction (Eh)
-r["parts"]         # per part: iterations, mixer_used, scf_attempts, etemp, max_iter, retry
-h["hessian_parts"] # the same for the parts of the Hessian, with each part's hessian_method
-r["composite"]     # definition "E = E[gxtb-v2.0.1] + (E[gfn2 + alpb(water, gsolv)] - E[gfn2])" and settings
+keywords = {"solvent": {"name": "water", "correction": "gfn2"}}  # or "model": "gbsa", "state": ...
+out = axtb.compute(ProgramInput(program="axtb", calctype="gradient", structure=s,
+                                model={"method": "gxtb-v2.0.1"}, keywords=keywords))
+c = out.record["composite"]
+c["components"]    # gxtb, gfn2_solvated, gfn2_gas, solvation_correction (Eh)
+c["parts"]         # per part: iterations, mixer_used, scf_attempts, etemp, max_iter, retry
+c["definition"]    # "E = E[gxtb-v2.0.1] + (E[gfn2 + alpb(water, gsolv)] - E[gfn2])"
+# calctype "hessian": H_gxtb + H_GFN2+ALPB − H_GFN2 (analytic parts), record["composite"]["hessian_parts"]
 ```
 
 CLI: `axtb mol.xyz --method gxtb-v2.0.1 --alpb water --solvation-correction gfn2 --grad`
-(JSON `"solvation_correction": "gfn2"`); qccodec: `Model(method="gxtb-v2.0.1")` with keywords
-`{"alpb": "water", "solvation_correction": "gfn2"}`, results in `extras["composite"]`,
-`extras["components"]`, `extras["parts"]` (and `extras["hessian_parts"]`).
+(JSON `"solvation_correction": "gfn2"`); Python: keywords `solvent.name` and
+`solvent.correction` (`"gfn2"`), and `solvent.correction_conventions`; the orbitals, charges and
+multipoles of the output are the g-xTB part's (`record["wavefunction"]["part"]`).
 
 **Why a keyword and not a method name.** The method stays the g-xTB version that gives the
 gas-phase energy. The solvent is named exactly as for GFN2-xTB (`alpb`/`gbsa`,
@@ -661,7 +714,8 @@ model given in `alpb=`/`gbsa=`, and a slash in it would read as method/basis to 
   iterations, then at 5000 K with 1000 iterations. A g-xTB SCF that fails runs again at 1000 K,
   then at 3000 K (1000 iterations each), unless `etemp` was given. The rung each part converged
   on is in `parts[...]["retry"]`, so a result from a smeared rung is never mistaken for one at
-  the default temperature.
+  the default temperature. A given `scf_retries` replaces both ladders, for every part (see
+  [SCF retries](#scf-retries)).
 - **The zero check.** The calculation stops if the first geometry's ΔG_solv is zero
   (|ΔG| < 1e-9 Eh), instead of reporting gas-phase energies as solvated.
 
@@ -684,7 +738,7 @@ docs/validation.md has the comparison with the three programs and the timings.
 
 ## GFN-FF
 
-`method="gfnff"` (CLI `--method gfnff`, qccodec `Model(method="gfnff")`) is GFN-FF as xtb
+`method="gfnff"` (CLI `--method gfnff`, Python `model.method`) is GFN-FF as xtb
 6.8.0 computes it (`xtb --gfnff`; `conventions="xtb-6.7.1"`: as xtb 6.7.1, the g-xTB 2.0.1
 build `26dd68d`, computes it), ported from xtb's `src/gfnff` term by term
 (`docs/gfnff-spec.md`). The topology (neighbors, hybridization, rings, pi bond orders,
@@ -693,21 +747,25 @@ structure and kept for every later geometry, as xtb does within an optimization;
 structure can set it instead:
 
 ```python
-calc = axtb.Calculator("gfnff", numbers, start_bohr, threads=8, fragment_charges=None)
-r = calc.singlepoint(positions_bohr, gradient=True)   # energy, gradient, EEQ charges, terms, topology
-r["topology"]["bonds"], r["topology"]["fragments"], r["topology"]["topology_charges"]
-r = axtb.singlepoint(numbers, positions_bohr, method="gfnff", gradient=True,
-                     topology_positions=start_bohr)     # same, stateless
-h = calc.hessian(positions_bohr)                # analytic, with dipole derivatives and IR
-h = calc.hessian(positions_bohr, method="numerical")    # xtb's finite differences (step 0.005)
+inp = ProgramInput(program="axtb", calctype="gradient", structure=start, model={"method": "gfnff"},
+                   keywords={"threads": 8})        # topology.fragment_charges, topology.geometry
+with axtb.Session(inp) as s:                       # the topology of the first structure, kept
+    f = s.compute(positions_bohr)                  # energy, gradient, EEQ charges, terms
+f.record["gfnff"]                                  # hydrogen and halogen bonds, fragment charges
+out = axtb.compute(inp)                            # compute's record has the topology too
+out.record["gfnff"]["topology"]["bonds"], out.record["gfnff"]["topology"]["fragments"]
+# calctype "hessian": analytic, with dipole derivatives and IR; hessian.method "numerical": xtb's
+# finite differences (step 0.005)
 ```
 
 CLI: `axtb mol.xyz --method gfnff [--grad] [--hess] [--topology-ref ref.xyz] [--frag-charges 1,-1]`;
-JSON requests take `topology_positions` and `fragment_charges`. `fragment_charges` are the
+JSON requests take `topology_positions` and `fragment_charges` (Python `topology.geometry` and
+`topology.fragment_charges`). `fragment_charges` are the
 charges of the molecular fragments in the order of their first atoms (xtb's `.CHRG` second
 line), one per fragment and summing to the total charge, else an error; default: the total
-charge on the first fragment. `--uhf` has no effect; SCF, solvation, Molden and bond-order
-options are rejected. `conventions` `"axtb"` (default) and `"xtb"` (or `"xtb-6.8.0"`) compute
+charge on the first fragment. `--uhf` has no effect (Python runs GFN-FF on singlets of an even
+electron count only and refuses the rest); SCF, solvation, Molden and bond-order options are
+rejected. `conventions` `"axtb"` (default) and `"xtb"` (or `"xtb-6.8.0"`) compute
 xtb 6.8.0's force field, `"xtb-6.7.1"` 6.7.1's (Rust: `axtb_gfnff::Conventions`, with one
 crate-private table of the settings that differ). `"xtb"`
 and `"xtb-6.7.1"` read XYZ files with xtb's (mctc-lib's) Ångström factor and analyze Hessians in
@@ -722,9 +780,9 @@ time and memory against xtb up to 9900 atoms.
 
 ## Vibrational analysis and thermochemistry
 
-Every Hessian comes with its vibrational analysis (`axtb::vibrations::analyze`; Python
-`Calculator.hessian`, or `axtb.vibrational_analysis` for a Hessian from any source; CLI `--hess`;
-the qccodec codec), whatever the method: harmonic frequencies (cm⁻¹, imaginary ones negative) and
+Every Hessian comes with its vibrational analysis (`axtb::vibrations::analyze`; Python calctype
+`hessian`, into qcdata's `vibrational_analysis` and `thermochemistry`; CLI `--hess`, and the
+CLI's `analyze_hessian` request for a Hessian from any source), whatever the method: harmonic frequencies (cm⁻¹, imaginary ones negative) and
 the number of imaginary modes (`n_imaginary`: every negative frequency, however small; the
 thermochemistry's `n_dropped` counts those beyond `imaginary_cutoff`), normal modes
 (Cartesian displacements of unit length, qcdata's
@@ -747,8 +805,8 @@ densities), and from the displaced dipoles of numerical Hessians (GFN2-xTB, g-xT
 
 Three conventions, chosen with the calculation's (`xtb` for GFN2-xTB and GFN-FF
 `conventions="xtb"`, `xtb-6.7.1` for `conventions="xtb-6.7.1"` and g-xTB's `conventions="gxtb"`,
-`axtb` otherwise) or with `analysis_conventions` (CLI `--analysis-conventions`; the
-`conventions` argument of `axtb.vibrational_analysis`):
+`axtb` otherwise) or with `analysis_conventions` (CLI `--analysis-conventions`; Python keyword
+`freq.conventions`):
 
 - `xtb` reproduces `xtb --hess` and `xtb thermo` of xtb 6.8.0: xtb's atomic masses and
   constants; the molecule as given (6.8.0 no longer rotates it before the numerical Hessian,
@@ -789,16 +847,14 @@ docs/validation.md compares the analysis with `xtb --hess` and `xtb thermo`.
 The converged orbitals of any method, as a Molden file for orbital viewers (Molden, Jmol,
 Avogadro, IboView, Multiwfn, PySCF/IOData readers):
 
-- Python: `axtb.singlepoint(..., molden=True)` or `Calculator.singlepoint(..., molden=True)`
-  returns the file's text under `"molden"` (`molden="cartesian"` for Cartesian functions);
+- Python: no Molden text (`output.molden` is refused); `output.orbitals` gives the orbitals with
+  their basis set (qcdata's `Wavefunction`), from which qcinf writes Molden files;
 - CLI: `axtb mol.xyz [--method M] --molden [FILE]` writes FILE (default `molden.input`, the
   name `xtb --molden` uses; `--molden=FILE` when FILE could be taken for the structure),
   `--molden-cartesian` with Cartesian functions; JSON requests take
   `"molden": true` (the text in the response), `"molden_file"` and `"molden_cartesian"`;
-- qccodec: keyword `molden` (`True`, `"spherical"` or `"cartesian"`) puts the file into
-  `output.results.files["molden.input"]`, for every calculation type;
-- Rust: `ScfOptions::keep_orbitals` (in `axtb` and `axtb_gxtb`) keeps them in
-  `SinglePoint::orbitals`, and `Orbitals::to_molden` writes the file.
+- Rust: `Want::orbitals` keeps them in `Electronic::orbitals` of the single point, and
+  `axtb::ToMolden::to_molden` writes the file.
 
 The file follows the Molden conventions standard readers use: `[Atoms] AU` with atomic
 numbers; `[GTO]` atom by atom, each atom with its own contracted shells (g-xTB's q-vSZP
@@ -826,14 +882,15 @@ Molden's.
 What the programs print after every single point, for every SCF method (GFN2-xTB, g-xTB v1.1
 and 2.0.1, the g-xTB part of the solvation composite):
 
-| output | Python result | CLI JSON | qccodec | Rust |
-|---|---|---|---|---|
-| Mayer–Wiberg bond orders (N x N), on request | `singlepoint(..., bond_orders=True)` → `bond_orders` | `--wbo` (`"bond_orders": true`) → `bond_orders` | keyword `bond_orders` → `extras['bond_orders']` | `ScfOptions::bond_orders` → `SinglePoint::bond_orders` |
-| orbital energies and occupations per spin | `orbital_energies_alpha/_beta`, `occupations_alpha/_beta` | the same | `wavefunction.scf_eigenvalues_a/b`, `scf_occupations_a/b`, `calcinfo_nbasis/nmo/nalpha/nbeta/natoms` | `SinglePoint::levels` |
-| HOMO–LUMO gap (Eh) | `homo_lumo_gap` | the same | `extras['homo_lumo_gap']` | `SinglePoint::homo_lumo_gap` |
-| molecular quadrupole (xx, xy, yy, xz, yz, zz; e·bohr², about the origin) | `quadrupole` | the same | `extras['quadrupole']` | `axtb::properties::molecular_quadrupole` |
+| output | Python (qcdata) | CLI JSON | Rust |
+|---|---|---|---|
+| Mayer–Wiberg bond orders (N x N), on request | `output.bond_orders` → `results.bond_orders` | `--wbo` (`"bond_orders": true`) → `bond_orders` | `Want::bond_orders` → `Electronic::bond_orders` |
+| orbital energies and occupations per spin | `results.wavefunction.orbitals`: `energies_a/_b`, `occupations_a/_b` (0..1 per spin); `calcinfo_nbasis/nmo/nalpha/nbeta/natoms` | `orbital_energies_alpha/_beta`, `occupations_alpha/_beta` | `Electronic::levels` |
+| HOMO–LUMO gap (Eh) | from the orbital levels | `homo_lumo_gap` | `Electronic::homo_lumo_gap` |
+| Fermi levels of the alpha and beta electrons (Eh; none for the Aufbau filling) and the electronic temperature used (K; 0 for the Aufbau filling) | `orbitals.fermi_level_a/_b`, `orbitals.electronic_temperature` | `fermi_levels`, `electronic_temperature` | `Electronic::fermi_levels`, `Electronic::electronic_temperature` |
+| molecular quadrupole (e·bohr², about the origin) | `results.quadrupole_moment`: the traceless (Buckingham) 3 x 3 tensor, in every conventions | `quadrupole` (xx, xy, yy, xz, yz, zz), the conventions' form | `Electronic::quadrupole`, `Electronic::quadrupole_traceless` |
 
-qcdata has fields for the orbital levels but none for bond orders or quadrupoles. Bond orders cost
+Bond orders cost
 one matrix product per spin and are computed only when asked for; the levels, gap and
 quadrupole come from what the SCF has anyway.
 A closed shell's levels are its orbitals for both spins with half the occupations; GFN2-xTB's
@@ -860,21 +917,26 @@ What each program prints and what the conventions reproduce (`axtb::properties`)
   `xtb --tblite` print) takes the off-diagonal charge and dipole parts twice, 3 instead of 3/2,
   so its "total" is not a tensor: the printed eigenvalues for water are −1.354/−0.570/1.924 and,
   for the same water rotated by 45°, −2.070/−0.196/2.265 (xtb's: −1.371/0.009/1.361 both). The
-  `tblite` conventions and the g-xTB 2.0.1 `gxtb` conventions reproduce tblite's form; every other
-  case is the tensor.
+  `tblite` conventions and the g-xTB 2.0.1 `gxtb` conventions reproduce tblite's form (the CLI
+  and Rust; Python reports the traceless tensor in every conventions); every other case is the
+  tensor.
 
 docs/validation.md has the agreement with each program's printout and files.
 
 ## Checks
 
 `scripts/check.sh fast` needs no external program: `cargo fmt --check`, clippy and rustdoc with
-warnings as errors, the workspace tests (all reference data is committed), the LGPL-only build,
-a wheel installed in a fresh venv with the Python tests, a grep of the tracked files for
-home paths, private addresses and host names, and a check that the crates' copies of the license
-files match the top level. `scripts/check.sh programs` runs the validation
-gates against the reference programs; a gate whose programs are not set is reported as skipped,
-and every gate writes its results under `target/check/programs/`, never into the repository
-(`scripts/check.sh list` prints the gates and their limits). `tests/programs.py` finds the
+warnings as errors, the workspace tests (all reference data is committed), and its Python part
+(`scripts/check.sh python`: a wheel installed in a fresh venv with the qc* pre-releases, the
+Python tests, the quick Python golden check, ruff and mypy on `python/axtb`, the generated docs
+of docs/python.md), a grep of the tracked files for
+home paths, private addresses and host names, a check that the crates' copies of the license
+files match the top level, and a check that every Rust and Python source file of the crates and
+of `scripts/` starts with `SPDX-License-Identifier: LGPL-3.0-or-later`. `scripts/check.sh
+programs` runs the validation gates against the reference programs; a gate whose programs are
+not set is reported as skipped, and every gate writes its results under
+`target/check/programs/`, never into the repository (`scripts/check.sh list` prints the gates
+and their limits). `tests/programs.py` finds the
 programs from one variable each and nothing else:
 
 | program | variable | source |
@@ -898,7 +960,8 @@ limit, and `scripts/check.sh list` prints them all.
 | check | needs | what | fails when |
 |---|---|---|---|
 | fast: `cargo test --workspace --release` | nothing | every crate against committed program outputs, finite differences, invariances | a test fails |
-| fast: `pytest crates/axtb-py/tests tests/reference_matrix` | the tblite wheel (qccompute for the codec tests) | Python API, CLI and codec; the matrix's fast subset without the xtb cases | a test fails |
+| fast: `pytest crates/axtb-py/tests tests/reference_matrix` | the tblite wheel, qccompute | the Python interface (compute, sessions, keywords, outputs, accuracy, `check_program`, the qccompute runner and worker), the CLI; the matrix's fast subset without the xtb cases | a test fails |
+| fast: `scripts/golden_python.py --quick` | nothing | `axtb.compute` and `axtb.Session` against the CLI's water and caffeine cases | a number differs in a bit |
 | `validate-tblite` | tblite | GFN2-xTB `tblite` conventions vs tblite 0.8.0 on the test structures | an energy differs by more than 1e-7 Eh (tblite's SCF failing on `gh106` known) |
 | `validate-xtb`, `validate-xtb-alpb` | xtb 6.8.0 | `xtb` conventions vs xtb on the test structures, gas phase and ALPB water | energies > 5.0e-13 Eh, gradients > 3.6e-14 Eh/bohr, charges > 1e-8 e, other SCC iterations (`gh106` known) |
 | `validate-hessian` | the g-xTB build, xtb's source | numerical Hessians vs `xtb --hess` | Hessians > 6e-4 Eh/bohr² (xtb's noise), frequencies > 1 cm⁻¹ |
@@ -925,14 +988,18 @@ Two GitHub Actions workflows (Linux x86-64):
 
 - `.github/workflows/ci.yml`, on every push and pull request, on the newest stable Rust:
   `scripts/check.sh fast` and `cargo package` of the published crates, plus a build check on
-  Rust 1.89, the minimum supported version (`rust-version`).
-- `.github/workflows/release.yml`, on a tag `vX.Y.Z` that matches the workspace version, or by
+  Rust 1.89, the minimum supported version (`rust-version`); `scripts/check.sh python` on the
+  oldest and the newest supported Python (3.11, 3.14); the sdist built, installed and
+  smoke-tested (`.github/smoke.py`).
+- `.github/workflows/release.yml`, on a tag `vX.Y.Z` (or `vX.Y.Z-alpha.N`) that matches the
+  workspace version, or by
   hand (then it builds only, unless its `publish` input is set): the manylinux_2_28 wheel (abi3,
   x86-64-v3, stripped) and the sdist with maturin, checked by installing each and running a
-  calculation; the stripped CLI (`cargo build --profile dist`, built in the manylinux_2_28
+  calculation through `axtb.compute` (`.github/smoke.py`); the stripped CLI (`cargo build --profile dist`, built in the manylinux_2_28
   container so that it needs glibc 2.28 or newer) as `axtb-X.Y.Z-x86_64-linux.tar.gz` with the
-  license files and the README. On a tag it creates the GitHub release with these files,
-  publishes the wheel and the sdist to PyPI and runs `cargo publish` for `axtb-d4`,
+  license files and the README. On a tag it creates the GitHub release with these files (a
+  pre-release for a version with a pre-release part), publishes the wheel and the sdist to PyPI
+  (maturin writes `0.2.0-alpha.1` as `0.2.0a1`) and runs `cargo publish` for `axtb-base`, `axtb-d4`,
   `axtb-solvation`, `axtb`, `axtb-gfnff`, `axtb-gxtb`, `axtb-driver` and `axtb-cli`, in that
   order (a rerun skips the crates already published).
 
@@ -949,24 +1016,25 @@ Before the first release the maintainers set up:
    expression of the site's host names, which CI adds to the privacy grep of `scripts/check.sh
    fast`. Without it the grep runs its built-in patterns only.
 
-A release: bump the version in the root `Cargo.toml` (`[workspace.package]` and the versions in
-`[workspace.dependencies]`) and `Cargo.lock`, add the CHANGELOG entry, follow the release
+A release: bump the version in the root `Cargo.toml` (`[workspace.package]` and the exact
+versions, `=X.Y.Z`, in `[workspace.dependencies]`) and `Cargo.lock`, add the CHANGELOG entry, follow the release
 procedure in `bench/README.md`, then push the tag `vX.Y.Z`. Builds made elsewhere embed their
 build paths (panic messages, maturin's SBOM), so the released files come from the workflow.
 
 ## Layout
 
 ```
+crates/base        `axtb-base`: the shared foundation (molecules, errors, units, threads, linear algebra, EEQ)
 crates/axtb        core library: basis, integrals, Hamiltonian, electrostatics, SCF, gradients, Hessians
 crates/d4          DFT-D4 dispersion (bit-identical to dftd4 4.3.1)
 crates/solvation   ALPB/GBSA implicit solvation (xtb 6.8.0 and 6.7.1 compatible)
-crates/gxtb        g-xTB v1.1 and 2.0.1 (GPL-3.0-only because it embeds the GPL parameters)
+crates/gxtb        g-xTB v1.1 and 2.0.1, with their parameters (NOTICE)
 crates/gfnff       GFN-FF force field (port of xtb's src/gfnff; spec in docs/gfnff-spec.md)
 crates/driver      `axtb-driver`: the request/response layer of the front ends (checks, dispatch, response)
 crates/axtb-cli    `axtb` command-line driver (JSON in/out)
-crates/axtb-py     Python bindings (`import axtb`) and the qccodec codec
+crates/axtb-py     the Python package (`import axtb`): axtb.compute, axtb.Session, the qccompute program
 tests/             validation scripts against the reference programs, and structures
-scripts/check.sh   the checks (fast and programs tiers)
+scripts/check.sh   the checks (fast, python and programs tiers)
 docs/              specifications of the ports, validation, g-xTB feature coverage
 bench/             accuracy/performance comparison suite and report
 reference/         upstream sources and programs (git-ignored; see reference/README.md)
@@ -974,12 +1042,11 @@ reference/         upstream sources and programs (git-ignored; see reference/REA
 
 ## License
 
-The core crates `axtb`, `axtb-d4`, `axtb-solvation` and `axtb-gfnff` are LGPL-3.0-or-later
-(`COPYING.LESSER` with `COPYING`): they reproduce xtb, tblite and dftd4 (LGPL-3.0-or-later) and
-data of mctc-lib and multicharge (Apache-2.0). `axtb-gxtb` is GPL-3.0-only (`COPYING`) because it
-embeds the g-xTB parameters (grimme-lab/g-xtb, GPL-3.0), and so are the crates that build it in
-by default: `axtb-driver`, `axtb-cli` (the `axtb` program) and `axtb-py` (the Python package and
-its wheels). Built with `--no-default-features` they leave g-xTB out and are LGPL-3.0-or-later
-([Install](#install)). [LICENSE](LICENSE) lists which crate is under which license and why,
-[NOTICE](NOTICE) credits the upstream work that axtb reproduces, and every published crate and
-wheel carries the license texts it needs.
+Every crate of axtb is LGPL-3.0-or-later (`COPYING.LESSER` with `COPYING`), and so are the
+`axtb` program and the Python package and its wheels. The crates reproduce xtb, tblite and
+dftd4 (LGPL-3.0-or-later) and data of mctc-lib and multicharge (Apache-2.0). `axtb-gxtb` embeds
+the g-xTB parameters: g-xTB itself is GPL-3.0 (grimme-lab/g-xtb), and its authors gave explicit
+permission to include them and to distribute axtb's g-xTB implementation under
+LGPL-3.0-or-later. [LICENSE](LICENSE) lists the crates, [NOTICE](NOTICE) quotes the permission
+and credits the upstream work that axtb reproduces, and every published crate and wheel carries
+the license texts it needs.

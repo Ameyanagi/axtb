@@ -1,0 +1,37 @@
+[package]
+name = "axtb-base"
+description = "Shared foundation of the axtb crates: molecules, errors, units, element tables, the error function, coordination numbers, orbital occupations, timers, thread pools and parallel loops, finite differences and (feature linalg) dense linear algebra and the EEQ charge equations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/axtb-base"
+readme = "README.md"
+keywords = ["quantum-chemistry", "chemistry", "xtb", "units"]
+categories = ["science"]
+include = ["/src", "/Cargo.toml", "/README.md", "/COPYING", "/COPYING.LESSER", "/NOTICE"]
+
+[lib]
+name = "axtb_base"
+path = "src/lib.rs"
+
+[dependencies]
+# the thread pools and deterministic parallel loops (`threads`)
+rayon = "1.10"
+# the dense linear algebra of `linalg` (feature `linalg`)
+faer = { version = "0.22", default-features = false, features = ["std", "linalg", "rayon"], optional = true }
+
+[features]
+# `axtb_base::linalg`: the SCF eigensolver, its run-time LAPACK library, density matrices and
+# linear solves, on faer; and `axtb_base::eeq`, the EEQ charge equations solved with them. Off by
+# default, so that axtb-d4 and axtb-solvation stay without faer.
+linalg = ["dep:faer"]
+
+[package.metadata.docs.rs]
+features = ["linalg"]
+
+[lints]
+workspace = true

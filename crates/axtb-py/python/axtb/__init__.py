@@ -1,32 +1,28 @@
-"""axtb: extended tight binding (GFN2-xTB; g-xTB v1.1 and 2.0.1) and GFN-FF in-process.
+# SPDX-License-Identifier: LGPL-3.0-or-later
+"""axtb: extended tight binding (GFN2-xTB; g-xTB v1.1 and 2.0.1) and GFN-FF in process, as a
+program of the qc* stack: `qcdata.ProgramInput` in, `qcdata.ProgramOutput` out.
 
-All quantities are in atomic units (bohr, Hartree). Calculations run on the number of
-threads you pass (default 1) and never spawn more, so many can run side by side. Results are
-dicts with the keys of the CLI's JSON response (``program``, ``version``, ``method``,
-``conventions``, ``energy``, ``gradient``, ...; arrays as numpy arrays); a key is present when
-it was computed. Settings that do not apply to the method raise ``axtb.InputError``.
+>>> import axtb
+>>> from qcdata import ProgramInput, Structure
+>>> water = Structure(symbols=["O", "H", "H"], geometry=[[0, 0, 0.22], [0, 1.43, -0.89], [0, -1.43, -0.89]])
+>>> out = axtb.compute(ProgramInput(program="axtb", calctype="gradient", structure=water,
+...                                 model={"method": "gxtb-v2.0.1"}))
+>>> out.results.energy, out.results.gradient
+>>> with axtb.Session(ProgramInput(program="axtb", calctype="gradient", structure=water,
+...                                model={"method": "gfn2"})) as s:
+...     frame = s.compute(water.geometry + 0.01)            # warm-started per lineage
 
->>> import numpy as np, axtb
->>> pos = [[0, 0, 0.22], [0, 1.43, -0.89], [0, -1.43, -0.89]]          # any array-like, bohr
->>> r = axtb.singlepoint([8, 1, 1], pos, method="gfn2", gradient=True)
->>> r["energy"], r["gradient"].shape
->>> axtb.singlepoint([8, 1, 1], pos, method="gxtb-v2.0.1", gradient=True)["gradient"]
->>> r = axtb.singlepoint([8, 1, 1], pos, method="gfnff", gradient=True)
->>> r["charges"], r["topology"]["bonds"]
+- `compute(inp, ctx=None)`: one ``energy``, ``gradient`` or ``hessian`` calculation (a Hessian
+  with its vibrational analysis and thermochemistry); failures raise `qcdata.ProgramError` with
+  the failed output attached.
+- `Session(inp, *, calctypes=None, ctx=None)`: one molecule at many geometries on one engine,
+  with lineages, seeds and uncommitted requests (qccompute's session protocol).
+- `program`: the object registered under the ``qccompute.programs`` entry points (no qccompute
+  import at run time).
+- `__version__`: axtb's version as pip reports it.
 
-Hessians come with the single point at the same geometry and their vibrational analysis
-(frequencies in cm⁻¹, normal modes, IR intensities, quasi-RRHO thermochemistry);
-``vibrational_analysis`` analyses a Hessian from any source:
-
->>> h = axtb.Calculator("gfn2", [8, 1, 1], pos).hessian(pos)
->>> h["frequencies"], h["ir_intensities"], h["thermo"]["g_rrho"], h["thermo"]["free_energy"]
->>> axtb.vibrational_analysis([8, 1, 1], pos, h["hessian"], conventions="xtb")["thermo"]["zpve"]
-
-Errors: ``axtb.InputError`` (a ``ValueError``) for invalid input, elements without
-parameters and structures GFN-FF cannot set up; ``axtb.ScfNotConvergedError`` (a
-``RuntimeError``) with ``iterations``, ``energy_change`` and ``residual``; ``RuntimeError``
-for numerical failures. Each carries ``kind`` (``"input"``, ``"unsupported_element"``,
-``"topology"``, ``"scf_not_converged"``, ``"numerical"``).
+Keywords, outputs, the record, errors, threads and accuracy targets: ``docs/python.md``. Units
+are atomic (bohr, hartree), as qcdata's conventions say.
 
 The x86-64 Linux builds need an x86-64-v3 CPU (AVX2, FMA, BMI2, ...). ``import axtb`` checks the
 CPU flags in ``/proc/cpuinfo`` before it loads the extension module and raises ``ImportError``
@@ -88,26 +84,9 @@ def _check_cpu():
 
 _check_cpu()
 
-from ._axtb import (  # noqa: E402  (after the CPU check)
-    Calculator,
-    InputError,
-    ScfNotConvergedError,
-    ScfState,
-    __version__,
-    canonical_method,
-    gxtb_solvent_hint,
-    singlepoint,
-    vibrational_analysis,
-)
+from ._program import program  # noqa: E402  (after the CPU check)
+from ._qc import VERSION as __version__  # noqa: E402
+from ._qc import compute  # noqa: E402
+from ._session import Session  # noqa: E402
 
-__all__ = [
-    "Calculator",
-    "InputError",
-    "ScfNotConvergedError",
-    "ScfState",
-    "__version__",
-    "canonical_method",
-    "gxtb_solvent_hint",
-    "singlepoint",
-    "vibrational_analysis",
-]
+__all__ = ["Session", "__version__", "compute", "program"]

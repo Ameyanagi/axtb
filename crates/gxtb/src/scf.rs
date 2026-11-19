@@ -1,105 +1,161 @@
-//! g-xTB v1.1 single points: the geometry-dependent setup, the energy and Fock matrices as
-//! functions of the spin densities, and the SCF driver.
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//! g-xTB 2.0.1 single points: the geometry-dependent setup, the energy and Fock matrices of a
+//! density, and tblite's SCF as the 2.0.1 program runs it (spec §4.17; a model of the core's
+//! SCF driver, `axtb::scf::run_scf`):
+//!
+//! - start: EEQ-BC atomic charges partitioned to shells, q_l = n0_l/n0_A q_A; no density and no
+//!   multipoles in iteration 1;
+//! - iteration k: Fock matrix F_k of the current charges, multipoles and density (of P_{k-1});
+//!   mixing; diagonalization of the mixed matrix (generalized, S); occupations: 0 K Aufbau (the
+//!   last orbital of a channel takes the fractional remainder of its electron count) or, at a
+//!   finite electronic temperature, Fermi smearing ([`crate::fermi`]); P_k; its Mulliken charges
+//!   and moments; `E_k = E[P_k] - TS_k`;
+//! - mixing on the full Fock matrix (both spin channels in one vector): none in iteration 1,
+//!   damping 0.2 in iterations 2 and 3, then DIIS with the residuals r_j = F_j - F~_{j-1} of
+//!   iterations 3..k (at most 7), coefficients from the bordered B matrix; DIIS starts one
+//!   iteration early after an energy change |E_k - E_{k-1}| below 1e-12 Eh (tblite's mixer
+//!   stages; e.g. H2, whose density is fixed from iteration 1;
+//!   `Gxtb201FockDiis`);
+//! - the convergence test is met after iteration k once |E_j - E_{j-1}| < 1e-6 acc Eh in some
+//!   iteration j <= k and the RMS of r_j over the full vector < 2e-5 acc in some iteration
+//!   1 < j <= k (tblite's `check_convergence` sets each flag and never clears it;
+//!   `Gxtb201Rule`). The program's conventions stop there (the program has no extra iteration).
+//!   axtb's conventions run one more, unmixed iteration: F_{k+1}, built from P_k's state (its
+//!   charges, multipoles and density), is diagonalized as it is, not mixed, giving P_{k+1}, whose
+//!   charges, moments, energy and gradient are the result, as v1.1's programs end their SCFs. Its
+//!   orbitals are then the fresh eigenvectors of one Fock build (the returned Hamiltonian), and the
+//!   result is closer to self-consistency than the last DIIS step's: +1 iteration, +2-4 % time
+//!   on one thread and ~6 % on eight (energy + gradient of taxol and (H2O)200), results moved by
+//!   up to ~1e-7 Eh and 3.4e-5 Eh/bohr toward those of a tightly converged SCF. That iteration is
+//!   axtb's, not the program's, so it runs even when the test is met in the last iteration the
+//!   limit allows (`ConvergenceRule::final_iteration_past_limit`): the axtb conventions converge
+//!   where the program does.
 
-use crate::aes::{aes_energy, aes_kernels, INTCUT as AES_INTCUT};
-use crate::calculator::Version;
-use crate::classical::{gxtb_cn, increment_energy, repulsion_energy};
-use crate::disp::RevD4;
-use crate::eeqbc::{eeqbc_charges, EeqBcCharges};
-use crate::es::{first_order_energy, higher_order_energies, spin_energy};
-use crate::fock::{
-    add_charge_potential, add_multipole_potential, aes_potentials, isotropic_shell_potential, matmul, mfx_fock,
-    ofx_fock, spin_shell_potential, Shell,
-};
-use crate::h0::build_h0;
-use crate::ints::{ao_list, overlap_matrix};
-use crate::kernels::{gamma2, gamma_mfx, hubbard_u, shell_list, tau3};
-use crate::params::{EeqBcParams, GxtbParams, QvszpParams};
-use crate::qvszp::QvszpBasis;
-use axtb::integrals::{multipole, Scratch, MBLK};
-use axtb::molecule::sub3;
+use crate::basis::Basis;
+use crate::cn::gxtb_cn;
+use crate::coulomb::{AesCache, IsotropicCache, Shell};
+use crate::data::v2_0_1::{REF_OCC, ZEFF_SHELL};
+use crate::eeqbc::eeqbc;
+use crate::eeqbc::EeqBcCharges;
+use crate::exchange::Exchange;
+use crate::fock::shell_list;
+use crate::h0::{add_acp, anisotropy_par, build_h0, mirror_add_anisotropy, AcpSet};
+use crate::intermediates::Slots;
+use crate::model::Model;
+use crate::options::{ScfOptions, Version};
+use crate::repulsion::Repulsion;
+use crate::revd4::RevD4;
+use crate::strategy::{Gxtb201FockDiis, Gxtb201Rule};
+use crate::terms::{buffer, Terms};
+use crate::timing::{Laps, Timings};
+use axtb::linalg::GenEigSolver;
+use axtb::scf::{run_scf, Accelerator, FockMixer, FockSource, Iteration, ScfModel, ScfStrategy};
+use axtb::terms::{ChainLayout, Geometry, GeometryTerm, MomentTerm, SccMoments, TermEnergy, Values};
 use axtb::{Error, Molecule, Result};
-use faer::{Mat, MatRef, Par};
+use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, MatMut, MatRef, Par};
+use std::ops::ControlFlow;
+use std::sync::Arc;
 
 /// Everything that depends on the geometry only.
 #[derive(Clone, Debug)]
 pub struct Setup {
     pub mol: Molecule,
-    pub param: GxtbParams,
-    /// EEQ-BC charges and CNs.
+    pub model: Model,
     pub eeq: EeqBcCharges,
     /// g-xTB coordination numbers.
     pub cn: Vec<f64>,
-    /// q-vSZP basis.
-    pub basis: QvszpBasis,
-    /// (atom, shell, l) per shell and per AO.
+    /// The SCF and H0 bases (the AO maps of the SCF basis: `basis.scf.ao2sh`, `ao2at`).
+    pub basis: Basis,
+    /// Integral pair cutoff (bohr; infinite in the default conventions).
+    pub cutoff: f64,
+    /// (atom, shell, l) per shell of the SCF basis ([`crate::fock::shell_list`]).
     pub shells: Vec<Shell>,
-    pub ao: Vec<Shell>,
-    /// Shell index of every AO.
-    pub ao_shell: Vec<usize>,
     pub nao: usize,
-    /// Overlap and one-electron Hamiltonian H0 + ACP (full, row-major).
+    /// Overlap, dipole and quadrupole integrals of the SCF basis (around the atom of the
+    /// first AO index).
     pub s: Vec<f64>,
-    pub h: Vec<f64>,
-    /// Second- and third-order shell kernels (nsh x nsh), Mulliken-exchange AO kernel (nao x nao).
-    pub gamma2: Vec<f64>,
-    pub tau: Vec<f64>,
-    pub gamma_x: Vec<f64>,
-    /// AES kernels g3, g5, g7, g9 (nat x nat).
-    pub aes_kernels: [Vec<f64>; 4],
-    /// Dipole and traceless quadrupole integrals around the atom of the first AO index.
     pub dpint: [Vec<f64>; 3],
     pub qpint: [Vec<f64>; 6],
-    /// Reference shell occupations.
+    /// One-electron Hamiltonian H0 + anisotropy + ACP.
+    pub h: Vec<f64>,
+    /// Anisotropy vectors a_A.
+    pub aniso: Vec<[f64; 3]>,
+    /// Reference shell occupations n0_l.
     pub ref_occ: Vec<f64>,
+    /// The isotropic and anisotropic electrostatics.
+    pub isotropic: IsotropicCache,
+    pub aes: AesCache,
+    pub rep: Repulsion,
     pub disp: RevD4,
-    /// Density-independent energies.
-    pub e_rep: f64,
+    pub exch: Exchange,
     pub e_incr: f64,
     pub e_atm: f64,
-    /// Electrons (total, alpha, beta).
-    pub nel: usize,
-    pub nalpha: usize,
-    pub nbeta: usize,
-    /// Parallelism of the dense linear algebra ([`Setup::set_threads`]; sequential by default).
+    /// v1.1's semi-classical repulsion (0 in 2.0.1, whose repulsion is self-consistent).
+    pub e_rep: f64,
+    /// v1.1 in the program's conventions: what turns the exact Fock matrix into the program's.
+    pub(crate) program: Option<crate::program110::ProgramFock>,
+    /// Electrons (total, alpha, beta; fractional in program mode) and spin channels.
+    pub nel: f64,
+    pub nalpha: f64,
+    pub nbeta: f64,
+    pub nspin: usize,
+    /// Threads of the SCF, gradient and Hessians of this setup ([`Setup::set_threads`]): the
+    /// parallelism of the dense linear algebra, and whether the setup's own loops run on the
+    /// current rayon pool (in fixed chunks summed in order: the results do not depend on the
+    /// thread count).
+    pub(crate) threads: usize,
     pub(crate) par: Par,
+    pub(crate) parallel: bool,
+    /// Wall time of the setup phases (taken by the first single point that reports them).
+    pub timings: Timings,
+    /// The intermediates of the gradient (the g-xTB, basis and revD4 CNs, the EEQ-BC charges
+    /// and the effective charges), their slots and their values at this geometry (the charges,
+    /// CNs and effective charges above).
+    pub layout: ChainLayout,
+    pub(crate) slots: Slots,
+    pub values: Values,
+    /// The terms (their caches are the fields above).
+    pub(crate) terms: Terms,
 }
 
-/// Energy terms of one density (Eh), named as in the program's printout.
+/// Energy terms of one density (Eh), named after the program's containers.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Energies {
-    /// Tr((H0 + ACP) P).
+    /// The version whose terms these are (their names and sums differ).
+    pub version: Version,
+    /// Tr(H P), H = H0 + anisotropy + ACP.
     pub one_electron: f64,
-    /// "ES1 (charge SIE)".
-    pub es1: f64,
-    /// "ES2+3" = E2 + E3 + E4.
-    pub es23: f64,
-    /// "ES multipole".
+    /// First order (v1.1: its "ES1", with the reference-charge cross term).
+    pub first_order: f64,
+    /// Second order (2.0.1: including the reference-charge cross term).
+    pub second_order: f64,
+    pub third_order: f64,
+    pub fourth_order: f64,
     pub aes: f64,
-    /// "Ex (Mulliken)".
-    pub mfx: f64,
-    /// Onsite exchange (not printed).
-    pub ofx: f64,
-    /// "Espinpol".
+    /// MFX + bond-order correction + onsite exchange (v1.1: MFX).
+    pub exchange: f64,
+    /// v1.1's onsite exchange (0 in 2.0.1, whose onsite exchange is in `exchange`).
+    pub exchange_onsite: f64,
     pub spin: f64,
-    /// "electronic".
-    pub electronic: f64,
-    /// "atomic core increments".
-    pub increments: f64,
-    /// "dispersion" (revD4 two-body).
-    pub disp2: f64,
-    /// revD4 three-body (in the total, not printed).
-    pub disp3: f64,
-    /// "nuclear repulsion".
+    /// revD4 two-body (self-consistent).
+    pub dispersion: f64,
+    /// Repulsion (2.0.1: self-consistent; v1.1: semi-classical, outside `electronic`).
     pub repulsion: f64,
-    /// Electronic entropy term -TS at a finite electronic temperature (<= 0; in `electronic`
-    /// and `total`, as the program adds it to its electronic energy).
+    /// Sum of the self-consistent terms (the program's "electronic energy"; v1.1: without
+    /// dispersion and repulsion, as the 1.1.0 program prints it).
+    pub electronic: f64,
+    pub increments: f64,
+    /// revD4 three-body (the program's pre-SCF "dispersion energy").
+    pub dispersion_three_body: f64,
+    /// Electronic entropy term -TS at a finite electronic temperature (<= 0; included in
+    /// `electronic` and `total`).
     pub entropy: f64,
     pub total: f64,
 }
 
 impl Energies {
-    /// Add the entropy term -TS (to `electronic` and `total`).
+    /// Add the entropy term -TS of the occupations (to `electronic` and `total`).
     pub fn add_entropy(&mut self, ts: f64) {
         self.entropy += ts;
         self.electronic += ts;
@@ -107,293 +163,11 @@ impl Energies {
     }
 }
 
-/// Energies, Mulliken charges and (optionally) Fock matrices of a density.
+/// Density-dependent quantities: spin densities, Mulliken shell and atomic charges, atomic
+/// dipoles and quadrupoles (total density), shell magnetizations (open shell).
 #[derive(Clone, Debug)]
-pub struct Evaluation {
-    pub energies: Energies,
-    pub shell_charges: Vec<f64>,
-    pub atom_charges: Vec<f64>,
-    /// Fock matrix per spin (closed shell: one).
-    pub fock: Vec<Vec<f64>>,
-}
-
-impl Setup {
-    /// Geometry-dependent setup for `mol` (positions in bohr, integer charge, unpaired
-    /// electrons); its linear algebra is sequential ([`Setup::set_threads`]).
-    pub fn new(mol: &Molecule) -> Result<Self> {
-        crate::check_charge(mol)?;
-        let param = GxtbParams::v1_1();
-        let qparam = QvszpParams::v1_1();
-        let eeq = eeqbc_charges(&EeqBcParams::v1_1(), mol)?;
-        let cn = gxtb_cn(&param, mol)?;
-        let basis = QvszpBasis::new(&qparam, mol, &eeq.charges)?;
-        let shells = shell_list(&basis.shells);
-        let ao = ao_list(&basis.shells);
-        let nao = ao.len();
-        let mut ao_shell = Vec::with_capacity(nao);
-        for (ish, &(_, _, l)) in shells.iter().enumerate() {
-            ao_shell.extend(std::iter::repeat_n(ish, 2 * l + 1));
-        }
-        let s = overlap_matrix(mol, &basis.shells);
-        let mut h = build_h0(&param, &qparam, mol, &basis, &cn)?.h;
-        crate::acp::add_acp(&param, mol, &basis.shells, &cn, &mut h)?;
-        let u = hubbard_u(&param, mol, &shells, &cn)?;
-        let g2 = gamma2(&param, mol, &shells, &u);
-        let tau = tau3(mol, &shells, &u, &g2);
-        let gx_sh = gamma_mfx(&param, mol, &shells)?;
-        let nsh = shells.len();
-        let mut gamma_x = vec![0.0; nao * nao];
-        for i in 0..nao {
-            for j in 0..nao {
-                gamma_x[i * nao + j] = gx_sh[ao_shell[i] * nsh + ao_shell[j]];
-            }
-        }
-        let (dpint, qpint) = multipole_integrals(mol, &basis);
-        let aes_kernels = aes_kernels(&param, mol);
-        let ref_occ =
-            shells.iter().map(|&(iat, ish, _)| crate::data_runtime::REF_SHELL_OCC[mol.numbers[iat] - 1][ish]).collect();
-        let disp = RevD4::new(&param, mol)?;
-        let e_atm = disp.three_body_energy();
-        let e_rep = repulsion_energy(&param, mol, &eeq.charges, &cn)?;
-        let e_incr = increment_energy(&param, mol)?;
-        // electrons: valence electrons of the reference occupations minus the charge
-        let zval: f64 =
-            shells.iter().map(|&(iat, ish, _)| crate::data::ZEFF_SHELL[ish * 103 + mol.numbers[iat] - 1] as f64).sum();
-        let nelf = zval - mol.charge;
-        if !((nelf - nelf.round()).abs() <= 1e-8 && nelf >= 0.0) {
-            return Err(Error::Input(format!("g-xTB: {nelf} electrons")));
-        }
-        let nel = nelf.round() as usize;
-        let uhf = mol.uhf.unwrap_or(nel % 2);
-        if uhf > nel || !(nel - uhf).is_multiple_of(2) {
-            return Err(Error::Input(format!("g-xTB: {nel} electrons with {uhf} unpaired")));
-        }
-        let nbeta = (nel - uhf) / 2;
-        Ok(Self {
-            mol: mol.clone(),
-            param,
-            eeq,
-            cn,
-            basis,
-            shells,
-            ao,
-            ao_shell,
-            nao,
-            s,
-            h,
-            gamma2: g2,
-            tau,
-            gamma_x,
-            aes_kernels,
-            dpint,
-            qpint,
-            ref_occ,
-            disp,
-            e_rep,
-            e_incr,
-            e_atm,
-            nel,
-            nalpha: nel - nbeta,
-            nbeta,
-            par: Par::Seq,
-        })
-    }
-
-    /// Run the dense linear algebra (matrix products, eigensolver) on `threads` threads of the
-    /// current rayon pool, from [`crate::parallel::DENSE_MIN_AO`] basis functions on (below,
-    /// and for 1 thread, sequentially). The caller runs the setup's work inside a pool of that
-    /// size.
-    pub fn set_threads(&mut self, threads: usize) -> Result<()> {
-        self.par = crate::parallel::dense_par(threads, self.nao)?;
-        Ok(())
-    }
-
-    /// Mulliken shell populations of a (spin) density.
-    pub fn shell_populations(&self, p: &[f64]) -> Vec<f64> {
-        let n = self.nao;
-        let mut pop = vec![0.0; self.shells.len()];
-        for mu in 0..n {
-            let mut v = 0.0;
-            for nu in 0..n {
-                v += p[mu * n + nu] * self.s[nu * n + mu];
-            }
-            pop[self.ao_shell[mu]] += v;
-        }
-        pop
-    }
-
-    /// Atomic dipoles and traceless quadrupoles of the total density.
-    pub fn atomic_moments(&self, p: &[f64]) -> (Vec<[f64; 3]>, Vec<[f64; 6]>) {
-        let n = self.nao;
-        let nat = self.mol.nat();
-        let mut dip = vec![[0.0; 3]; nat];
-        let mut qp = vec![[0.0; 6]; nat];
-        for mu in 0..n {
-            let a = self.ao[mu].0;
-            for nu in 0..n {
-                let pmn = p[mu * n + nu];
-                for x in 0..3 {
-                    dip[a][x] -= pmn * self.dpint[x][mu * n + nu];
-                }
-                for c in 0..6 {
-                    qp[a][c] -= pmn * self.qpint[c][mu * n + nu];
-                }
-            }
-        }
-        (dip, qp)
-    }
-
-    /// Fock contribution of the anisotropic electrostatics for the total density `ptot`
-    /// (`full`: exact derivative incl. the dipole-quadrupole and quadrupole-quadrupole parts).
-    pub fn aes_fock(&self, ptot: &[f64], full: bool) -> Vec<f64> {
-        let n = self.nao;
-        let pop = self.shell_populations(ptot);
-        let q: Vec<f64> = self.ref_occ.iter().zip(&pop).map(|(r, x)| r - x).collect();
-        let qa = crate::es::atom_charges(self.mol.nat(), &self.shells, &q);
-        let (dip, qp) = self.atomic_moments(ptot);
-        let (vs, vd, vq) = aes_potentials(&self.mol, &qa, &dip, &qp, &self.aes_kernels, full);
-        let vao: Vec<f64> = self.ao.iter().map(|a| vs[a.0]).collect();
-        let mut f = vec![0.0; n * n];
-        add_charge_potential(n, &self.s, &vao, &mut f, 1.0);
-        let ao_atom: Vec<usize> = self.ao.iter().map(|a| a.0).collect();
-        add_multipole_potential(n, &ao_atom, &self.dpint, &self.qpint, &vd, &vq, &mut f);
-        f
-    }
-
-    /// Energies, Mulliken charges and (with `fock`) the Fock matrices of the given conventions
-    /// of the spin densities `p` (closed shell: one matrix, the total density; open shell:
-    /// alpha and beta).
-    pub fn evaluate(&self, p: &[Vec<f64>], fock: Option<Conventions>) -> Result<Evaluation> {
-        let n = self.nao;
-        let mol = &self.mol;
-        let closed = p.len() == 1;
-        let d = self.density_terms(p);
-        let ptot = &d.ptot;
-        let e_h: f64 = (0..n * n).map(|k| self.h[k] * ptot[k]).sum();
-        let es1 = first_order_energy(&self.param, mol, &self.shells, &self.cn, &d.q, &self.gamma2)?;
-        let (e2, e3, e4) = higher_order_energies(mol, &self.shells, &d.q, &self.gamma2, &self.tau);
-        let e_aes = aes_energy(mol, &d.qa, &d.dip, &d.qp, &self.aes_kernels);
-        let (e_disp2, _) = self.disp.two_body_potential(&d.qa);
-        let e_spin = match &d.mag {
-            Some(m) => spin_energy(&self.param, mol, &self.shells, m)?,
-            None => 0.0,
-        };
-        let e_ofx = crate::exchange::ofx_energy(&mol.numbers, &self.ao, &self.s, p);
-        let e_x: f64 = p.iter().map(|ps| mfx_energy_fast(n, &self.s, ps, &self.gamma_x, closed, self.par)).sum();
-        let electronic = e_h + es1 + e2 + e3 + e4 + e_aes + e_x + e_ofx + e_spin;
-        let energies = Energies {
-            one_electron: e_h,
-            es1,
-            es23: e2 + e3 + e4,
-            aes: e_aes,
-            mfx: e_x,
-            ofx: e_ofx,
-            spin: e_spin,
-            electronic,
-            increments: self.e_incr,
-            disp2: e_disp2,
-            disp3: self.e_atm,
-            repulsion: self.e_rep,
-            entropy: 0.0,
-            total: electronic + self.e_incr + e_disp2 + self.e_atm + self.e_rep,
-        };
-        let fmats = match fock {
-            Some(c) => self.fock_from(p, &d, c)?,
-            None => Vec::new(),
-        };
-        Ok(Evaluation { energies, shell_charges: d.q, atom_charges: d.qa, fock: fmats })
-    }
-
-    /// Total density, Mulliken charges, atomic moments and magnetizations of `p`.
-    pub(crate) fn density_terms(&self, p: &[Vec<f64>]) -> DensityTerms {
-        let n = self.nao;
-        let closed = p.len() == 1;
-        let ptot: Vec<f64> = if closed { p[0].clone() } else { (0..n * n).map(|k| p[0][k] + p[1][k]).collect() };
-        let pop = self.shell_populations(&ptot);
-        let q: Vec<f64> = self.ref_occ.iter().zip(&pop).map(|(r, x)| r - x).collect();
-        let qa = crate::es::atom_charges(self.mol.nat(), &self.shells, &q);
-        let (dip, qp) = self.atomic_moments(&ptot);
-        let mag = if closed {
-            None
-        } else {
-            let (pa, pb) = (self.shell_populations(&p[0]), self.shell_populations(&p[1]));
-            Some(pa.iter().zip(&pb).map(|(a, b)| a - b).collect::<Vec<f64>>())
-        };
-        DensityTerms { ptot, q, qa, dip, qp, mag }
-    }
-
-    fn fock_from(&self, p: &[Vec<f64>], d: &DensityTerms, c: Conventions) -> Result<Vec<Vec<f64>>> {
-        let pot = self.potentials(d, c)?;
-        Ok(self.assemble_fock(self.h.clone(), &pot, p, c))
-    }
-
-    /// Potentials of the density terms: shell potentials of the charges (E1-E4, AES charge
-    /// part, revD4), AES dipole and quadrupole potentials (`Conventions::Gxtb`: the program's
-    /// subset), spin potentials (open shell).
-    pub(crate) fn potentials(&self, d: &DensityTerms, c: Conventions) -> Result<Potentials> {
-        let mol = &self.mol;
-        let (_, vdisp) = self.disp.two_body_potential(&d.qa);
-        let mut vsh =
-            isotropic_shell_potential(&self.param, mol, &self.shells, &self.cn, &d.q, &self.gamma2, &self.tau)?;
-        let (vs, vd, vq) = aes_potentials(mol, &d.qa, &d.dip, &d.qp, &self.aes_kernels, c == Conventions::Axtb);
-        for (ish, &(iat, _, _)) in self.shells.iter().enumerate() {
-            vsh[ish] += vs[iat] + vdisp[iat];
-        }
-        let w = match &d.mag {
-            Some(m) => Some(spin_shell_potential(&self.param, mol, &self.shells, m)?),
-            None => None,
-        };
-        Ok(Potentials { vsh, vd, vq, w })
-    }
-
-    /// Fock matrices `f0` + potentials + Mulliken and onsite exchange of the spin densities
-    /// `p` (linear in `p`).
-    pub(crate) fn assemble_fock(
-        &self,
-        mut f0: Vec<f64>,
-        pot: &Potentials,
-        p: &[Vec<f64>],
-        c: Conventions,
-    ) -> Vec<Vec<f64>> {
-        let n = self.nao;
-        let closed = p.len() == 1;
-        let vao: Vec<f64> = self.ao_shell.iter().map(|&ish| pot.vsh[ish]).collect();
-        add_charge_potential(n, &self.s, &vao, &mut f0, 1.0);
-        let ao_atom: Vec<usize> = self.ao.iter().map(|a| a.0).collect();
-        add_multipole_potential(n, &ao_atom, &self.dpint, &self.qpint, &pot.vd, &pot.vq, &mut f0);
-        let wao: Option<Vec<f64>> = pot.w.as_ref().map(|w| self.ao_shell.iter().map(|&ish| w[ish]).collect());
-        let mut fmats = Vec::with_capacity(p.len());
-        for (k, ps) in p.iter().enumerate() {
-            let fx = mfx_fock(n, &self.s, ps, &self.gamma_x, closed, self.par);
-            let fo = ofx_fock(&self.mol.numbers, &self.ao, &self.s, ps, closed, c == Conventions::Axtb, self.par);
-            let mut fs = f0.clone();
-            for x in 0..n * n {
-                fs[x] += fx[x] + fo[x];
-            }
-            if let Some(w) = &wao {
-                // +1/2 (w_mu + w_nu) S for alpha, - for beta
-                add_charge_potential(n, &self.s, w, &mut fs, if k == 0 { -1.0 } else { 1.0 });
-            }
-            fmats.push(fs);
-        }
-        fmats
-    }
-}
-
-/// Potentials of [`Setup::potentials`].
-pub(crate) struct Potentials {
-    pub vsh: Vec<f64>,
-    pub vd: Vec<[f64; 3]>,
-    pub vq: Vec<[f64; 6]>,
-    pub w: Option<Vec<f64>>,
-}
-
-/// Density-dependent quantities shared by the energy and the Fock matrices.
-#[derive(Clone)]
-pub(crate) struct DensityTerms {
-    pub ptot: Vec<f64>,
-    /// Shell and atomic Mulliken charges, atomic dipoles and quadrupoles, shell
-    /// magnetizations (open shell).
+pub struct State {
+    pub p: Vec<Vec<f64>>,
     pub q: Vec<f64>,
     pub qa: Vec<f64>,
     pub dip: Vec<[f64; 3]>,
@@ -401,630 +175,926 @@ pub(crate) struct DensityTerms {
     pub mag: Option<Vec<f64>>,
 }
 
-/// Mulliken-exchange energy of one spin density (closed shell: total density, -1/8).
-fn mfx_energy_fast(n: usize, s: &[f64], p: &[f64], gamma: &[f64], closed: bool, par: Par) -> f64 {
-    let ps = matmul(n, p, s, par);
-    let sps = matmul(n, s, &ps, par);
-    let mut t = 0.0;
-    for i in 0..n {
-        for j in 0..n {
-            let ij = i * n + j;
-            // (P S)_ij (S P)_ij = (PS)_ij (PS)_ji
-            t += gamma[ij] * (ps[ij] * ps[j * n + i] + p[ij] * sps[ij]);
-        }
+impl State {
+    /// A start of a v1.1 SCF: the spin densities (closed shell: the total density), whose
+    /// charges and moments the SCF computes at its geometry ([`Setup::scf_from`] reads only
+    /// the densities of a v1.1 start).
+    pub fn densities(p: Vec<Vec<f64>>) -> Self {
+        Self { p, q: Vec::new(), qa: Vec::new(), dip: Vec::new(), qp: Vec::new(), mag: None }
     }
-    if closed {
-        -0.125 * t
-    } else {
-        -0.25 * t
+
+    /// The SCC moments as the terms read them.
+    pub fn moments(&self) -> SccMoments<'_> {
+        SccMoments { qsh: &self.q, qat: &self.qa, dip: &self.dip, quad: &self.qp, mag: self.mag.as_deref() }
     }
 }
 
-/// Dipole and traceless quadrupole integrals of all AO pairs around the atom of the first
-/// index (`[x][mu*n + nu]`), as the moments of [`crate::aes::atomic_moments`].
-#[allow(clippy::type_complexity)]
-pub fn multipole_integrals(mol: &Molecule, basis: &QvszpBasis) -> ([Vec<f64>; 3], [Vec<f64>; 6]) {
-    let shells = &basis.shells;
-    let mut first = Vec::new();
-    let mut nao = 0;
-    for sh in shells {
-        let mut v = Vec::new();
-        for s in sh {
-            v.push(nao);
-            nao += 2 * s.l + 1;
-        }
-        first.push(v);
+impl Setup {
+    /// Geometry-dependent setup of `mol` (positions in bohr, integer charge) for `model` (the
+    /// version and conventions), on one thread.
+    pub fn new(mol: &Molecule, model: Model) -> Result<Self> {
+        Self::with_threads(mol, model, 1)
     }
-    let z = || vec![0.0; nao * nao];
-    let mut dp = [z(), z(), z()];
-    let mut qp = [z(), z(), z(), z(), z(), z()];
-    let mut s = [0.0; MBLK];
-    let mut d = [[0.0; 3]; MBLK];
-    let mut q = [[0.0; 6]; MBLK];
-    let mut scratch = Scratch::default();
-    for ia in 0..mol.nat() {
-        for ib in 0..mol.nat() {
-            let vec = sub3(mol.positions[ia], mol.positions[ib]);
-            for (isa, sa) in shells[ia].iter().enumerate() {
-                for (isb, sb) in shells[ib].iter().enumerate() {
-                    multipole(sb, sa, vec, AES_INTCUT, &mut s, &mut d, &mut q, &mut scratch);
-                    let (na, nb) = (2 * sa.l + 1, 2 * sb.l + 1);
-                    for a in 0..na {
-                        let mu = first[ia][isa] + a;
-                        for b in 0..nb {
-                            let nu = first[ib][isb] + b;
-                            let k = b + nb * a;
-                            for x in 0..3 {
-                                dp[x][mu * nao + nu] = d[k][x];
-                            }
-                            for c in 0..6 {
-                                qp[c][mu * nao + nu] = q[k][c];
-                            }
-                        }
-                    }
+
+    /// [`Setup::new`] on `threads` threads of the current rayon pool (the caller runs it inside a
+    /// pool of that size): the setup's loops in parallel, its dense linear algebra from
+    /// `axtb_base::threads::DENSE_MIN_AO` basis functions on, and so those of its SCF, gradient
+    /// and Hessians ([`Setup::set_threads`]). Zero threads is an input error.
+    pub fn with_threads(mol: &Molecule, model: Model, threads: usize) -> Result<Self> {
+        let parallel = threads > 1;
+        crate::check_charge(mol)?;
+        crate::model::check_model_elements(&model, &mol.numbers)?;
+        let mut t = Laps::new();
+        let (eeq, eeq_solution) = eeqbc(&model, mol)?.charges_and_solution()?;
+        t.lap("setup: eeq-bc");
+        let cn = gxtb_cn(&model, mol);
+        let basis = Basis::new(&model, mol, &eeq.charges)?;
+        let cutoff = basis.pair_cutoff(&model);
+        t.lap("setup: cn+basis");
+        let shells = shell_list(&basis.scf);
+        let nao = basis.scf.nao;
+        axtb_base::threads::check(threads)?;
+        let dense = axtb_base::threads::dense_par(threads, nao);
+        let (s, dpint, qpint) = crate::basis::integrals(mol, &basis.scf, cutoff, parallel);
+        t.lap("setup: integrals");
+        let mut h = build_h0(&model, mol, &basis.h0, &cn, cutoff, parallel);
+        t.lap("setup: h0");
+        add_acp(mol, &basis.scf, &AcpSet::new(&model, mol, &cn, cutoff), &mut h, dense, parallel);
+        t.lap("setup: acp");
+        let aniso = if model.anisotropy() {
+            let aniso = anisotropy_par(&model, mol, parallel);
+            mirror_add_anisotropy(nao, &basis.scf.ao2at, &dpint, &aniso, &mut h, parallel);
+            aniso
+        } else {
+            crate::parallel::mirror_lower(&mut h, nao, parallel);
+            vec![[0.0; 3]; mol.nat()]
+        };
+        t.lap("setup: anisotropy");
+        let ref_occ: Vec<f64> = match model.version {
+            Version::V2_0_1 => shells.iter().map(|&(iat, ish, _)| REF_OCC[mol.numbers[iat] - 1][ish]).collect(),
+            Version::V1_1 => shells
+                .iter()
+                .map(|&(iat, ish, _)| crate::data::runtime::REF_SHELL_OCC[mol.numbers[iat] - 1][ish])
+                .collect(),
+        };
+        let isotropic = IsotropicCache::new_par(&model, mol, &shells, &cn, parallel);
+        let aes = AesCache::new_par(&model, mol, &cn, parallel);
+        let rep = Repulsion::new_par(&model, mol, &cn, parallel);
+        t.lap("setup: coulomb+repulsion");
+        let disp = RevD4::new_par(&model, mol, parallel)?;
+        // the intermediates; the EEQ-BC charges keep the factorized equations the charges were
+        // solved from: the gradients at this geometry (the analytic gradient, the Jacobian rows
+        // of the Hessian) reuse them instead of factorizing again
+        let (layout, slots) = crate::intermediates::layout(&model, mol, Some(Arc::new(eeq_solution)));
+        let mut values = Values::new(&layout);
+        values.set(slots.eeq, eeq.charges.clone());
+        values.set(slots.cnd4, disp.cn.clone());
+        values.set(slots.cnb, basis.cn.clone());
+        values.set(slots.cn, cn.clone());
+        values.set(slots.qeff, basis.qeff.clone());
+        values.set(slots.qeff0, basis.qeff_h0.clone());
+        let terms = Terms::new(&model, &shells, &slots);
+        let tg = Geometry { mol, layout: &layout, values: &values, parallel };
+        t.lap("setup: revd4");
+        let mut e_atm = [0.0];
+        terms.disp.fixed_energy(&tg, &disp, &mut TermEnergy { pieces: &mut e_atm, atoms: None }, None);
+        let e_atm = e_atm[0];
+        t.lap("setup: revd4 three-body");
+        let exch = Exchange::new(&model, mol, &shells, &basis.scf.ao2sh, parallel);
+        t.lap("setup: exchange");
+        let mut e_incr = [0.0];
+        terms.increments.energy(&tg, &(), &mut TermEnergy { pieces: &mut e_incr, atoms: None }, None);
+        let e_incr = e_incr[0];
+        let mut e_rep = [0.0];
+        if let Some(c) = &terms.classical {
+            c.energy(&tg, &(), &mut TermEnergy { pieces: &mut e_rep, atoms: None }, None);
+        }
+        let e_rep = e_rep[0];
+        let program =
+            (model.version == Version::V1_1 && model.program()).then(|| crate::program110::ProgramFock::new(&aes));
+        let (nel, nalpha, nbeta, nspin) = match model.version {
+            Version::V2_0_1 => electrons_v2_0_1(&model, mol, &shells, &ref_occ, nao)?,
+            Version::V1_1 => electrons_v1_1(mol, &shells, nao)?,
+        };
+        Ok(Self {
+            mol: mol.clone(),
+            model,
+            eeq,
+            cn,
+            basis,
+            cutoff,
+            shells,
+            nao,
+            s,
+            dpint,
+            qpint,
+            h,
+            aniso,
+            ref_occ,
+            isotropic,
+            aes,
+            rep,
+            disp,
+            exch,
+            e_incr,
+            e_atm,
+            e_rep,
+            program,
+            nel,
+            nalpha,
+            nbeta,
+            nspin,
+            threads,
+            par: dense,
+            parallel,
+            timings: t.laps,
+            layout,
+            slots,
+            values,
+            terms,
+        })
+    }
+}
+
+/// 2.0.1's electrons (total, alpha, beta) and spin channels: program mode the stored reference
+/// occupations, otherwise the Aufbau valence electrons (integer).
+fn electrons_v2_0_1(
+    model: &Model,
+    mol: &Molecule,
+    shells: &[Shell],
+    ref_occ: &[f64],
+    nao: usize,
+) -> Result<(f64, f64, f64, usize)> {
+    {
+        let nel = if model.program() {
+            ref_occ.iter().sum::<f64>() - mol.charge
+        } else {
+            let zval: f64 = shells.iter().map(|&(iat, ish, _)| ZEFF_SHELL[mol.numbers[iat] - 1][ish]).sum();
+            let n = zval - mol.charge;
+            if !(n.is_finite() && (n - n.round()).abs() <= 1e-8) {
+                return Err(Error::Input(format!("g-xTB 2.0.1: {n} electrons (non-integer charge)")));
+            }
+            n.round()
+        };
+        if nel.is_nan() || nel < 0.0 {
+            return Err(Error::Input(format!("g-xTB 2.0.1: {nel} electrons")));
+        }
+        let nround = nel.round() as usize;
+        let uhf = mol.uhf.unwrap_or(nround % 2);
+        if uhf > nround || !(nround - uhf).is_multiple_of(2) {
+            return Err(Error::Input(format!("g-xTB 2.0.1: {nround} electrons with {uhf} unpaired")));
+        }
+        let (nalpha, nbeta) = (0.5 * (nel + uhf as f64), 0.5 * (nel - uhf as f64));
+        if nalpha.ceil() as usize > nao {
+            return Err(Error::Input("g-xTB 2.0.1: more occupied orbitals than basis functions".into()));
+        }
+        let nspin = if uhf > 0 { 2 } else { 1 };
+        Ok((nel, nalpha, nbeta, nspin))
+    }
+}
+
+/// v1.1's electrons (total, alpha, beta) and spin channels: the valence electrons of the
+/// Aufbau shell occupations (`com::zeff_shell`) less the charge, in both conventions.
+fn electrons_v1_1(mol: &Molecule, shells: &[Shell], nao: usize) -> Result<(f64, f64, f64, usize)> {
+    let zval: f64 = shells
+        .iter()
+        .map(|&(iat, ish, _)| crate::data::v1_1::ZEFF_SHELL[ish * 103 + mol.numbers[iat] - 1] as f64)
+        .sum();
+    let nelf = zval - mol.charge;
+    if !((nelf - nelf.round()).abs() <= 1e-8 && nelf >= 0.0) {
+        return Err(Error::Input(format!("g-xTB: {nelf} electrons")));
+    }
+    let nel = nelf.round() as usize;
+    let uhf = mol.uhf.unwrap_or(nel % 2);
+    if uhf > nel || !(nel - uhf).is_multiple_of(2) {
+        return Err(Error::Input(format!("g-xTB: {nel} electrons with {uhf} unpaired")));
+    }
+    let nbeta = (nel - uhf) / 2;
+    let nalpha = nel - nbeta;
+    if nalpha > nao {
+        return Err(Error::Input("g-xTB: more occupied orbitals than basis functions".into()));
+    }
+    let nspin = if nalpha == nbeta { 1 } else { 2 };
+    Ok((nel as f64, nalpha as f64, nbeta as f64, nspin))
+}
+
+impl Setup {
+    /// The geometry of the terms and intermediates: the molecule with the values of the
+    /// intermediates, the setup's loops in parallel when it runs on more than one thread.
+    pub fn term_geometry(&self) -> Geometry<'_> {
+        Geometry { mol: &self.mol, layout: &self.layout, values: &self.values, parallel: self.parallel }
+    }
+
+    /// Run the SCF, gradient and Hessians of this setup on `threads` threads of the current
+    /// rayon pool (the caller runs them inside a pool of that size): the loops in parallel for
+    /// more than one thread, the dense linear algebra from `axtb_base::threads::DENSE_MIN_AO`
+    /// basis functions on ([`axtb_base::threads::dense_par`]). The Hessians run their
+    /// displacements in parallel instead, each sequentially. Zero threads is an input error.
+    pub fn set_threads(&mut self, threads: usize) -> Result<()> {
+        axtb_base::threads::check(threads)?;
+        self.par = axtb_base::threads::dense_par(threads, self.nao);
+        self.threads = threads;
+        self.parallel = threads > 1;
+        Ok(())
+    }
+
+    /// The threads of [`Setup::set_threads`].
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Mulliken shell populations of a density ([`crate::mulliken::shell_populations`]).
+    pub fn shell_populations(&self, p: &[f64]) -> Vec<f64> {
+        crate::mulliken::shell_populations(&self.basis.scf, &self.s, p, self.parallel)
+    }
+
+    /// Atomic dipoles and traceless quadrupoles of the total density.
+    pub fn atomic_moments(&self, p: &[f64]) -> (Vec<[f64; 3]>, Vec<[f64; 6]>) {
+        let (_, dip, qp) = self.mulliken(p);
+        (dip, qp)
+    }
+
+    /// Shell populations, atomic dipoles and quadrupoles of a density (2.0.1's order,
+    /// [`crate::mulliken::moments_by_rows`]).
+    #[allow(clippy::type_complexity)]
+    fn mulliken(&self, p: &[f64]) -> (Vec<f64>, Vec<[f64; 3]>, Vec<[f64; 6]>) {
+        crate::mulliken::moments_by_rows(&self.basis.scf, &self.s, &self.dpint, &self.qpint, p, self.parallel)
+    }
+
+    /// Total density of spin densities `p` ([`crate::fock::total_density`]).
+    pub fn total_density(&self, p: &[Vec<f64>]) -> Vec<f64> {
+        crate::fock::total_density(p)
+    }
+
+    /// The total density of spin densities `p`, borrowed for a closed shell.
+    pub fn total_density_ref<'a>(&self, p: &'a [Vec<f64>]) -> std::borrow::Cow<'a, [f64]> {
+        if p.len() == 1 {
+            std::borrow::Cow::Borrowed(&p[0])
+        } else {
+            std::borrow::Cow::Owned(crate::fock::total_density(p))
+        }
+    }
+
+    /// Mulliken analysis of spin densities `p` (closed shell: one matrix, the total density).
+    pub fn state(&self, p: &[Vec<f64>]) -> State {
+        self.state_of(p.to_vec())
+    }
+
+    /// [`Setup::state`], taking the densities.
+    pub fn state_of(&self, p: Vec<Vec<f64>>) -> State {
+        let ptot = self.total_density_ref(&p);
+        let (pop, dip, qp) = self.mulliken(&ptot);
+        drop(ptot);
+        let q: Vec<f64> = self.ref_occ.iter().zip(&pop).map(|(r, x)| r - x).collect();
+        let qa = self.isotropic.atom_charges(&q);
+        let mag = crate::mulliken::magnetizations(&self.basis.scf, &self.s, &p, self.parallel);
+        State { p, q, qa, dip, qp, mag }
+    }
+
+    /// v1.1: the 1.1.0 program's start density at this geometry (spin densities; closed shell:
+    /// the total density), from which its SCF starts in both conventions.
+    pub fn start_density(&self) -> Vec<Vec<f64>> {
+        crate::program110::guess_density(self)
+    }
+
+    /// The program's start (`eeqbc_guess`): EEQ-BC charges partitioned to the shells by the
+    /// reference occupations, no density, no multipoles.
+    pub fn guess_state(&self) -> State {
+        let nat = self.mol.nat();
+        let mut n0 = vec![0.0; nat];
+        for (k, &(iat, _, _)) in self.shells.iter().enumerate() {
+            n0[iat] += self.ref_occ[k];
+        }
+        let q: Vec<f64> = self
+            .shells
+            .iter()
+            .enumerate()
+            .map(|(k, &(iat, _, _))| self.ref_occ[k] / n0[iat] * self.eeq.charges[iat])
+            .collect();
+        let qa = self.isotropic.atom_charges(&q);
+        let n = self.nao;
+        State {
+            p: vec![vec![0.0; n * n]; self.nspin],
+            q,
+            qa,
+            dip: vec![[0.0; 3]; nat],
+            qp: vec![[0.0; 6]; nat],
+            mag: if self.nspin == 2 { Some(vec![0.0; self.shells.len()]) } else { None },
+        }
+    }
+
+    /// Energies and (with `fock`) the Fock matrices of a state.
+    pub fn evaluate(&self, st: &State, fock: bool) -> (Energies, Vec<Vec<f64>>) {
+        self.evaluate_timed(st, fock, &mut Laps::new())
+    }
+
+    /// [`Setup::evaluate`] with its phases timed in `t`.
+    pub fn evaluate_timed(&self, st: &State, fock: bool, t: &mut Laps) -> (Energies, Vec<Vec<f64>>) {
+        let n = self.nao;
+        let mol = &self.mol;
+        t.skip();
+        let ptot = self.total_density_ref(&st.p);
+        let e_h = crate::parallel::sum(n, self.parallel, |i| {
+            let r = i * n..(i + 1) * n;
+            self.h[r.clone()].iter().zip(&ptot[r]).map(|(a, b)| a * b).sum::<f64>()
+        });
+        drop(ptot);
+        // the terms' energies (the dispersion's potential from the same pass)
+        let (tg, s, terms) = (self.term_geometry(), st.moments(), &self.terms);
+        let (mut eiso, mut e_aes, mut e_spin, mut e_disp, mut e_rep) = ([0.0; 4], [0.0], [0.0], [0.0], [0.0]);
+        terms.iso.energy(&tg, &self.isotropic, &s, &mut totals(&mut eiso));
+        terms.aes.energy(&tg, &self.aes, &s, &mut totals(&mut e_aes));
+        terms.spin.energy(&tg, &(), &s, &mut totals(&mut e_spin));
+        let (nsh, nat) = (self.shells.len(), mol.nat());
+        let mut pdisp = buffer(&terms.disp, nsh, nat);
+        terms.disp.energy_and_potential(&tg, &self.disp, &s, &mut totals(&mut e_disp), &mut pdisp);
+        terms.rep.energy(&tg, &self.rep, &s, &mut totals(&mut e_rep));
+        let ([e1, e2, e3, e4], [e_aes], [e_spin], [e_disp], [e_rep]) = (eiso, e_aes, e_spin, e_disp, e_rep);
+        t.lap("scf: fock energies");
+        let pr = self.exch.products(&self.s, &st.p, self.par);
+        let (e_x, e_on, fx, vx) = self.exch.evaluate_parts(&self.s, &st.p, &pr, &st.q, fock, self.par, self.parallel);
+        t.lap("scf: fock exchange");
+        let energies = match self.model.version {
+            Version::V2_0_1 => {
+                let electronic = e_h + e1 + e2 + e3 + e4 + e_aes + e_x + e_spin + e_disp + e_rep;
+                Energies {
+                    version: Version::V2_0_1,
+                    one_electron: e_h,
+                    first_order: e1,
+                    second_order: e2,
+                    third_order: e3,
+                    fourth_order: e4,
+                    aes: e_aes,
+                    exchange: e_x,
+                    exchange_onsite: 0.0,
+                    spin: e_spin,
+                    dispersion: e_disp,
+                    repulsion: e_rep,
+                    electronic,
+                    increments: self.e_incr,
+                    dispersion_three_body: self.e_atm,
+                    entropy: 0.0,
+                    total: self.e_incr + self.e_atm + electronic,
                 }
             }
+            Version::V1_1 => {
+                // the 1.1.0 program's sums: dispersion and repulsion after the electronic energy
+                let electronic = e_h + e1 + e2 + e3 + e4 + e_aes + e_x + e_on + e_spin;
+                Energies {
+                    version: Version::V1_1,
+                    one_electron: e_h,
+                    first_order: e1,
+                    second_order: e2,
+                    third_order: e3,
+                    fourth_order: e4,
+                    aes: e_aes,
+                    exchange: e_x,
+                    exchange_onsite: e_on,
+                    spin: e_spin,
+                    dispersion: e_disp,
+                    repulsion: self.e_rep,
+                    electronic,
+                    increments: self.e_incr,
+                    dispersion_three_body: self.e_atm,
+                    entropy: 0.0,
+                    total: electronic + self.e_incr + e_disp + self.e_atm + self.e_rep,
+                }
+            }
+        };
+        if !fock {
+            return (energies, Vec::new());
         }
-    }
-    (dp, qp)
-}
-
-/// The g-xTB 1.1.0 program's SCF iteration limit.
-pub const MAX_ITER: usize = 1000;
-/// The g-xTB 1.1.0 program's damping factor (single precision).
-pub const DAMPING: f64 = 0.1_f32 as f64;
-
-/// SCF and calculator settings of both versions. The defaults (`None`, 0) are the programs':
-///
-/// - **v1.1** (the 1.1.0 program's `scf_`, `diisfock_`; [`Setup::scf`]): Fock damping with
-///   [`DAMPING`] in iterations 1-2 (open shell: 1-3), a transition step in iteration 3 (4), Pulay
-///   mixing of at most 7 (8) Fock matrices from iteration 4 (5) on, convergence when
-///   |dE| < 1e-8 Eh and the RMS change of the packed spin densities < 2e-5 (open shell: 4e-7 Eh
-///   and 5e-5), each times `accuracy`, followed by one more iteration with the unmixed Fock
-///   matrix whose energy is the result; at most [`MAX_ITER`] iterations.
-/// - **2.0.1** (tblite's SCF as the 2.0.1 program runs it; [`crate::v2::scf`]): no mixing in
-///   iteration 1, damping 0.2 in iterations 2-3, then DIIS with at most 7 Fock matrices,
-///   convergence when |dE| < 1e-6 Eh and the RMS Fock residual < 2e-5, each times `accuracy`;
-///   at most [`crate::v2::scf::MAX_ITER`] iterations.
-///
-/// With `conventions: Conventions::Gxtb` the SCF reproduces the program's iterations and
-/// energies; with the default [`Conventions::Axtb`] v1.1 diagonalizes the exact derivative of
-/// the energy instead, and 2.0.1 uses CODATA 2022 units, an integer electron count and smooth
-/// cutoffs. Settings of one version only are refused for the other ([`ScfOptions::check`]).
-#[derive(Clone, Debug)]
-pub struct ScfOptions {
-    /// SCF iteration limit; 0 (the default): the program's, [`MAX_ITER`] for v1.1 and
-    /// [`crate::v2::scf::MAX_ITER`] for 2.0.1.
-    pub max_iter: usize,
-    /// Multiplier of the program's convergence thresholds (those not given explicitly).
-    pub accuracy: f64,
-    /// Explicit threshold of the energy change (Eh).
-    pub energy_tol: Option<f64>,
-    /// v1.1 only: explicit threshold of the RMS change of the packed spin densities.
-    pub density_tol: Option<f64>,
-    /// 2.0.1 only: explicit threshold of the RMS Fock residual (the Fock matrix of the new
-    /// density minus the mixed one it came from, over both spin channels).
-    pub residual_tol: Option<f64>,
-    /// Damping factor in (0, 1] of the first iterations; `None`: v1.1 [`DAMPING`], 2.0.1 0.2.
-    pub damping: Option<f64>,
-    /// v1.1 only: iteration of the transition step (damping before it, Pulay mixing after);
-    /// `None`: 3 (open shell: 4).
-    pub transition_iteration: Option<usize>,
-    /// Largest number of stored Fock matrices of the Pulay (DIIS) mixing, at least 1; `None`:
-    /// v1.1 7 (open shell: 8), 2.0.1 7.
-    pub diis_size: Option<usize>,
-    /// Threads of a [`crate::Calculator`] (1: no thread is spawned).
-    pub threads: usize,
-    /// Electronic temperature (K) of the Fermi smearing; 0 (the programs' default for
-    /// g-xTB): Aufbau occupations.
-    pub etemp: f64,
-    /// v1.1: the Fock matrix of the SCF, the exact derivative of the energy or the program's;
-    /// 2.0.1: units, electron count and cutoffs (the program's or the default ones).
-    pub conventions: Conventions,
-    /// Keep the converged orbitals: in the `orbitals` of the [`crate::Calculator`]'s results
-    /// (e.g. for a Molden file), and for 2.0.1 every orbital's coefficients in the
-    /// [`crate::v2::scf::ScfResult`] (its Hessians need them; without, only the occupied
-    /// orbitals are computed).
-    pub keep_orbitals: bool,
-    /// Compute the Mayer–Wiberg bond orders (`SinglePoint::bond_orders` of the
-    /// [`crate::Calculator`]'s results).
-    pub bond_orders: bool,
-    /// Where the SCFs of a [`crate::Calculator`] start: [`Guess::Previous`], the converged state
-    /// of the previous geometry (the programs' restart), or [`Guess::EeqBc`], the program's
-    /// start; `None`: the conventions' choice (axtb: previous; gxtb: the program's start, so
-    /// that every result is that of a fresh program run).
-    pub guess: Option<Guess>,
-}
-
-impl Default for ScfOptions {
-    fn default() -> Self {
-        Self {
-            max_iter: 0,
-            accuracy: 1.0,
-            energy_tol: None,
-            density_tol: None,
-            residual_tol: None,
-            damping: None,
-            transition_iteration: None,
-            diis_size: None,
-            threads: 1,
-            etemp: 0.0,
-            conventions: Conventions::default(),
-            keep_orbitals: false,
-            bond_orders: false,
-            guess: None,
+        t.skip();
+        // the shell potential: the isotropic one plus (in this order) exchange, AES, repulsion
+        // and dispersion of the shell's atom (the program's sum)
+        let (mut piso, mut paes) = (buffer(&terms.iso, nsh, nat), buffer(&terms.aes, nsh, nat));
+        let (mut prep, mut pspin) = (buffer(&terms.rep, nsh, nat), buffer(&terms.spin, nsh, nat));
+        terms.iso.potential(&tg, &self.isotropic, &s, &mut piso);
+        match &self.program {
+            None => terms.aes.potential(&tg, &self.aes, &s, &mut paes),
+            Some(pf) => {
+                // the program's AES potentials: those of E_AES'
+                let (vs, vd, vq) = pf.aes_potentials(mol, s.qat, s.dip, s.quad, self.parallel);
+                (paes.atom, paes.dipole, paes.quadrupole) = (vs, vd, vq);
+            }
         }
+        terms.rep.potential(&tg, &self.rep, &s, &mut prep);
+        let mut vsh = piso.shell;
+        for (ish, &(iat, _, _)) in self.shells.iter().enumerate() {
+            vsh[ish] += vx[ish] + paes.atom[iat] + prep.atom[iat] + pdisp.atom[iat];
+        }
+        let (vd, vq) = (paes.dipole, paes.quadrupole);
+        let vao: Vec<f64> = self.basis.scf.ao2sh.iter().map(|&ish| vsh[ish]).collect();
+        // spin potential: +1/2 (w_m + w_n) S on alpha, - on beta
+        let wao: Option<Vec<f64>> = st.mag.is_some().then(|| {
+            terms.spin.potential(&tg, &(), &s, &mut pspin);
+            self.basis.scf.ao2sh.iter().map(|&ish| pspin.magnetization[ish]).collect()
+        });
+        let mut fm = crate::fock::from_potentials_fused(
+            n,
+            &self.h,
+            &self.s,
+            &self.basis.scf.ao2at,
+            &self.dpint,
+            &self.qpint,
+            &vao,
+            &vd,
+            &vq,
+            wao.as_deref(),
+            &fx,
+            self.parallel,
+        );
+        if let Some(pf) = &self.program {
+            pf.add_ofx_extra(self, &pr, &mut fm);
+        }
+        t.lap("scf: fock potentials");
+        (energies, fm)
     }
-}
 
-impl ScfOptions {
-    /// Whether a calculator's SCFs start from the previous geometry's converged state.
-    pub fn reuses_guess(&self) -> bool {
-        match self.guess {
-            Some(g) => g == Guess::Previous,
-            None => self.conventions == Conventions::Axtb,
+    /// Occupation numbers of a channel with `nel` (real) electrons over `n` orbitals at 0 K:
+    /// 1 for the first floor(nel), the remainder for the next.
+    pub fn aufbau(nel: f64, n: usize) -> Vec<f64> {
+        crate::fermi::aufbau(nel, n)
+    }
+
+    /// Occupations per spin channel at 0 K (closed shell: doubly occupied).
+    pub fn occupations(&self) -> Vec<Vec<f64>> {
+        let n = self.nao;
+        if self.nspin == 1 {
+            let a = Self::aufbau(self.nalpha, n);
+            let b = Self::aufbau(self.nbeta, n);
+            vec![a.iter().zip(&b).map(|(x, y)| x + y).collect()]
+        } else {
+            vec![Self::aufbau(self.nalpha, n), Self::aufbau(self.nbeta, n)]
         }
     }
 
-    /// The SCF iteration limit for `version` (`max_iter`, 0: the program's).
-    pub fn iteration_limit(&self, version: Version) -> usize {
-        match (self.max_iter, version) {
-            (0, Version::V1_1) => MAX_ITER,
-            (0, Version::V2_0_1) => crate::v2::scf::MAX_ITER,
-            (m, _) => m,
+    /// kT (Eh) of an electronic temperature (K) in these conventions (0 at 0 K; v1.1's program
+    /// smears above 1e-6 K with its single-precision kB).
+    pub fn kt(&self, etemp: f64) -> f64 {
+        if self.model.version == Version::V1_1 && self.model.program() {
+            return if etemp > crate::fermi::TEL_MIN { etemp * crate::occupations::KB_GXTB110 } else { 0.0 };
+        }
+        if etemp > 0.0 {
+            etemp * crate::fermi::boltzmann(self.model.program())
+        } else {
+            0.0
         }
     }
 
-    /// Refuse settings that are out of range or belong to the other version.
-    pub fn check(&self, version: Version) -> Result<()> {
-        let positive = |name: &str, x: f64| {
-            if x > 0.0 && x.is_finite() {
-                Ok(())
+    /// Occupations, Fermi level and entropy term of one channel with `nel` electrons over the
+    /// levels `e` at `kt` in this model (v1.1: its rules, [`crate::fermi::fill_channel_v1_1`]).
+    pub fn fill_channel(&self, nel: f64, kt: f64, e: &[f64]) -> (Vec<f64>, Option<f64>, f64) {
+        match self.model.version {
+            Version::V2_0_1 => crate::fermi::fill_channel(nel, kt, e, self.model.program()),
+            Version::V1_1 => crate::fermi::fill_channel_v1_1(nel as usize, kt, e, self.model.program()),
+        }
+    }
+
+    /// Occupations per spin channel for the orbital energies `eps` (one channel per spin
+    /// channel of the calculation) at `kt`, the Fermi levels per electron spin (alpha, beta)
+    /// and the entropy term -TS. Closed shell: both electron spins fill the same levels and the
+    /// occupations are summed. At kT = 0 the Aufbau occupations.
+    pub fn fill(&self, eps: &[Vec<f64>], kt: f64) -> (Vec<Vec<f64>>, [Option<f64>; 2], f64) {
+        let n = self.nao;
+        if self.model.version == Version::V1_1 && self.model.program() {
+            // the program's eigenvalue cap at N_alpha + 10
+            let na = self.nalpha as usize;
+            let (ea, eb) = (
+                crate::program110::cap(&eps[0][..n], na),
+                crate::program110::cap(&eps[if self.nspin == 1 { 0 } else { 1 }][..n], na),
+            );
+            let (a, mua, tsa) = self.fill_channel(self.nalpha, kt, &ea);
+            let (b, mub, tsb) = self.fill_channel(self.nbeta, kt, &eb);
+            return if self.nspin == 1 {
+                (vec![a.iter().zip(&b).map(|(x, y)| x + y).collect()], [mua, mub], tsa + tsb)
             } else {
-                Err(Error::Input(format!("{name} must be positive and finite, got {x}")))
-            }
-        };
-        if self.threads == 0 {
-            return Err(Error::Input("threads must be at least 1".into()));
+                (vec![a, b], [mua, mub], tsa + tsb)
+            };
         }
-        positive("accuracy", self.accuracy)?;
-        for (name, tol) in
-            [("energy_tol", self.energy_tol), ("density_tol", self.density_tol), ("residual_tol", self.residual_tol)]
-        {
-            tol.map_or(Ok(()), |x| positive(name, x))?;
-        }
-        if !(self.etemp >= 0.0 && self.etemp.is_finite()) {
-            return Err(Error::Input(format!("electronic temperature must be >= 0 K and finite, got {}", self.etemp)));
-        }
-        if let Some(d) = self.damping {
-            if !(d > 0.0 && d <= 1.0) {
-                return Err(Error::Input(format!("damping must be in (0, 1], got {d}")));
-            }
-        }
-        if self.diis_size == Some(0) {
-            return Err(Error::Input("diis_size must be at least 1".into()));
-        }
-        if self.transition_iteration == Some(0) {
-            return Err(Error::Input("transition_iteration must be at least 1 (iterations count from 1)".into()));
-        }
-        let other_version = match version {
-            Version::V1_1 if self.residual_tol.is_some() => {
-                "residual_tol is a g-xTB 2.0.1 setting (the Fock residual); v1.1 converges on density_tol (the \
-                 density change)"
-            }
-            Version::V2_0_1 if self.density_tol.is_some() => {
-                "density_tol is a g-xTB v1.1 setting (the density change); 2.0.1 converges on residual_tol (the \
-                 Fock residual)"
-            }
-            Version::V2_0_1 if self.transition_iteration.is_some() => {
-                "transition_iteration is a g-xTB v1.1 setting; the 2.0.1 SCF has no transition step"
-            }
-            _ => return Ok(()),
-        };
-        Err(Error::Input(other_version.into()))
-    }
-}
-
-/// Start of an SCF ([`ScfOptions::guess`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Guess {
-    /// The converged state of the previous geometry: v1.1 its density matrices (the 1.1.0
-    /// program's `gxtbrestart`), 2.0.1 its shell charges, atomic dipoles and quadrupoles, shell
-    /// magnetizations and density matrices (the 2.0.1 program's `xtbrestart`). The first SCF
-    /// of a calculator, and an SCF from the previous state that does not converge, start from
-    /// the program's start. In the axtb conventions a restarted 2.0.1 SCF converges to
-    /// [`crate::calculator::RESTART_ACCURACY`] times the thresholds; in the gxtb conventions
-    /// restarts are the programs' (same thresholds, same iterations).
-    Previous,
-    /// The program's start from the EEQ-BC charges (v1.1: its diagonal start density; 2.0.1:
-    /// EEQ-BC shell charges without density or multipoles).
-    EeqBc,
-}
-
-impl Guess {
-    /// Name as the front ends accept and report it.
-    pub fn name(self) -> &'static str {
-        match self {
-            Guess::Previous => "previous",
-            Guess::EeqBc => "eeq-bc",
+        if self.nspin == 1 {
+            let (a, mua, tsa) = self.fill_channel(self.nalpha, kt, &eps[0][..n]);
+            let (b, mub, tsb) = self.fill_channel(self.nbeta, kt, &eps[0][..n]);
+            (vec![a.iter().zip(&b).map(|(x, y)| x + y).collect()], [mua, mub], tsa + tsb)
+        } else {
+            let (a, mua, tsa) = self.fill_channel(self.nalpha, kt, &eps[0][..n]);
+            let (b, mub, tsb) = self.fill_channel(self.nbeta, kt, &eps[1][..n]);
+            (vec![a, b], [mua, mub], tsa + tsb)
         }
     }
 }
 
-impl std::str::FromStr for Guess {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
-        let key: String = s.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        match key.as_str() {
-            "previous" | "restart" => Ok(Guess::Previous),
-            "eeqbc" | "fresh" => Ok(Guess::EeqBc),
-            _ => Err(Error::Input(format!("unknown g-xTB guess {s:?}; use \"previous\" or \"eeq-bc\""))),
+/// sum_s C_s diag(w_s) C_s^T over the orbitals with nonzero weight, as one matrix product
+/// (row-major n x n coefficients, column k = orbital k): the density (weights: occupations)
+/// or the energy-weighted density (occupations times orbital energies) of the channels.
+pub fn weighted_density(n: usize, channels: &[(&[f64], &[f64])], par: Par) -> Vec<f64> {
+    let cols: Vec<(usize, usize)> = channels
+        .iter()
+        .enumerate()
+        .flat_map(|(s, (_, w))| (0..n).filter(|&k| w[k] != 0.0).map(move |k| (s, k)))
+        .collect();
+    let m = cols.len();
+    let mut out = vec![0.0; n * n];
+    if m == 0 {
+        return out;
+    }
+    let mut cw = vec![0.0; n * m];
+    let mut cc = vec![0.0; n * m];
+    for i in 0..n {
+        for (kk, &(s, k)) in cols.iter().enumerate() {
+            let (c, w) = channels[s];
+            let v = c[i * n + k];
+            cc[i * m + kk] = v;
+            cw[i * m + kk] = w[k] * v;
         }
     }
+    matmul(
+        MatMut::from_row_major_slice_mut(&mut out, n, n),
+        Accum::Replace,
+        MatRef::from_row_major_slice(&cw, n, m),
+        MatRef::from_row_major_slice(&cc, n, m).transpose(),
+        1.0,
+        par,
+    );
+    out
 }
 
-/// Which Fock matrix the SCF diagonalizes (the energy expression is the same).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Conventions {
-    /// The exact derivative of the g-xTB energy (default): the converged SCF is stationary
-    /// and the gradient needs no response term. Energies differ from the program's by
-    /// -1e-8 to -2.3e-4 Eh (lower), energy differences by up to ~1e-5 Eh (spec §4.18).
-    #[default]
-    Axtb,
-    /// The g-xTB 1.1.0 program's Fock matrix, which leaves out the AES potentials of the
-    /// dipole-quadrupole and quadrupole-quadrupole energies and applies the population part
-    /// of the onsite exchange at twice its derivative off the diagonal (§4.16 of the spec):
-    /// reproduces the program's energies; its gradients need a response term.
-    Gxtb,
-}
-
-impl std::str::FromStr for Conventions {
-    type Err = Error;
-    /// `"axtb"` (also `"default"`) or `"gxtb"` (also `"gxtb-program"`); case and anything but
-    /// letters and digits are ignored, as for the other names of the axtb front ends.
-    fn from_str(s: &str) -> Result<Self> {
-        let key: String = s.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        match key.as_str() {
-            "axtb" | "default" => Ok(Self::Axtb),
-            "gxtb" | "gxtbprogram" => Ok(Self::Gxtb),
-            _ => Err(Error::Input(format!("unknown g-xTB conventions {s:?}; use \"axtb\" or \"gxtb\""))),
-        }
-    }
-}
+/// The 2.0.1 program's SCF iteration limit.
+pub const MAX_ITER: usize = 250;
+/// The 2.0.1 program's damping factor (iterations 2 and 3) and number of stored DIIS vectors.
+pub const DAMPING: f64 = 0.2;
+pub const DIIS_SIZE: usize = 7;
+/// Basis size up to which v1.1's SCF in the default conventions computes every eigenpair (the
+/// full solver is cheaper than the occupied eigenvectors alone for such small bases).
+const FULL_SOLVE_MAX_AO: usize = 16;
 
 /// Converged SCF.
 #[derive(Clone, Debug)]
 pub struct ScfResult {
     pub energies: Energies,
-    /// Mulliken shell charges (reference occupation minus population) and atomic charges.
     pub shell_charges: Vec<f64>,
     pub atom_charges: Vec<f64>,
-    /// Orbital energies per spin (Eh, ascending) and occupations.
+    /// Orbital energies (eigenvalues of the last diagonalized Fock matrix: mixed for 2.0.1 in the
+    /// program's conventions, the unmixed last build otherwise) and occupations per spin channel
+    /// (closed shell: one, doubly occupied).
     pub orbital_energies: Vec<Vec<f64>>,
     pub occupations: Vec<Vec<f64>>,
-    /// kT (Eh) of the occupations (0: Aufbau).
+    /// kT (Eh) of the occupations (0: Aufbau) and the Fermi levels the occupations of the
+    /// alpha and beta electrons were computed with (`None` at 0 K; closed shell: both fill
+    /// the one channel).
     pub kt: f64,
-    /// Fermi levels the occupations of the alpha and beta electrons were computed with (`None`
-    /// without smearing).
     pub efermi: [Option<f64>; 2],
-    /// MO coefficients per spin (row-major n x n, column k = orbital k) of the last
-    /// diagonalization, whose orbitals give `density`.
+    /// MO coefficients per channel (row-major n x n, column k = orbital k): every orbital's with
+    /// `all_orbitals`, otherwise only those of the orbitals with nonzero occupation (the other
+    /// columns zero). The SCF computes the orbitals with nonzero occupation (v1.1 in the
+    /// program's conventions every one); the others are computed once after it from the last
+    /// diagonalized matrices, so that these columns are the SCF's either way.
     pub coefficients: Vec<Vec<f64>>,
-    /// Converged spin densities (closed shell: total density), axtb AO order.
+    /// Whether `coefficients` hold every orbital ([`crate::ScfOptions::all_orbitals`]; the
+    /// Hessians need them).
+    pub all_orbitals: bool,
+    /// Converged spin densities (closed shell: total density).
     pub density: Vec<Vec<f64>>,
-    /// SCF iterations (diagonalizations).
+    pub state: State,
+    /// The state the last Fock matrix was built from (P of the previous iteration, or the
+    /// start); the program evaluates the potential terms of its gradient with it.
+    pub input_state: State,
+    /// SCF iterations (diagonalizations) and the energy of every iteration.
     pub iterations: usize,
-    /// Fock matrix the SCF diagonalized.
-    pub conventions: Conventions,
+    pub history: Vec<(f64, f64)>,
+    /// Wall time of the SCF phases.
+    pub timings: Timings,
     /// The eigensolver of the SCF (`axtb::linalg::GenEigSolver::backend`).
     pub eigensolver: String,
-}
-
-/// The program's Fock mixing (`diisfock_`), all matrices per spin as full row-major vectors
-/// here (closed-shell iteration numbers; open shell one later): iterations 1 and 2 damp, Fs = Fin + alpha (F - Fin) (Fin: the previous
-/// mixed Fock matrix, zero at the start); iteration 3 stores its pair (F, F - Fin) and returns
-/// 2 Fin + alpha (F - Fin); from iteration 4 on the stored pairs (at most `diis_size`, oldest
-/// dropped) are combined, Fs = sum_i c_i F_i with the coefficients minimizing
-/// |sum_i c_i r_i|^2, r_i = F_i - Fin_i, sum_i c_i = 1 (dot products over the packed lower
-/// triangle, separately for each spin). Only the direction of Fs matters (it is diagonalized).
-/// An SCF restarted from a given density (`restart`, the program's `gxtbrestart`) has no
-/// transition step: iteration 3 (4) already combines the stored pairs, its own only, so
-/// Fs = F (found by comparing every iteration of the program's restarted runs).
-struct FockMixer {
-    alpha: f64,
-    ndamp: usize,
-    restart: bool,
-    size: usize,
-    fin: Option<Vec<Vec<f64>>>,
-    hist: Vec<(Vec<Vec<f64>>, Vec<f64>)>,
-}
-
-impl FockMixer {
-    fn mix(&mut self, iter: usize, f: &[Vec<f64>], n: usize) -> Vec<Vec<f64>> {
-        let ns = f.len();
-        let fin = self.fin.clone().unwrap_or_else(|| vec![vec![0.0; n * n]; ns]);
-        let out: Vec<Vec<f64>> = if iter < self.ndamp {
-            (0..ns).map(|s| (0..n * n).map(|k| fin[s][k] + self.alpha * (f[s][k] - fin[s][k])).collect()).collect()
-        } else {
-            // residual over the packed lower triangles of all spins
-            let mut r = Vec::with_capacity(ns * n * (n + 1) / 2);
-            for s in 0..ns {
-                for i in 0..n {
-                    for j in 0..=i {
-                        r.push(f[s][i * n + j] - fin[s][i * n + j]);
-                    }
-                }
-            }
-            self.hist.push((f.to_vec(), r));
-            if self.hist.len() > self.size {
-                self.hist.remove(0);
-            }
-            if iter == self.ndamp && !self.restart {
-                (0..ns)
-                    .map(|s| (0..n * n).map(|k| 2.0 * fin[s][k] + self.alpha * (f[s][k] - fin[s][k])).collect())
-                    .collect()
-            } else {
-                (0..ns)
-                    .map(|s| {
-                        let c = diis_coefficients(&self.hist, s, n * (n + 1) / 2);
-                        let mut v = vec![0.0; n * n];
-                        for (ci, (fi, _)) in c.iter().zip(&self.hist) {
-                            for k in 0..n * n {
-                                v[k] += ci * fi[s][k];
-                            }
-                        }
-                        v
-                    })
-                    .collect()
-            }
-        };
-        self.fin = Some(out.clone());
-        out
-    }
-}
-
-/// Pulay coefficients of spin `s` from the residuals of `hist` (`npk` packed elements per spin).
-fn diis_coefficients(hist: &[(Vec<Vec<f64>>, Vec<f64>)], s: usize, npk: usize) -> Vec<f64> {
-    let m = hist.len();
-    let mut b = Mat::<f64>::zeros(m + 1, m + 1);
-    let r = |i: usize| &hist[i].1[s * npk..(s + 1) * npk];
-    for i in 0..m {
-        for j in 0..=i {
-            let v: f64 = r(i).iter().zip(r(j)).map(|(a, b)| a * b).sum();
-            b[(i, j)] = v;
-            b[(j, i)] = v;
-        }
-        b[(i, m)] = -1.0;
-        b[(m, i)] = -1.0;
-    }
-    let mut rhs = Mat::<f64>::zeros(m + 1, 1);
-    rhs[(m, 0)] = -1.0;
-    crate::eeqbc::solve_in_place(&mut b, &mut rhs);
-    if (0..m).any(|i| !rhs[(i, 0)].is_finite()) {
-        let mut c = vec![0.0; m];
-        c[m - 1] = 1.0;
-        return c;
-    }
-    (0..m).map(|i| rhs[(i, 0)]).collect()
+    /// With [`crate::ScfOptions::hamiltonian`]: the Fock matrices of the last diagonalization
+    /// (row-major n x n per spin channel), the unmixed last build, whose eigenvectors with the
+    /// overlap `Setup::s` are the orbitals.
+    pub hamiltonian: Option<Vec<Vec<f64>>>,
 }
 
 impl Setup {
-    /// Number of spin channels: 1 for a closed shell without unpaired electrons, else 2.
-    pub fn nspin(&self) -> usize {
-        if self.nalpha == self.nbeta {
-            1
-        } else {
-            2
-        }
-    }
-
-    /// The program's start density (`guess_psh_`, `guess_p_`): diagonal, with the reference
-    /// shell occupations of every atom scaled to its EEQ-BC electron count, n_l (Z_A - q_A)/Z_A,
-    /// spread evenly over the 2l+1 AOs of the shell (open shell: half per spin).
-    pub fn guess(&self) -> Vec<Vec<f64>> {
-        let n = self.nao;
-        let ns = self.nspin();
-        let fac = if ns == 2 { 0.5 } else { 1.0 };
-        let mut zval = vec![0.0; self.mol.nat()];
-        for &(iat, ish, _) in &self.shells {
-            zval[iat] += crate::data::ZEFF_SHELL[ish * 103 + self.mol.numbers[iat] - 1] as f64;
-        }
-        let mut p = vec![0.0; n * n];
-        for (mu, &(iat, _, l)) in self.ao.iter().enumerate() {
-            let ish = self.ao_shell[mu];
-            let z = zval[iat];
-            let psh = (z - self.eeq.charges[iat]) * self.ref_occ[ish] / z;
-            p[mu * n + mu] = fac * psh / (2 * l + 1) as f64;
-        }
-        vec![p; ns]
-    }
-
-    /// Self-consistent field as the program runs it (see [`ScfOptions`]): start density,
-    /// Fock build, mixing, diagonalization with Aufbau occupation, until converged plus one
-    /// iteration.
+    /// Self-consistent field as the 2.0.1 program runs it (see the module documentation) with
+    /// the settings `opts`, whose conventions must be the setup's.
     pub fn scf(&self, opts: &ScfOptions) -> Result<ScfResult> {
         self.scf_from(opts, None)
     }
 
-    /// [`Setup::scf`] from the spin densities `start` (e.g. the converged density of a
-    /// previous geometry, as the 1.1.0 program's `gxtbrestart` carries it, taken over as it is
-    /// although the q-vSZP basis of this geometry differs) instead of the program's start
-    /// density; `None`: the program's start.
-    pub fn scf_from(&self, opts: &ScfOptions, start: Option<&[Vec<f64>]>) -> Result<ScfResult> {
-        opts.check(Version::V1_1)?;
-        if let Some(p) = start {
-            if p.len() != self.nspin() || p.iter().any(|x| x.len() != self.nao * self.nao) {
-                return Err(Error::Input("g-xTB: the start density does not fit this molecule".into()));
-            }
+    /// The state an SCF of this setup can start from: `start` with its atomic charges
+    /// recomputed from its shell charges (as the program does after reading `xtbrestart`), or
+    /// an error if its dimensions do not fit the molecule.
+    pub fn restart_state(&self, start: &State) -> Result<State> {
+        let (n, nsh, nat) = (self.nao, self.shells.len(), self.mol.nat());
+        let fits = start.p.len() == self.nspin
+            && start.p.iter().all(|p| p.len() == n * n)
+            && start.q.len() == nsh
+            && start.dip.len() == nat
+            && start.qp.len() == nat
+            && start.mag.as_ref().is_none_or(|m| m.len() == nsh);
+        if !fits {
+            return Err(Error::Input("g-xTB 2.0.1: the start wavefunction does not fit this molecule".into()));
+        }
+        let mut st = start.clone();
+        st.qa = self.isotropic.atom_charges(&st.q);
+        if self.nspin == 2 && st.mag.is_none() {
+            st.mag = Some(vec![0.0; nsh]);
+        }
+        if self.nspin == 1 {
+            st.mag = None;
+        }
+        Ok(st)
+    }
+
+    /// [`Setup::scf`] from the state `start` (e.g. the converged state of a previous geometry,
+    /// as the program's `xtbrestart` and its in-run restarts carry it: shell charges, atomic
+    /// dipoles and quadrupoles, shell magnetizations and the density matrices, taken over as
+    /// they are although the q-vSZP basis of this geometry differs) instead of the EEQ-BC
+    /// start; `None`: the program's start.
+    pub fn scf_from(&self, opts: &ScfOptions, start: Option<&State>) -> Result<ScfResult> {
+        let version = self.model.version;
+        opts.check(version)?;
+        if opts.conventions != self.model.conventions {
+            return Err(Error::Input(format!(
+                "{}: SCF options in the {:?} conventions for a setup in the {:?} conventions",
+                version.label(),
+                opts.conventions,
+                self.model.conventions
+            )));
         }
         let n = self.nao;
-        let ns = self.nspin();
-        let program = opts.conventions == Conventions::Gxtb;
-        // the program smears above 1e-6 K with its single-precision kB; the default conventions
-        // at any temperature above 0 K with CODATA 2022 kB
-        let kt = if program {
-            if opts.etemp > crate::fermi::TEL_MIN {
-                opts.etemp * crate::fermi::KB_PROGRAM
-            } else {
-                0.0
+        let ns = self.nspin;
+        let max_iter = opts.iteration_limit(version);
+        let kt = self.kt(opts.etemp);
+        let mut t = Laps::new();
+        let solver = GenEigSolver::new(MatRef::from_row_major_slice(&self.s, n, n), self.par)?;
+        t.lap("scf: cholesky");
+        let st = match (start, version) {
+            (Some(s), Version::V2_0_1) => self.restart_state(s)?,
+            (None, Version::V2_0_1) => self.guess_state(),
+            // v1.1: the densities of the start (the program's `gxtbrestart` carries them), or the
+            // program's start density, analysed at this geometry
+            (Some(s), Version::V1_1) => {
+                if s.p.len() != ns || s.p.iter().any(|x| x.len() != n * n) {
+                    return Err(Error::Input("g-xTB: the start density does not fit this molecule".into()));
+                }
+                self.state(&s.p)
             }
-        } else if opts.etemp > 0.0 {
-            opts.etemp * axtb::units::KB_HARTREE
-        } else {
-            0.0
+            (None, Version::V1_1) => self.state_of(crate::program110::guess_density(self)),
         };
-        let mut solver = axtb::linalg::GenEigSolver::new(MatRef::from_row_major_slice(&self.s, n, n), self.par)?;
-        let nocc = if ns == 1 { vec![self.nalpha] } else { vec![self.nalpha, self.nbeta] };
-        if nocc.iter().any(|&k| k > n) {
-            return Err(Error::Input("g-xTB: more occupied orbitals than basis functions".into()));
+        // v1.1 in the program's conventions: every eigenpair, as the program (and its cap) needs;
+        // in the default conventions also for the smallest bases, where the full solver is the
+        // cheaper one
+        let every = version == Version::V1_1 && (self.model.program() || n <= FULL_SOLVE_MAX_AO);
+        let mut scf = Scf201 {
+            setup: self,
+            solver,
+            kt,
+            occ: self.occupations(),
+            efermi: [None, None],
+            ts: 0.0,
+            c: Mat::zeros(n, n),
+            eps: vec![vec![0.0; n]; ns],
+            coef: vec![vec![0.0; n * n]; ns],
+            kocc: vec![n; ns],
+            pnew: Vec::new(),
+            input: None,
+            energies: Energies::default(),
+            history: Vec::new(),
+            every,
+            keep_last: (opts.all_orbitals && !every) || opts.hamiltonian,
+            last: None,
+            dp: (version == Version::V1_1).then_some(f64::NAN),
+        };
+        let mut v2_mixer: Option<Gxtb201FockDiis> = None;
+        let (mut v1_mixer, mut v2_rule, mut v1_rule) = (None, None, None);
+        let strategy = match version {
+            Version::V2_0_1 => {
+                let (damping, diis_size) = (opts.damping.unwrap_or(DAMPING), opts.diis_size.unwrap_or(DIIS_SIZE));
+                let ethr = opts.energy_tol.unwrap_or(1e-6 * opts.accuracy);
+                let pthr = opts.residual_tol.unwrap_or(2e-5 * opts.accuracy);
+                let mixer = v2_mixer.insert(Gxtb201FockDiis::new(n, damping, diis_size, self.parallel));
+                // axtb's conventions end with one unmixed iteration, the program's do not
+                let rule = v2_rule.insert(Gxtb201Rule::new(ethr, pthr, !self.model.program()));
+                ScfStrategy { accelerator: Accelerator::Fock(mixer), rule, max_iter }
+            }
+            Version::V1_1 => {
+                // the 1.1.0 program's `diisfock_` and convergence test (both conventions)
+                let (ethr, pthr, ndamp, ndiis) = if ns == 1 { (1e-8, 2e-5, 3, 7) } else { (4e-7, 5e-5, 4, 8) };
+                let ethr = opts.energy_tol.unwrap_or(ethr * opts.accuracy);
+                let pthr = opts.density_tol.unwrap_or(pthr * opts.accuracy);
+                let ndamp = opts.transition_iteration.unwrap_or(ndamp);
+                let ndiis = opts.diis_size.unwrap_or(ndiis);
+                let damping = opts.damping.unwrap_or(crate::options::DAMPING_V1_1);
+                let mixer = v1_mixer.insert(crate::program110::strategy::Gxtb110FockMixer::new(
+                    n,
+                    damping,
+                    ndamp,
+                    ndiis,
+                    start.is_some(),
+                ));
+                let rule = v1_rule.insert(crate::program110::strategy::Gxtb110Rule::new(ethr, pthr));
+                ScfStrategy { accelerator: Accelerator::Fock(mixer), rule, max_iter }
+            }
+        };
+        let out = run_scf(&mut scf, strategy, st, &mut t)?;
+        if !out.converged {
+            let (de, res) = match (version, out.iterations) {
+                (Version::V1_1, _) => (out.last.energy_change, out.last.density_change),
+                (_, 0 | 1) => (f64::NAN, f64::NAN),
+                _ => (out.last.energy_change, out.last.residual),
+            };
+            return Err(Error::ScfNotConverged { iterations: max_iter, energy_change: de, residual: res });
         }
-        let (ethr, pthr, ndamp, ndiis) = if ns == 1 { (1e-8, 2e-5, 3, 7) } else { (4e-7, 5e-5, 4, 8) };
-        let ethr = opts.energy_tol.unwrap_or(ethr * opts.accuracy);
-        let pthr = opts.density_tol.unwrap_or(pthr * opts.accuracy);
-        let ndamp = opts.transition_iteration.unwrap_or(ndamp);
-        let ndiis = opts.diis_size.unwrap_or(ndiis);
-        let occ_value = if ns == 1 { 2.0 } else { 1.0 };
-        let aufbau: Vec<Vec<f64>> =
-            nocc.iter().map(|&k| (0..n).map(|i| if i < k { occ_value } else { 0.0 }).collect()).collect();
-        let mut occ = aufbau.clone();
-        let mut efermi = [None, None];
-        let npk = (n * (n + 1) / 2) as f64;
-        let mut mixer = FockMixer {
-            alpha: opts.damping.unwrap_or(DAMPING),
-            ndamp,
-            restart: start.is_some(),
-            size: ndiis,
-            fin: None,
-            hist: Vec::new(),
-        };
-        let mut p = match start {
-            Some(p) => p.to_vec(),
-            None => self.guess(),
-        };
-        let conv = Some(opts.conventions);
-        let mut ev = self.evaluate(&p, conv)?;
-        let mut e_old = 0.0;
-        let mut converged = false;
-        let mut c = Mat::<f64>::zeros(n, n);
-        let mut eps = vec![vec![0.0; n]; ns];
-        let mut coef = vec![vec![0.0; n * n]; ns];
-        let max_iter = opts.iteration_limit(Version::V1_1);
-        // energy change and RMS density change of the last iteration (for the error)
-        let (mut de, mut dp) = (f64::NAN, f64::NAN);
-        for iter in 1..=max_iter {
-            // after convergence the program diagonalizes the unmixed Fock matrix once more
-            let fs = if converged { ev.fock.clone() } else { mixer.mix(iter, &ev.fock, n) };
+        let Scf201 { mut solver, occ, efermi, mut c, eps, mut coef, kocc, input, energies, history, last, .. } = scf;
+        if opts.all_orbitals && !every {
+            // the orbitals without occupation, once, from the matrices of the last
+            // diagonalization; the occupied ones and every level stay the SCF's
             for s in 0..ns {
-                solver.solve(MatRef::from_row_major_slice(&fs[s], n, n), &mut eps[s], &mut c)?;
-                for i in 0..n {
-                    for k in 0..n {
-                        coef[s][i * n + k] = c[(i, k)];
-                    }
+                let k = kocc[s];
+                if k == n {
+                    continue;
                 }
-            }
-            let mut ts = 0.0;
-            if kt > 0.0 {
-                // closed shell: alpha and beta electrons fill the one set of levels. The program
-                // computes only the lowest min(N_alpha + 10, n) eigenpairs (DSYGVX) and sets the
-                // other eigenvalues to 100 Eh, so those levels stay empty at any temperature.
-                let (na, nb) = (self.nalpha, self.nbeta);
-                let nev = if program { (na + 10).min(n) } else { n };
-                let capped = |e: &[f64]| -> Vec<f64> {
-                    e.iter().enumerate().map(|(k, &x)| if k < nev { x } else { 100.0 }).collect()
+                let f = match &last {
+                    Some(last) => &last[s],
+                    None => v2_mixer.as_ref().expect("2.0.1 diagonalizes the mixed Fock matrices").mixed(s),
                 };
-                let (ea, eb) = (capped(&eps[0]), capped(&eps[if ns == 1 { 0 } else { 1 }]));
-                let (fa, mua, ta) = crate::fermi::fill_channel(na, kt, &ea, program);
-                let (fb, mub, tb) = crate::fermi::fill_channel(nb, kt, &eb, program);
-                efermi = [mua, mub];
-                ts = ta + tb;
-                occ = if ns == 1 { vec![fa.iter().zip(&fb).map(|(a, b)| a + b).collect()] } else { vec![fa, fb] };
+                solver.solve_rest(MatRef::from_row_major_slice(f, n, n), &eps[s], &mut c, k)?;
+                MatMut::from_row_major_slice_mut(&mut coef[s], n, n)
+                    .subcols_mut(k, n - k)
+                    .copy_from(c.as_ref().subcols(k, n - k));
             }
-            let mut pnew = Vec::with_capacity(ns);
+            t.lap("scf: virtual orbitals");
+        }
+        // the matrices of the unmixed last iteration (2.0.1 in the program's conventions, which
+        // has none, refuses the request in `ScfOptions::check`)
+        let hamiltonian = match (opts.hamiltonian, last) {
+            (false, _) => None,
+            (true, Some(last)) => Some(last),
+            (true, None) => return Err(Error::Numerical("the SCF ended without an unmixed iteration".into())),
+        };
+        let st = out.state;
+        Ok(ScfResult {
+            energies,
+            shell_charges: st.q.clone(),
+            atom_charges: st.qa.clone(),
+            orbital_energies: eps,
+            occupations: occ,
+            kt,
+            efermi,
+            coefficients: coef,
+            all_orbitals: opts.all_orbitals || every,
+            density: st.p.clone(),
+            state: st,
+            input_state: input.expect("a converged SCF ran an iteration"),
+            iterations: out.iterations,
+            history,
+            timings: t.laps,
+            eigensolver: solver.backend(),
+            hamiltonian,
+        })
+    }
+}
+
+/// One 2.0.1 SCF of [`Setup::scf_from`] as the core's SCF model (the program's iteration,
+/// see the module documentation): the occupied eigenpairs of the mixed Fock matrices, the
+/// Aufbau or Fermi occupations, the densities, their state and energy with the Fock matrices
+/// of the next iteration.
+struct Scf201<'a> {
+    setup: &'a Setup,
+    solver: GenEigSolver,
+    kt: f64,
+    /// Occupations per channel (at 0 K the Aufbau ones throughout), Fermi levels and the
+    /// entropy term -TS of the last iteration.
+    occ: Vec<Vec<f64>>,
+    efermi: [Option<f64>; 2],
+    ts: f64,
+    c: Mat<f64>,
+    /// Orbital energies and coefficients per channel (row-major; the columns of the orbitals
+    /// without occupation zero) of the last iteration.
+    eps: Vec<Vec<f64>>,
+    coef: Vec<Vec<f64>>,
+    /// The columns of `coef` the last diagonalization of each channel computed (n: all).
+    kocc: Vec<usize>,
+    /// The densities of the last iteration, until its state takes them.
+    pnew: Vec<Vec<f64>>,
+    /// The state the last Fock matrices were built from (the program's gradient evaluates
+    /// its potential terms with it).
+    input: Option<State>,
+    /// Energies of the last iteration, and every iteration's energy and Fock residual.
+    energies: Energies,
+    history: Vec<(f64, f64)>,
+    /// Every eigenpair in every iteration (v1.1 in the program's conventions).
+    every: bool,
+    /// Keep the matrices of an unmixed iteration in `last` (the orbitals without occupation
+    /// are computed from them after the SCF).
+    keep_last: bool,
+    /// The Fock matrices of the last unmixed iteration (v1.1's last iteration, and 2.0.1's in axtb's
+    /// conventions, diagonalize the matrices as built, which the mixer does not hold); `None` without one.
+    last: Option<Vec<Vec<f64>>>,
+    /// The RMS change of the packed spin densities in the last iteration (v1.1's convergence
+    /// test; 2.0.1 measures the Fock residual instead).
+    dp: Option<f64>,
+}
+
+impl ScfModel for Scf201<'_> {
+    type State = State;
+
+    fn diagonalize(&mut self, fock: FockSource<'_>) -> Result<ControlFlow<Error>> {
+        let setup = self.setup;
+        let (n, ns, kt) = (setup.nao, setup.nspin, self.kt);
+        if let (true, FockSource::Unmixed(f)) = (self.keep_last, fock) {
+            self.last = Some(f.to_vec());
+        }
+        if self.every {
             for s in 0..ns {
-                let mut ps = vec![0.0; n * n];
-                for k in 0..n {
-                    let o = occ[s][k];
-                    if o == 0.0 {
-                        continue;
-                    }
-                    for i in 0..n {
-                        let ci = o * coef[s][i * n + k];
-                        for j in 0..n {
-                            ps[i * n + j] += ci * coef[s][j * n + k];
-                        }
-                    }
-                }
-                pnew.push(ps);
+                let f = fock.matrix(s).expect("the v1.1 SCF diagonalizes row-major Fock matrices");
+                self.solver.solve(MatRef::from_row_major_slice(f, n, n), &mut self.eps[s], &mut self.c)?;
+                self.kocc[s] = n;
+                MatMut::from_row_major_slice_mut(&mut self.coef[s], n, n).copy_from(&self.c);
             }
-            // RMS change of the packed spin densities
+            return Ok(ControlFlow::Continue(()));
+        }
+        let occ = &self.occ;
+        // the eigenvectors of the orbitals with nonzero occupation (their occupations at a
+        // finite temperature follow from the eigenvalues)
+        for s in 0..ns {
+            let f = fock.matrix(s).expect("the 2.0.1 SCF diagonalizes mixed Fock matrices");
+            let nel = if s == 0 { setup.nalpha } else { setup.nbeta };
+            let need = |e: &[f64]| -> usize {
+                let o = if kt > 0.0 {
+                    let (a, _, _) = setup.fill_channel(nel, kt, e);
+                    if ns == 1 {
+                        let (b, _, _) = setup.fill_channel(setup.nbeta, kt, e);
+                        a.iter().zip(&b).map(|(x, y)| x + y).collect()
+                    } else {
+                        a
+                    }
+                } else {
+                    occ[s].clone()
+                };
+                o.iter().rposition(|&x| x != 0.0).map_or(0, |i| i + 1)
+            };
+            let k =
+                self.solver.solve_lowest(MatRef::from_row_major_slice(f, n, n), &mut self.eps[s], &mut self.c, need)?;
+            self.kocc[s] = k;
+            let mut cm = MatMut::from_row_major_slice_mut(&mut self.coef[s], n, n);
+            cm.as_mut().subcols_mut(0, k).copy_from(self.c.as_ref().subcols(0, k));
+            cm.subcols_mut(k, n - k).fill(0.0);
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn density(&mut self) {
+        let setup = self.setup;
+        if self.kt > 0.0 {
+            (self.occ, self.efermi, self.ts) = setup.fill(&self.eps, self.kt);
+        }
+        let (coef, occ) = (&self.coef, &self.occ);
+        self.pnew = (0..setup.nspin).map(|s| weighted_density(setup.nao, &[(&coef[s], &occ[s])], setup.par)).collect();
+    }
+
+    fn update_state(&mut self, st: &mut State) {
+        if self.dp.is_some() {
+            // v1.1: RMS change of the packed spin densities
+            let n = self.setup.nao;
             let mut dp2 = 0.0;
-            for s in 0..ns {
+            for (pn, po) in self.pnew.iter().zip(&st.p) {
                 for i in 0..n {
                     for j in 0..=i {
-                        let d = pnew[s][i * n + j] - p[s][i * n + j];
+                        let d = pn[i * n + j] - po[i * n + j];
                         dp2 += d * d;
                     }
                 }
             }
-            dp = (dp2 / npk).sqrt();
-            p = pnew;
-            ev = self.evaluate(&p, if converged { None } else { conv })?;
-            ev.energies.add_entropy(ts);
-            if converged {
-                // orbital energies of the last diagonalization (unmixed Fock matrix of the
-                // previous density), as the program prints them
-                let eigensolver = solver.backend();
-                return Ok(self.result(ev, p, eps, coef, occ, (kt, efermi), iter, opts.conventions, eigensolver));
-            }
-            let e = ev.energies.total;
-            de = e - e_old;
-            if de.abs() < ethr && dp < pthr {
-                converged = true;
-            }
-            e_old = e;
+            self.dp = Some((dp2 / (n * (n + 1) / 2) as f64).sqrt());
         }
-        Err(Error::ScfNotConverged { iterations: max_iter, energy_change: de, residual: dp })
+        let new = self.setup.state_of(std::mem::take(&mut self.pnew));
+        self.input = Some(std::mem::replace(st, new));
     }
 
-    fn result(
-        &self,
-        ev: Evaluation,
-        p: Vec<Vec<f64>>,
-        orbital_energies: Vec<Vec<f64>>,
-        coefficients: Vec<Vec<f64>>,
-        occupations: Vec<Vec<f64>>,
-        (kt, efermi): (f64, [Option<f64>; 2]),
-        iterations: usize,
-        conventions: Conventions,
-        eigensolver: String,
-    ) -> ScfResult {
-        ScfResult {
-            energies: ev.energies,
-            shell_charges: ev.shell_charges,
-            atom_charges: ev.atom_charges,
-            orbital_energies,
-            occupations,
-            kt,
-            efermi,
-            coefficients,
-            density: p,
-            iterations,
-            conventions,
-            eigensolver,
-        }
+    fn density_change(&self) -> f64 {
+        self.dp.unwrap_or(f64::NAN)
+    }
+
+    fn evaluate(
+        &mut self,
+        _iter: usize,
+        st: &State,
+        fock: bool,
+        laps: &mut Laps,
+    ) -> Result<(f64, Option<Vec<Vec<f64>>>)> {
+        let (mut energies, f) = self.setup.evaluate_timed(st, fock, laps);
+        energies.add_entropy(self.ts);
+        let e = energies.total;
+        self.energies = energies;
+        Ok((e, fock.then_some(f)))
+    }
+
+    fn record(&mut self, it: &Iteration) {
+        self.history.push((it.energy, it.residual));
     }
 }
 
-/// g-xTB v1.1 single point for atomic numbers, positions (bohr), total charge and number of
-/// unpaired electrons (`None`: 0 for an even, 1 for an odd electron count) with the default
-/// settings (exact Fock matrix; `Setup::scf` with `Conventions::Gxtb` reproduces the
-/// program).
-pub fn singlepoint(
-    numbers: &[usize],
-    positions_bohr: &[[f64; 3]],
-    charge: f64,
-    uhf: Option<usize>,
-) -> Result<ScfResult> {
-    let mol = Molecule::new(numbers, positions_bohr, charge, uhf)?;
-    Setup::new(&mol)?.scf(&ScfOptions::default())
+/// A term's energy as totals only (g-xTB sums no per-atom energies).
+fn totals(pieces: &mut [f64]) -> TermEnergy<'_> {
+    TermEnergy { pieces, atoms: None }
 }

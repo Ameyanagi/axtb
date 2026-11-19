@@ -69,7 +69,7 @@ def frequencies(h: np.ndarray, nums, masses) -> np.ndarray:
 
 
 def main() -> int:
-    import axtb
+    import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
     xtb = programs.require(programs.GXTB2)[0]
     if not (REFERENCE / "xtb-gxtb/src/param/atomicmass.f90").exists():
         programs.skip("needs the xtb source in $AXTB_REFERENCE/xtb-gxtb (reference/README.md) for its atomic masses")
@@ -78,7 +78,7 @@ def main() -> int:
     worst_h, worst_f, failures = 0.0, 0.0, []
     for f in files:
         try:
-            dh, df = compare(f, xtb, masses, axtb)
+            dh, df = compare(f, xtb, masses, flat)
         except Exception as e:  # noqa: BLE001
             print(f"{f.stem}: failed: {str(e)[-300:]}")
             failures.append(f.stem)
@@ -87,7 +87,7 @@ def main() -> int:
     return gate.check({"max_dH": worst_h, "max_dfreq_cm1": worst_f, "failures": failures}, LIMITS)
 
 
-def compare(f: Path, xtb: str, masses: np.ndarray, axtb) -> tuple[float, float]:
+def compare(f: Path, xtb: str, masses: np.ndarray, flat) -> tuple[float, float]:
     """max |dH| (Eh/bohr^2) and max |dfreq| above 50 cm-1 (cm-1) of one structure."""
     nums, pos, charge = read_xyz(f)
     with tempfile.TemporaryDirectory(dir=os.environ.get("AXTB_SCRATCH")) as d:
@@ -99,7 +99,7 @@ def compare(f: Path, xtb: str, masses: np.ndarray, axtb) -> tuple[float, float]:
         vals = [float(x) for x in (Path(d) / "hessian").read_text().split()[1:]]
     n3 = 3 * len(nums)
     hx = np.array(vals).reshape(n3, n3)
-    calc = axtb.Calculator("gfn2", nums, pos, charge=float(charge))
+    calc = flat.Calculator("gfn2", nums, pos, charge=float(charge))
     t = time.perf_counter()
     h = calc.hessian(pos, step=0.005, accuracy=0.01, method="numerical")["hessian"]
     tax = time.perf_counter() - t

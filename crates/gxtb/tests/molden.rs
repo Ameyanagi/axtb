@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Orbitals for Molden files from the calculators (GFN2-xTB, g-xTB v1.1 and 2.0.1): kept only
 //! when asked, orthonormal in the per-atom basis they come with (so the coefficients are laid
 //! out orbital by orbital in axtb's AO order and each atom has its own charge-adapted shells),
@@ -7,14 +8,15 @@
 
 use axtb::basis::{nsph, Cgto};
 use axtb::integrals::{overlap, MBLK};
-use axtb::molden::{MoldenFunctions, Spin};
-use axtb::{Molecule, Orbitals};
-use axtb_gxtb::{Calculator, ScfOptions, Version};
+use axtb::method::{Method, Want};
+use axtb::molden::{MoldenFunctions, Spin, ToMolden};
+use axtb::{Molecule, OrbitalLevels, Orbitals};
+use axtb_gxtb::{Calculator, Options, Version};
 use std::path::Path;
 
 fn molecule(rel: &str, charge: f64, uhf: usize) -> Molecule {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reference_v2").join(rel).join("mol.xyz");
-    axtb_gxtb::v2::read_xyz(&std::fs::read_to_string(path).unwrap(), charge, Some(uhf), Default::default()).unwrap()
+    axtb_gxtb::model::read_xyz(&std::fs::read_to_string(path).unwrap(), charge, Some(uhf), Default::default()).unwrap()
 }
 
 /// Largest deviation of C^T S C from the unit matrix over the sets of `orb`, with S from the
@@ -58,24 +60,22 @@ fn orthonormality(orb: &Orbitals) -> f64 {
     worst
 }
 
-fn check(name: &str, orb: &Orbitals, sp: &axtb::SinglePoint, uhf: usize) {
+/// The orbitals `orb` of a single point with the orbital levels `levels` (per spin channel);
+/// `one_set`: GFN2-xTB's one set of orbitals with alpha and beta occupations.
+fn check(name: &str, orb: &Orbitals, levels: &[OrbitalLevels], uhf: usize, one_set: bool) {
     let nao = orb.nao();
     let err = orthonormality(orb);
     // (the SCF overlap screens primitive pairs, this one does not)
     assert!(err < 1e-8, "{name}: orbitals not orthonormal ({err:e})");
     assert_eq!(orb.sets.len(), if uhf > 0 { 2 } else { 1 }, "{name}");
     assert_eq!(orb.sets[0].spin, Spin::Alpha);
-    let energies: Vec<f64> = orb.sets.iter().flat_map(|s| s.energies.iter().copied()).collect();
-    if orb.sets.len() == 2 && sp.orbital_energies.len() == nao {
-        // GFN2-xTB: one set of orbitals with alpha and beta occupations
-        assert_eq!(orb.sets[0].energies, sp.orbital_energies);
+    assert_eq!(orb.sets.len(), levels.len(), "{name}");
+    for (set, level) in orb.sets.iter().zip(levels) {
+        assert_eq!(set.energies, level.energies, "{name}");
+        assert_eq!(set.occupations, level.occupations, "{name}");
+    }
+    if one_set && orb.sets.len() == 2 {
         assert_eq!(orb.sets[0].coefficients, orb.sets[1].coefficients);
-        let occ: Vec<f64> = (0..nao).map(|k| orb.sets[0].occupations[k] + orb.sets[1].occupations[k]).collect();
-        assert_eq!(occ, sp.occupations);
-    } else {
-        assert_eq!(energies, sp.orbital_energies, "{name}");
-        let occ: Vec<f64> = orb.sets.iter().flat_map(|s| s.occupations.iter().copied()).collect();
-        assert_eq!(occ, sp.occupations, "{name}");
     }
     let nalpha: f64 = orb.sets[0].occupations.iter().sum();
     if uhf > 0 {
@@ -119,14 +119,13 @@ fn gxtb_orbitals() {
             let mol = molecule(rel, charge, uhf);
             let name = format!("{rel} {}", version.method());
             let mut calc =
-                Calculator::new(version, &mol.numbers, &mol.positions, charge, Some(uhf), ScfOptions::default())
-                    .unwrap();
-            let r = calc.singlepoint(&mol.positions, false).unwrap();
-            assert!(r.singlepoint.orbitals.is_none(), "orbitals only when asked");
-            calc.options.keep_orbitals = true;
-            let r = calc.singlepoint(&mol.positions, true).unwrap();
-            let orb = r.singlepoint.orbitals.as_ref().expect("orbitals");
-            check(&name, orb, &r.singlepoint, uhf);
+                Calculator::new(version, &mol.numbers, &mol.positions, charge, Some(uhf), Options::default()).unwrap();
+            let r = calc.singlepoint(&mol.positions, &Want::gradient(false)).unwrap();
+            assert!(r.electronic.unwrap().orbitals.is_none(), "orbitals only when asked");
+            let want = Want { orbitals: true, ..Want::GRADIENT };
+            let e = calc.singlepoint(&mol.positions, &want).unwrap().electronic.unwrap();
+            let orb = e.orbitals.as_ref().expect("orbitals");
+            check(&name, orb, &e.levels, uhf, false);
         }
     }
 }
@@ -136,14 +135,20 @@ fn gfn2_orbitals() {
     let cases = [("reference/water", 0.0, 0), ("reference/dioxygen_triplet", 0.0, 2), ("reference/cu-nh3-4", 2.0, 1)];
     for (rel, charge, uhf) in cases {
         let mol = molecule(rel, charge, uhf);
-        let mut opts = axtb::Options::default();
-        let mut calc =
-            axtb::Calculator::new(axtb::Method::Gfn2, &mol.numbers, &mol.positions, charge, Some(uhf), opts.clone())
-                .unwrap();
-        assert!(calc.singlepoint(&mol.positions, false).unwrap().orbitals.is_none());
-        opts.scf.keep_orbitals = true;
-        let sp = axtb::singlepoint(axtb::Method::Gfn2, &mol, &opts, false).unwrap();
-        check(&format!("{rel} gfn2"), sp.orbitals.as_ref().unwrap(), &sp, uhf);
+        let opts = axtb::Options::default();
+        let mut calc = axtb::Calculator::new(
+            axtb::Hamiltonian::Gfn2,
+            &mol.numbers,
+            &mol.positions,
+            charge,
+            Some(uhf),
+            opts.clone(),
+        )
+        .unwrap();
+        assert!(calc.singlepoint(&mol.positions, &Want::ENERGY).unwrap().electronic.unwrap().orbitals.is_none());
+        let want = Want { orbitals: true, ..Want::ENERGY };
+        let e = axtb::singlepoint(axtb::Hamiltonian::Gfn2, &mol, &opts, &want).unwrap().electronic.unwrap();
+        check(&format!("{rel} gfn2"), e.orbitals.as_ref().unwrap(), &e.levels, uhf, true);
     }
 }
 
@@ -154,10 +159,9 @@ fn gxtb_shells_per_atom() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reference/ethanol/mol.xyz");
     let mol = axtb_gxtb::read_xyz(&std::fs::read_to_string(path).unwrap(), 0.0, None).unwrap();
     for version in [Version::V1_1, Version::V2_0_1] {
-        let opts = ScfOptions { keep_orbitals: true, ..Default::default() };
-        let mut calc = Calculator::new(version, &mol.numbers, &mol.positions, 0.0, None, opts).unwrap();
-        let r = calc.singlepoint(&mol.positions, false).unwrap();
-        let orb = r.singlepoint.orbitals.unwrap();
+        let mut calc = Calculator::new(version, &mol.numbers, &mol.positions, 0.0, None, Options::default()).unwrap();
+        let want = Want { orbitals: true, ..Want::ENERGY };
+        let orb = calc.singlepoint(&mol.positions, &want).unwrap().electronic.unwrap().orbitals.unwrap();
         let h: Vec<usize> = (0..mol.nat()).filter(|&i| mol.numbers[i] == 1).collect();
         let distinct: std::collections::BTreeSet<String> =
             h.iter().map(|&i| format!("{:?}", orb.shells[i][0].coeff)).collect();

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! The xtb versions whose GFN-FF the port reproduces. Everything that differs between them
 //! is one table, [`ConventionParams`], resolved once when the topology is set up; the rest of
 //! the code reads the table instead of testing the version.
@@ -43,37 +44,48 @@
 /// (`docs/gfnff-spec.md` §11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Conventions {
-    /// xtb 6.8.0 (`xtb --gfnff`, 4b8c987). axtb's default.
+    /// axtb's (the default): xtb 6.8.0's force field, with CODATA 2022 units for XYZ input and
+    /// the axtb conventions of the vibrational analysis.
     #[default]
+    Axtb,
+    /// xtb 6.8.0 (`xtb --gfnff`, 4b8c987).
     Xtb680,
     /// xtb 6.7.1 as the g-xTB 2.0.1 build of xtb has it (`26dd68d`).
     Xtb671,
 }
 
 impl Conventions {
-    /// `xtb-6.8.0` or `xtb-6.7.1`.
+    /// `axtb`, `xtb` (6.8.0) or `xtb-6.7.1`, the names the front ends report.
     pub fn label(self) -> &'static str {
         match self {
-            Conventions::Xtb680 => "xtb-6.8.0",
+            Conventions::Axtb => "axtb",
+            Conventions::Xtb680 => "xtb",
             Conventions::Xtb671 => "xtb-6.7.1",
         }
     }
 
-    /// The conventions of a calculation's conventions name: `axtb` (default), `xtb` and
-    /// `xtb-6.8.0` select 6.8.0's GFN-FF (the force field is the same in axtb's and xtb's
-    /// conventions), `xtb-6.7.1` 6.7.1's; `None` for any other name.
+    /// The conventions of a calculation's conventions name: `axtb` (also `default`), `xtb`
+    /// (also `xtb-6.8.0`) or `xtb-6.7.1`; `None` for any other name.
     pub fn from_calculation(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
-            "axtb" | "default" | "xtb" | "xtb-6.8.0" => Some(Conventions::Xtb680),
+            "axtb" | "default" => Some(Conventions::Axtb),
+            "xtb" | "xtb-6.8.0" => Some(Conventions::Xtb680),
             "xtb-6.7.1" => Some(Conventions::Xtb671),
             _ => None,
         }
     }
 
+    /// Whether these are one of the xtb programs' conventions (mctc-lib's Ångström for XYZ
+    /// input, the xtb version's vibrational analysis).
+    pub fn is_xtb(self) -> bool {
+        self != Conventions::Axtb
+    }
+
     /// The settings of these conventions.
     pub(crate) fn params(self) -> ConventionParams {
         match self {
-            Conventions::Xtb680 => ConventionParams {
+            // the axtb conventions run xtb 6.8.0's force field
+            Conventions::Axtb | Conventions::Xtb680 => ConventionParams {
                 rcov_aatoau: XTB680_AATOAU,
                 pibo_threshold: 1.0e3 * f64::EPSILON,
                 unpaired_neighbors: UnpairedNeighbors::Removed,
@@ -97,12 +109,8 @@ impl std::fmt::Display for Conventions {
     }
 }
 
-/// Ångström to bohr of xtb 6.7.1's tables (`autoaa = 0.52917726`).
-pub const XTB671_AATOAU: f64 = 1.0 / 0.52917726;
-
-/// Ångström to bohr of xtb 6.8.0's tables: mctc-lib's CODATA 2018 bohr
-/// (`autoaa = 5.29177210904492434e-1`, ħ/(mₑ c α) of CODATA 2018).
-pub const XTB680_AATOAU: f64 = 1.0 / 5.29177210904492434e-1;
+/// Ångström to bohr of xtb 6.7.1's and xtb 6.8.0's tables (from `axtb-base`).
+pub use axtb_base::units::reference::{XTB671_AATOAU, XTB680_AATOAU};
 
 /// How `nbondmat` removes the unpaired neighbors of an atom before counting the bonds between
 /// atom pairs (point 3 of the module documentation).
@@ -121,10 +129,11 @@ pub enum UnpairedNeighbors {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FermiSmearing {
     /// Newton search for the Fermi level to 1e-9 electrons; derivative e^x/(kT (e^x + 1)²);
-    /// the occupations of the last evaluation (xtb 6.7.1).
+    /// the occupations of the last evaluation (xtb 6.7.1;
+    /// [`axtb_base::occupations::fill_fermismear`]).
     Xtb671,
     /// To min(√ε, 1e5 ε) electrons; derivative f(1 - f)/kT, occupations 0 and 1 beyond
-    /// |x| > 50 (xtb 6.8.0).
+    /// |x| > 50 (xtb 6.8.0; tblite's filling, [`axtb_base::occupations::fill_tblite`]).
     Xtb680,
 }
 
@@ -200,7 +209,7 @@ mod tests {
     #[test]
     fn names() {
         for (s, c) in [
-            ("axtb", Conventions::Xtb680),
+            ("axtb", Conventions::Axtb),
             ("xtb", Conventions::Xtb680),
             ("XTB-6.8.0", Conventions::Xtb680),
             ("xtb-6.7.1", Conventions::Xtb671),
@@ -208,7 +217,8 @@ mod tests {
             assert_eq!(Conventions::from_calculation(s), Some(c));
         }
         assert_eq!(Conventions::from_calculation("tblite"), None);
-        assert_eq!(Conventions::default(), Conventions::Xtb680);
+        assert_eq!(Conventions::default(), Conventions::Axtb);
+        assert_eq!((Conventions::Xtb680.label(), Conventions::Axtb.is_xtb()), ("xtb", false));
     }
 
     #[test]

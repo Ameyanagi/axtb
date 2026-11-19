@@ -1,4 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 use super::*;
+use crate::method::{Method, Want};
 
 /// Hessian (row-major 3N x 3N) of harmonic springs V = Σ ½ k (|r_i − r_j| − d0)².
 fn springs(pos: &[[f64; 3]], bonds: &[(usize, usize, f64, f64)]) -> Vec<f64> {
@@ -244,6 +246,19 @@ fn argon_sackur_tetrode() {
     assert!((th.points[0].enthalpy - 2.5 * units::KB_HARTREE * t).abs() < 1e-15);
 }
 
+/// An atom has no vibrations in any conventions (the axtb conventions diagonalize the empty
+/// Hessian of the complement of the rigid-body motions; this runs in every profile, also with
+/// overflow checks).
+#[test]
+fn an_atom_has_no_vibrations() {
+    assert!(eigh(&Mat::zeros(0, 0)).unwrap().0.is_empty());
+    for conventions in [Conventions::Axtb, Conventions::Xtb, Conventions::Xtb671] {
+        let opts = VibOptions { conventions, masses: None, thermo: None };
+        let r = analyze(&[18], &[[0.0; 3]], &[0.0; 9], None, &opts).unwrap();
+        assert!(r.frequencies.is_empty(), "{conventions:?}");
+    }
+}
+
 #[test]
 fn water_thermo_conventions_agree() {
     let (z, pos, bonds) = water();
@@ -265,7 +280,7 @@ fn water_thermo_conventions_agree() {
 /// differences of converged dipoles (step 1e-4 bohr, tight SCF).
 #[test]
 fn gfn2_dipole_derivatives() {
-    use crate::{Calculator, HessianMethod, HessianOptions, Method, Options};
+    use crate::{Calculator, Hamiltonian, HessianMethod, HessianOptions, Options};
     let cases = [
         (include_str!("../../../../tests/structures/water.xyz"), 0.0, None),
         // hydroxide (charged: ∂μ/∂R includes the charge times the displacement)
@@ -277,7 +292,7 @@ fn gfn2_dipole_derivatives() {
         let (num, pos) = crate::io::read_xyz(xyz, crate::units::AATOAU).unwrap();
         let mut o = Options::default();
         o.scf.accuracy = 1e-6;
-        let mut calc = Calculator::new(Method::Gfn2, &num, &pos, charge, uhf, o).unwrap();
+        let mut calc = Calculator::new(Hamiltonian::Gfn2, &num, &pos, charge, uhf, o).unwrap();
         let n3 = 3 * num.len();
         let h = 1e-4;
         let mut fd = vec![[0.0; 3]; n3];
@@ -286,14 +301,14 @@ fn gfn2_dipole_derivatives() {
             for (i, s) in [1.0, -1.0].into_iter().enumerate() {
                 let mut p = pos.clone();
                 p[x / 3][x % 3] += s * h;
-                calc.reset_guess();
-                d[i] = calc.singlepoint(&p, false).unwrap().dipole;
+                calc.reset_wavefunction();
+                d[i] = calc.singlepoint(&p, &Want::gradient(false)).unwrap().dipole;
             }
             fd[x] = [0, 1, 2].map(|k| (d[0][k] - d[1][k]) / (2.0 * h));
         }
         for method in [HessianMethod::Analytic, HessianMethod::Response, HessianMethod::Numerical] {
             let step = if method == HessianMethod::Numerical { Some(1e-3) } else { None };
-            let hs = calc.hessian(&pos, &HessianOptions { method, step, accuracy: Some(1e-8) }).unwrap();
+            let hs = calc.hessian(&pos, &HessianOptions { method: Some(method), step, accuracy: Some(1e-8) }).unwrap();
             let dd = hs.dipole_derivatives.unwrap();
             let err =
                 dd.iter().zip(&fd).flat_map(|(a, b)| (0..3).map(move |k| (a[k] - b[k]).abs())).fold(0.0f64, f64::max);

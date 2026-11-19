@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! GFN-FF: the generic force field of Spicher and Grimme (Angew. Chem. Int. Ed. 59,
 //! 15665 (2020), doi:10.1002/anie.202004239), ported from xtb's implementation
 //! (`src/gfnff`, LGPL-3.0-or-later) and validated against the xtb 6.8.0 program (default) and
@@ -6,9 +7,9 @@
 //! * [`Calculator::new`] sets up the [`Topology`] (neighbors, hybridization, rings, pi systems
 //!   with Hueckel bond orders, topology charges, bonded terms, HB/XB candidates) from a
 //!   structure and keeps it for every later geometry (as xtb does within an optimization);
-//! * [`Calculator::singlepoint`] gives energies, analytic gradients and EEQ charges
-//!   ([`Results`]), [`Calculator::hessian`] and [`Calculator::numerical_hessian`] a
-//!   [`Hessian`] with dipole derivatives;
+//! * the calculator implements axtb-base's [`Method`]: [`Method::singlepoint`] gives energies,
+//!   analytic gradients, EEQ charges and the topology report, [`Method::hessian`] analytic and
+//!   numerical Hessians with dipole derivatives;
 //! * molecules only (no periodic boundary conditions).
 //!
 //! Units: bohr and Hartree. Errors: [`Error::Input`] and [`Error::UnsupportedElement`] for
@@ -36,7 +37,6 @@ mod energy;
 mod error;
 mod geom;
 mod hessian;
-mod linalg;
 mod param;
 mod real;
 mod setup;
@@ -44,11 +44,11 @@ mod setup_util;
 mod terms;
 mod topology;
 
-pub use calculator::{Calculator, Options, Results};
+pub use axtb_base::method::{self, Method};
+pub use calculator::{Calculator, Options, NUMERICAL_STEP};
 pub use conventions::Conventions;
 pub use energy::Energies;
 pub use error::{Error, Result};
-pub use hessian::Hessian;
 pub use topology::{Angle, Bond, BondDistance, BondHb, Topology, Torsion};
 
 /// Method name used by the CLI, Python and qccodec wiring.

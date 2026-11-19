@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! g-xTB in implicit solvent: a solvation composite, in one process.
 //!
 //! g-xTB has no implicit-solvent parametrization (the g-xTB 2.0.1 program stops with
@@ -22,14 +23,18 @@
 //!   state `gsolv` (1 M in the gas phase to 1 M in solution). Both halves always run with the
 //!   same settings; only the solvent model differs.
 //! - **Electronic temperatures.** By default g-xTB runs at its program's default of 0 K and
-//!   the GFN2 halves at xtb's default of 300 K ([`CompositeOptions::etemp`] `None`); an explicit
+//!   the GFN2 halves at xtb's default of 300 K (`etemp` `None` in [`CompositeOptions::scf`]); an explicit
 //!   temperature applies to all three parts.
-//! - **The SCF retry ladders** ([`PAIR_RETRIES`], [`GXTB_RETRIES`]). A GFN2 pair whose SCF fails
+//! - **The SCF retry ladders** ([`PAIR_RETRIES`], [`GXTB_RETRIES`], axtb-base's `RetryLadder`). A GFN2 pair whose SCF fails
 //!   (no convergence, or a numerical breakdown) is run again, both halves at the same settings,
 //!   with 1000 K and 1000 iterations, then 1000 iterations, then 5000 K and 1000 iterations. A
 //!   g-xTB SCF that fails is run again at 1000 K, then 3000 K, each with 1000 iterations,
 //!   unless the temperature was set explicitly. The rung that converged is reported per part
-//!   ([`PartInfo::retry`]), so a result from a smeared rung is never mistaken for a 0 K one.
+//!   (the part's `retry` in the composite's report), so a result from a smeared rung is never
+//!   mistaken for a 0 K one. A caller's own retries ([`CompositeOptions::scf_retries`]) replace
+//!   both ladders: the g-xTB part and the GFN2 pair each climb them in order after their first
+//!   try, every rung from the method's own start, and the single point that follows a Hessian at
+//!   the same positions starts each ladder at the rung its Hessian converged on.
 //! - **The zero check.** The first geometry's ΔG_solv must not be zero (|ΔG| < 1e-9 Eh), or the
 //!   calculation stops instead of reporting gas-phase energies as solvated (e.g. a solvent
 //!   model that did not apply).
@@ -39,13 +44,14 @@
 //! `axtb` (corrected solvation) and `xtb-6.7.1` for `gxtb`. `conventions = Gxtb` therefore
 //! reproduces the three programs `xtb --gxtb`, `xtb --alpb water` and `xtb` of the g-xTB 2.0.1
 //! build of xtb 6.7.1: every SCF starts from the program's guess, as each program call does.
-use crate::calculator::{Calculator, Results, Version};
-use crate::scf::{Conventions, Guess, ScfOptions};
-use axtb::{
-    Error, HessianMethod, HessianOptions, MixerKind, Result, ScfAttempt, SinglePoint, SolvationModel, SolvationSpec,
+use crate::calculator::{Calculator, Options, Version};
+use crate::options::Conventions;
+use axtb::method::{
+    Composite, Correction as CompositeCorrection, Detail, Fingerprint, Guard, HessianOptions, Method, MethodInfo, Part,
+    Restart, Retry, RetryLadder, RetryOn, Rung, ScfSettings, SinglePoint, Try, Want, Wavefunction, WavefunctionData,
 };
-use std::sync::Arc;
-use std::time::Instant;
+use axtb::{Error, MixerKind, Result, SolvationModel, SolvationSpec};
+use axtb_base::threads::{self, Threads};
 
 /// The method that supplies the solvation correction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,15 +93,14 @@ pub struct CompositeOptions {
     pub correction: Correction,
     /// Solvent model, solvent and reference state of the solvated GFN2 half.
     pub solvation: SolvationSpec,
-    /// SCF accuracy of all three parts (xtb's `--acc`: multiplier of the convergence
-    /// thresholds; default 1).
-    pub accuracy: f64,
-    /// Electronic temperature (K) of all three parts; `None`: each method's default, g-xTB 0 K
-    /// and GFN2-xTB 300 K, the programs' defaults.
-    pub etemp: Option<f64>,
-    /// SCF iteration limit of all three parts; `None`: each method's default (250 for g-xTB
-    /// 2.0.1 and GFN2-xTB).
-    pub max_iter: Option<usize>,
+    /// The SCF settings of all three parts: accuracy (xtb's `--acc`: multiplier of the
+    /// convergence thresholds; default 1); electronic temperature (K; `None`: each method's
+    /// default, g-xTB 0 K and GFN2-xTB 300 K, the programs' defaults); iteration limit (`None`:
+    /// each method's default, 250 for g-xTB 2.0.1 and GFN2-xTB); restart policy (`None`: each
+    /// part as its conventions say, the GFN2 halves and the g-xTB part from the previous
+    /// geometry's state in their axtb conventions; the programs start every call from their own
+    /// guess).
+    pub scf: ScfSettings,
     /// Threads of the composite's one pool; the parts run one after the other inside it.
     pub threads: usize,
     /// Conventions of the g-xTB part (`Axtb` or `Gxtb`, the program's).
@@ -107,12 +112,11 @@ pub struct CompositeOptions {
     pub mixer: Option<MixerKind>,
     /// Retry failed SCFs with the ladders [`PAIR_RETRIES`] and [`GXTB_RETRIES`] (default true).
     pub retries: bool,
-    /// Keep the g-xTB part's converged orbitals in the results (e.g. for a Molden file).
-    pub keep_orbitals: bool,
-    /// Start each SCF from the previous geometry's converged state; `None`: each part as its
-    /// conventions say, the GFN2 halves in their axtb conventions and the g-xTB part in its axtb
-    /// conventions (the programs start every call from their own guess).
-    pub reuse_guess: Option<bool>,
+    /// The SCF retries of every part in place of the built-in ladders: the g-xTB part and the
+    /// GFN2 pair each climb them in order after their first try, every rung from the method's own
+    /// start (a missing value: the part's own); `None`: the built-in ladders as `retries` says.
+    /// None may go below an explicit electronic temperature ([`Retry::check`]).
+    pub scf_retries: Option<Vec<Retry>>,
 }
 
 impl Default for CompositeOptions {
@@ -125,16 +129,13 @@ impl Default for CompositeOptions {
                 solvent: "water".into(),
                 state: Default::default(),
             },
-            accuracy: 1.0,
-            etemp: None,
-            max_iter: None,
+            scf: ScfSettings::default(),
             threads: 1,
             conventions: Conventions::Axtb,
             correction_conventions: None,
             mixer: None,
             retries: true,
-            keep_orbitals: false,
-            reuse_guess: None,
+            scf_retries: None,
         }
     }
 }
@@ -161,89 +162,24 @@ pub const PAIR_RETRIES: [(Option<f64>, usize); 3] = [(Some(1000.0), 1000), (None
 /// electronic temperature.
 pub const GXTB_RETRIES: [(f64, usize); 2] = [(1000.0, 1000), (3000.0, 1000)];
 
-/// How one part of the composite converged.
-#[derive(Clone, Debug)]
-pub struct PartInfo {
-    /// `"gxtb-v2.0.1"` (or v1.1), `"gfn2+alpb"`/`"gfn2+gbsa"`, `"gfn2"`.
-    pub method: String,
-    /// Conventions of the part.
-    pub conventions: &'static str,
-    /// Energy of the part (Eh).
-    pub energy: f64,
-    /// SCF iterations of the converging attempt.
-    pub iterations: usize,
-    /// GFN2-xTB: mixer of the converging attempt (`"broyden"`, `"diis"`, `"diis-fallback"`);
-    /// `None` for g-xTB.
-    pub mixer_used: Option<&'static str>,
-    /// GFN2-xTB: every attempt of the converging rung.
-    pub scf_attempts: Vec<ScfAttempt>,
-    /// Electronic temperature (K) and iteration limit of the converging rung.
-    pub etemp: f64,
-    pub max_iter: usize,
-    /// The retry that converged (`None`: the first try), e.g. `"etemp 1000 K, 1000 iterations"`.
-    pub retry: Option<String>,
-    /// Wall time of the part (all rungs), seconds.
-    pub seconds: f64,
-    /// Hessians: how the part's Hessian was computed.
-    pub hessian_method: Option<HessianMethod>,
-}
+/// The keys of the composite's parts in its reports, in their order.
+pub const PART_KEYS: [&str; 3] = ["gxtb", "gfn2_solvated", "gfn2_gas"];
 
-/// Results of a composite single point.
-#[derive(Clone, Debug)]
-pub struct CompositeResults {
-    /// The composite: `energy` and `gradient` are E_gxtb + ΔG_solv and its gradient,
-    /// `terms.solvation` is ΔG_solv; charges, moments, orbitals and iterations are g-xTB's.
-    pub singlepoint: SinglePoint,
-    /// The g-xTB part (with its energy terms).
-    pub gxtb: Results,
-    /// The GFN2 halves with and without the solvent model.
-    pub gfn2_solvated: SinglePoint,
-    pub gfn2_gas: SinglePoint,
-    /// ΔG_solv = E_GFN2+solv - E_GFN2 (Eh) and its gradient.
-    pub solvation_energy: f64,
-    pub solvation_gradient: Option<Vec<[f64; 3]>>,
-    /// g-xTB, GFN2 solvated, GFN2 gas.
-    pub parts: [PartInfo; 3],
-}
-
-/// A composite Hessian: total and parts.
-#[derive(Clone, Debug)]
-pub struct CompositeHessian {
-    /// H_gxtb + H_GFN2+solv - H_GFN2, with energy and gradient alike (`method`: g-xTB's).
-    pub total: axtb::Hessian,
-    pub gxtb: axtb::Hessian,
-    pub gfn2_solvated: axtb::Hessian,
-    pub gfn2_gas: axtb::Hessian,
-    /// ΔG_solv at the reference geometry (Eh).
-    pub solvation_energy: f64,
-    /// Electronic temperature, iteration limit and retry of each part, as in [`PartInfo`]
-    /// (`energy` is the part's at the Hessian's reference SCF; no iteration count).
-    pub parts: [PartInfo; 3],
-}
-
-/// The composite bound to one molecule: g-xTB plus two GFN2-xTB calculators.
+/// The composite bound to one molecule: g-xTB plus two GFN2-xTB calculators, on axtb-base's
+/// generic [`Composite`] (this type is its g-xTB policy: which methods pair, the temperatures,
+/// the retry ladders, the zero check and the labels).
 pub struct CompositeCalculator {
     options: CompositeOptions,
-    gxtb: Calculator,
-    solvated: axtb::Calculator,
-    gas: axtb::Calculator,
+    inner: Composite,
     /// Base temperature and iteration limits (before retries).
     gxtb_base: (f64, usize),
     gfn2_base: (f64, usize),
     reuse_guess: bool,
-    /// The zero check of ΔG_solv has passed.
-    checked: bool,
+    gxtb_reuse_guess: bool,
 }
 
 fn gfn2_label(c: axtb::Conventions) -> &'static str {
     c.label()
-}
-
-fn gxtb_label(c: Conventions) -> &'static str {
-    match c {
-        Conventions::Axtb => "axtb",
-        Conventions::Gxtb => "gxtb",
-    }
 }
 
 fn model_label(m: SolvationModel) -> &'static str {
@@ -268,23 +204,40 @@ fn retry_label(etemp: Option<f64>, max_iter: usize) -> String {
     }
 }
 
-/// An SCF that failed: not converged, or broken down (Broyden failure, Fermi level lost).
-/// Retried, as a failed program call would be; input errors are not.
-fn not_converged(e: &Error) -> bool {
-    matches!(e, Error::ScfNotConverged { .. } | Error::Numerical(_))
+/// The rungs of a ladder: the first try at `base` (temperature, iteration limit), then each of
+/// `retries` (temperature, `None`: the base's; iteration limit, at least the base's); `fresh`:
+/// every try from the method's own start.
+fn rungs(base: (f64, usize), retries: &[(Option<f64>, usize)], fresh: bool) -> Vec<Rung> {
+    let mut out = vec![Rung { fresh, etemp: Some(base.0), max_iter: Some(base.1), label: None }];
+    for &(t, m) in retries {
+        let m = m.max(base.1);
+        out.push(Rung { fresh, etemp: Some(t.unwrap_or(base.0)), max_iter: Some(m), label: Some(retry_label(t, m)) });
+    }
+    out
 }
 
-fn add(a: &[[f64; 3]], b: &[[f64; 3]], sign: f64) -> Vec<[f64; 3]> {
-    a.iter().zip(b).map(|(x, y)| [x[0] + sign * y[0], x[1] + sign * y[1], x[2] + sign * y[2]]).collect()
+/// The caller's retries as the description shows them: each rung's given values, `; ` between
+/// rungs (e.g. `etemp 1000 K, max_iter 1000; max_iter 1000`).
+fn retries_text(given: &[Retry]) -> String {
+    let rung = |r: &Retry| {
+        let mut v = Vec::new();
+        if let Some(t) = r.etemp {
+            v.push(format!("etemp {t} K"));
+        }
+        if let Some(m) = r.max_iter {
+            v.push(format!("max_iter {m}"));
+        }
+        v.join(", ")
+    };
+    given.iter().map(rung).collect::<Vec<_>>().join("; ")
 }
 
-/// Which retry a part converged on.
-#[derive(Clone, Debug)]
-struct Rung {
-    etemp: f64,
-    max_iter: usize,
-    retry: Option<String>,
-    seconds: f64,
+/// What the composite is and offers: g-xTB's information, with the Hessian methods every part
+/// offers.
+fn info(gxtb: &MethodInfo, gfn2: &MethodInfo) -> MethodInfo {
+    let mut info = gxtb.clone();
+    info.hessian.offered.retain(|d| gfn2.hessian.get(d.method).is_some());
+    info
 }
 
 impl CompositeCalculator {
@@ -297,73 +250,144 @@ impl CompositeCalculator {
         uhf: Option<usize>,
         options: CompositeOptions,
     ) -> Result<Self> {
-        if options.threads == 0 {
-            return Err(Error::Input("threads must be at least 1".into()));
+        threads::check(options.threads)?;
+        let scf = options.scf.clone();
+        if !(scf.accuracy > 0.0 && scf.accuracy.is_finite()) {
+            return Err(Error::Input(format!("accuracy must be positive and finite, got {}", scf.accuracy)));
         }
-        if !(options.accuracy > 0.0 && options.accuracy.is_finite()) {
-            return Err(Error::Input(format!("accuracy must be positive and finite, got {}", options.accuracy)));
-        }
-        if let Some(t) = options.etemp {
+        if let Some(t) = scf.etemp {
             if !(t >= 0.0 && t.is_finite()) {
                 return Err(Error::Input(format!("electronic temperature must be >= 0 K and finite, got {t}")));
             }
         }
-        let pool = if options.threads > 1 {
-            Some(Arc::new(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(options.threads)
-                    .build()
-                    .map_err(|e| Error::Input(format!("cannot create thread pool: {e}")))?,
-            ))
-        } else {
-            None
-        };
+        if let Some(r) = &options.scf_retries {
+            Retry::check(r, scf.etemp)?;
+        }
+        let threads = Threads::new(options.threads)?;
 
         // g-xTB part
-        let gxtb_etemp = options.etemp.unwrap_or(GXTB_ETEMP);
-        let gopts = ScfOptions {
-            accuracy: options.accuracy,
-            max_iter: options.max_iter.unwrap_or(0),
-            etemp: gxtb_etemp,
+        let gxtb_etemp = scf.etemp.unwrap_or(GXTB_ETEMP);
+        let gopts = Options {
+            scf: ScfSettings {
+                accuracy: scf.accuracy,
+                max_iter: scf.max_iter,
+                etemp: Some(gxtb_etemp),
+                restart: scf.restart,
+            },
             threads: options.threads,
             conventions: options.conventions,
-            keep_orbitals: options.keep_orbitals,
-            guess: options.reuse_guess.map(|r| if r { Guess::Previous } else { Guess::EeqBc }),
             ..Default::default()
         };
         let gxtb_max_iter = gopts.iteration_limit(options.version);
-        let gxtb = Calculator::with_pool(options.version, numbers, positions, charge, uhf, gopts, pool.clone())?;
+        let gxtb_reuse_guess = gopts.reuses();
+        let gxtb = Calculator::with_threads(options.version, numbers, positions, charge, uhf, gopts, threads.clone())?;
 
         // the GFN2 halves: one set of options, the solvated half adds the solvent model
         let gfn2_conv = options.gfn2_conventions();
         let mut o = axtb::Options { conventions: gfn2_conv, ..Default::default() };
-        o.scf.accuracy = options.accuracy;
-        o.scf.threads = options.threads;
-        o.scf.mixer = options.mixer;
-        if let Some(t) = options.etemp {
-            o.scf.etemp = t;
-        } else {
-            o.scf.etemp = GFN2_ETEMP;
-        }
-        if let Some(m) = options.max_iter {
-            o.scf.max_iter = m;
-        }
-        let gfn2_base = (o.scf.etemp, o.scf.max_iter);
-        let gas =
-            axtb::Calculator::with_pool(axtb::Method::Gfn2, numbers, positions, charge, uhf, o.clone(), pool.clone())?;
+        o.scf.accuracy = scf.accuracy;
+        o.threads = options.threads;
+        o.mixing.mixer = options.mixer;
+        o.scf.etemp = Some(scf.etemp.unwrap_or(GFN2_ETEMP));
+        o.scf.max_iter = scf.max_iter;
+        let gfn2_base = (o.scf.etemp.unwrap_or(GFN2_ETEMP), o.scf.max_iter.unwrap_or(axtb::MAX_ITER));
+        let gas = axtb::Calculator::with_threads(
+            axtb::Hamiltonian::Gfn2,
+            numbers,
+            positions,
+            charge,
+            uhf,
+            o.clone(),
+            threads.clone(),
+        )?;
         let so = axtb::Options { solvation: Some(options.solvation.clone()), ..o };
-        let solvated = axtb::Calculator::with_pool(axtb::Method::Gfn2, numbers, positions, charge, uhf, so, pool)?;
-        let reuse_guess = options.reuse_guess.unwrap_or(gfn2_conv == axtb::Conventions::Axtb);
-        Ok(Self {
+        let solvated =
+            axtb::Calculator::with_threads(axtb::Hamiltonian::Gfn2, numbers, positions, charge, uhf, so, threads)?;
+        let default = if gfn2_conv == axtb::Conventions::Axtb { Restart::Previous } else { Restart::Fresh };
+        let reuse_guess = scf.reuses(default);
+
+        // the ladders: g-xTB's only without an explicit temperature; the pair's every rung from
+        // the method's own start when the halves do not reuse wavefunctions; or the caller's
+        // retries after each group's first try
+        let gxtb_base = (gxtb_etemp, gxtb_max_iter);
+        let (gxtb_ladder, pair_ladder) = match &options.scf_retries {
+            Some(given) => {
+                let mut g = rungs(gxtb_base, &[], false);
+                g.extend(Retry::rungs(gxtb_base, given));
+                let mut p = rungs(gfn2_base, &[], !reuse_guess);
+                p.extend(Retry::rungs(gfn2_base, given));
+                (RetryLadder { rungs: g, on: RetryOn::Failed }, RetryLadder { rungs: p, on: RetryOn::Failed })
+            }
+            None => {
+                let gxtb_retries: Vec<(Option<f64>, usize)> = if options.retries && scf.etemp.is_none() {
+                    GXTB_RETRIES.map(|(t, m)| (Some(t), m)).to_vec()
+                } else {
+                    vec![]
+                };
+                let pair_retries = if options.retries { PAIR_RETRIES.to_vec() } else { vec![] };
+                (
+                    RetryLadder { rungs: rungs(gxtb_base, &gxtb_retries, false), on: RetryOn::Failed },
+                    RetryLadder { rungs: rungs(gfn2_base, &pair_retries, !reuse_guess), on: RetryOn::Failed },
+                )
+            }
+        };
+
+        let info = info(gxtb.info(), gas.info());
+        let fingerprint = Fingerprint::new(info.name, numbers, charge, uhf);
+        let gxtb_conventions = options.conventions.label();
+        let base = Part {
+            key: PART_KEYS[0],
+            label: options.version.method().to_string(),
+            conventions: gxtb_conventions,
+            timing: "gxtb",
+            method: Box::new(gxtb),
+        };
+        let correction = options.correction.name();
+        let model = model_label(options.solvation.model);
+        let gas = Part {
+            key: PART_KEYS[2],
+            label: correction.to_string(),
+            conventions: gfn2_label(gfn2_conv),
+            timing: "gfn2 gas",
+            method: Box::new(gas),
+        };
+        let solvated = Part {
+            key: PART_KEYS[1],
+            label: format!("{correction}+{model}"),
+            conventions: gfn2_label(gfn2_conv),
+            timing: "gfn2 solvated",
+            method: Box::new(solvated),
+        };
+        // the zero check: the first geometry's dG_solv must not vanish
+        let (model_name, solvent) = (model.to_ascii_uppercase(), options.solvation.solvent.clone());
+        let guard: Guard = std::sync::Arc::new(move |dg: f64| {
+            if !dg.is_finite() || dg.abs() < 1e-9 {
+                return Err(Error::Numerical(format!(
+                    "the {model_name} model for {solvent} did not change the GFN2-xTB energy (dG_solv = {dg:.3e} \
+                     Eh): refusing to report gas-phase energies as solvated"
+                )));
+            }
+            Ok(())
+        });
+        let solvation = CompositeCorrection {
+            name: "solvation_correction",
+            // gas, then solvated: dG_solv = E_GFN2+solv - E_GFN2
+            parts: vec![(-1.0, gas), (1.0, solvated)],
+            ladder: pair_ladder,
+            guard: Some(guard),
+        };
+        let pin = options.scf_retries.is_some();
+        let mut c = Self {
             options,
-            gxtb,
-            solvated,
-            gas,
-            gxtb_base: (gxtb_etemp, gxtb_max_iter),
+            inner: Composite::new(info, fingerprint, base, gxtb_ladder, vec![solvation]).with_pinned_rungs(pin),
+            gxtb_base,
             gfn2_base,
             reuse_guess,
-            checked: false,
-        })
+            gxtb_reuse_guess,
+        };
+        let description = c.describe();
+        c.inner = c.inner.with_description(description, PART_KEYS.to_vec());
+        Ok(c)
     }
 
     /// The settings.
@@ -371,15 +395,14 @@ impl CompositeCalculator {
         &self.options
     }
 
-    /// The molecule (positions of the last evaluation).
-    pub fn molecule(&self) -> &axtb::Molecule {
-        self.gxtb.molecule()
+    /// The generic composite (its parts: g-xTB, then the GFN2 halves gas and solvated).
+    pub fn composite(&self) -> &Composite {
+        &self.inner
     }
 
-    /// Keep (or not) the g-xTB part's converged orbitals in the next results.
-    pub fn set_keep_orbitals(&mut self, keep: bool) {
-        self.options.keep_orbitals = keep;
-        self.gxtb.options.keep_orbitals = keep;
+    /// The generic composite, mutable.
+    pub fn composite_mut(&mut self) -> &mut Composite {
+        &mut self.inner
     }
 
     /// The composite's definition, e.g.
@@ -404,7 +427,7 @@ impl CompositeCalculator {
 
     /// Conventions of the g-xTB part and of the GFN2 halves.
     pub fn conventions_labels(&self) -> (&'static str, &'static str) {
-        (gxtb_label(self.options.conventions), gfn2_label(self.options.gfn2_conventions()))
+        (self.options.conventions.label(), gfn2_label(self.options.gfn2_conventions()))
     }
 
     /// Base electronic temperatures (K) of the g-xTB part and the GFN2 halves.
@@ -419,269 +442,117 @@ impl CompositeCalculator {
 
     /// Whether the g-xTB part starts from the previous geometry's converged state.
     pub fn gxtb_reuses_guess(&self) -> bool {
-        self.gxtb.reuses_guess()
+        self.gxtb_reuse_guess
     }
 
-    /// The default Hessian method of the g-xTB part (analytic for 2.0.1, numerical for v1.1).
-    pub fn default_hessian_method(&self) -> HessianMethod {
-        self.gxtb.default_hessian_method()
-    }
-
-    /// Forget the previous converged states of all parts.
-    pub fn reset_guess(&mut self) {
-        self.gxtb.reset_guess();
-        self.solvated.reset_guess();
-        self.gas.reset_guess();
-    }
-
-    /// The g-xTB part's calculator (e.g. for its [`Calculator::guess`]).
-    pub fn gxtb(&self) -> &Calculator {
-        &self.gxtb
-    }
-
-    /// The g-xTB part's calculator, mutable (e.g. to [`Calculator::set_guess`]).
-    pub fn gxtb_mut(&mut self) -> &mut Calculator {
-        &mut self.gxtb
-    }
-
-    /// The GFN2 halves' calculators (gas phase, solvated).
-    pub fn gfn2_mut(&mut self) -> (&mut axtb::Calculator, &mut axtb::Calculator) {
-        (&mut self.gas, &mut self.solvated)
-    }
-
-    /// The GFN2 halves' last wavefunctions (gas phase, solvated).
-    pub fn gfn2_guesses(&self) -> (Option<&axtb::ScfGuess>, Option<&axtb::ScfGuess>) {
-        (self.gas.guess(), self.solvated.guess())
-    }
-
-    /// g-xTB with its retries (only without an explicit electronic temperature).
-    fn run_gxtb<T>(&mut self, mut f: impl FnMut(&mut Calculator) -> Result<T>) -> Result<(T, Rung)> {
-        let t0 = Instant::now();
-        let (etemp, max_iter) = self.gxtb_base;
-        let first = f(&mut self.gxtb);
-        let err = match first {
-            Ok(v) => return Ok((v, Rung { etemp, max_iter, retry: None, seconds: t0.elapsed().as_secs_f64() })),
-            Err(e) if not_converged(&e) && self.options.retries && self.options.etemp.is_none() => e,
-            Err(e) => return Err(e),
-        };
-        let base = self.gxtb.options.clone();
-        let mut out = Err(err.clone());
-        for (t, m) in GXTB_RETRIES {
-            let mut o = base.clone();
-            o.max_iter = m.max(max_iter);
-            o.etemp = t;
-            let m = o.max_iter;
-            self.gxtb.options = o;
-            match f(&mut self.gxtb) {
-                Ok(v) => {
-                    out = Ok((v, Rung { etemp: t, max_iter: m, retry: Some(retry_label(Some(t), m)), seconds: 0.0 }));
-                    break;
-                }
-                Err(e) if not_converged(&e) => out = Err(e),
-                Err(e) => {
-                    out = Err(e);
-                    break;
-                }
-            }
-        }
-        self.gxtb.options = base;
-        out.map(|(v, mut r)| {
-            r.seconds = t0.elapsed().as_secs_f64();
-            (v, r)
-        })
-    }
-
-    /// The GFN2 pair (gas, then solvated) with its retries: both
-    /// halves always at the same rung.
-    fn run_pair<T>(&mut self, mut f: impl FnMut(&mut axtb::Calculator) -> Result<T>) -> Result<(T, T, Rung, [f64; 2])> {
-        let (etemp0, iter0) = self.gfn2_base;
-        let mut rungs: Vec<(f64, usize, Option<String>)> = vec![(etemp0, iter0, None)];
-        if self.options.retries {
-            for (t, m) in PAIR_RETRIES {
-                let m = m.max(iter0);
-                rungs.push((t.unwrap_or(etemp0), m, Some(retry_label(t, m))));
-            }
-        }
-        let mut seconds = [0.0; 2];
-        let mut last = None;
-        for (etemp, max_iter, retry) in rungs {
-            for c in [&mut self.gas, &mut self.solvated] {
-                c.options.scf.etemp = etemp;
-                c.options.scf.max_iter = max_iter;
-                if !self.reuse_guess {
-                    c.reset_guess();
-                }
-            }
-            let t0 = Instant::now();
-            let gas = f(&mut self.gas);
-            seconds[0] += t0.elapsed().as_secs_f64();
-            let gas = match gas {
-                Ok(v) => v,
-                Err(e) if not_converged(&e) => {
-                    last = Some(e);
-                    continue;
-                }
-                Err(e) => {
-                    last = Some(e);
-                    break;
-                }
-            };
-            let t0 = Instant::now();
-            let solv = f(&mut self.solvated);
-            seconds[1] += t0.elapsed().as_secs_f64();
-            match solv {
-                Ok(solv) => {
-                    self.restore_pair();
-                    return Ok((gas, solv, Rung { etemp, max_iter, retry, seconds: 0.0 }, seconds));
-                }
-                Err(e) if not_converged(&e) => last = Some(e),
-                Err(e) => {
-                    last = Some(e);
-                    break;
-                }
-            }
-        }
-        self.restore_pair();
-        Err(last.expect("at least one rung"))
-    }
-
-    fn restore_pair(&mut self) {
-        let (etemp, max_iter) = self.gfn2_base;
-        for c in [&mut self.gas, &mut self.solvated] {
-            c.options.scf.etemp = etemp;
-            c.options.scf.max_iter = max_iter;
-        }
-    }
-
-    /// The zero check on the first geometry.
-    fn check(&mut self, dg: f64) -> Result<()> {
-        if self.checked {
-            return Ok(());
-        }
-        if !dg.is_finite() || dg.abs() < 1e-9 {
-            return Err(Error::Numerical(format!(
-                "the {} model for {} did not change the GFN2-xTB energy (dG_solv = {dg:.3e} Eh): refusing to report \
-                 gas-phase energies as solvated",
-                model_label(self.options.solvation.model).to_ascii_uppercase(),
-                self.options.solvation.solvent
-            )));
-        }
-        self.checked = true;
-        Ok(())
-    }
-
-    fn part(&self, k: usize, energy: f64, sp: Option<&SinglePoint>, rung: &Rung, seconds: f64) -> PartInfo {
-        let (gconv, fconv) = self.conventions_labels();
-        let (method, conventions) = match k {
-            0 => (self.options.version.method().to_string(), gconv),
-            1 => (format!("{}+{}", self.options.correction.name(), model_label(self.options.solvation.model)), fconv),
-            _ => (self.options.correction.name().to_string(), fconv),
-        };
-        PartInfo {
-            method,
-            conventions,
-            energy,
-            iterations: sp.map_or(0, |s| s.iterations),
-            mixer_used: sp.and_then(|s| s.mixer_used),
-            scf_attempts: sp.map_or_else(Vec::new, |s| s.scf_attempts.clone()),
-            etemp: rung.etemp,
-            max_iter: rung.max_iter,
-            retry: rung.retry.clone(),
-            seconds,
-            hessian_method: None,
-        }
-    }
-
-    /// Energy (and with `gradient` the gradient, Eh/bohr) of the composite at `positions`
-    /// (bohr).
-    pub fn singlepoint(&mut self, positions: &[[f64; 3]], gradient: bool) -> Result<CompositeResults> {
-        let t0 = Instant::now();
-        let (gx, grung) = self.run_gxtb(|c| c.singlepoint(positions, gradient))?;
-        let (gas, solv, prung, secs) = self.run_pair(|c| c.singlepoint(positions, gradient))?;
-        let dg = solv.energy - gas.energy;
-        self.check(dg)?;
-        let dgrad = match (&solv.gradient, &gas.gradient) {
-            (Some(s), Some(g)) => Some(add(s, g, -1.0)),
-            _ => None,
-        };
-        let mut sp = gx.singlepoint.clone();
-        sp.energy = gx.singlepoint.energy + dg;
-        sp.terms.solvation = dg;
-        sp.gradient = match (&gx.singlepoint.gradient, &dgrad) {
-            (Some(g), Some(d)) => Some(add(g, d, 1.0)),
-            _ => None,
-        };
-        sp.timings = vec![
-            ("gxtb", grung.seconds),
-            ("gfn2 gas", secs[0]),
-            ("gfn2 solvated", secs[1]),
-            ("total", t0.elapsed().as_secs_f64()),
+    /// The composite's definition and settings, as its reports carry them.
+    fn describe(&self) -> Vec<(&'static str, Detail)> {
+        let o = &self.options;
+        let (model, state) = self.solvation_labels();
+        let (conventions, correction_conventions) = self.conventions_labels();
+        let (gxtb, gfn2) = self.etemps();
+        let mut out = vec![
+            ("definition", Detail::Text(self.definition())),
+            ("method", Detail::Name(o.version.method())),
+            ("solvation_correction", Detail::Name(o.correction.name())),
+            ("solvation_model", Detail::Name(model)),
+            ("solvent", Detail::Text(o.solvation.solvent.clone())),
+            ("solvation_state", Detail::Name(state)),
+            ("conventions", Detail::Name(conventions)),
+            ("correction_conventions", Detail::Name(correction_conventions)),
+            ("etemp", Detail::Group(vec![("gxtb", Detail::Number(gxtb)), ("gfn2", Detail::Number(gfn2))])),
+            ("reuse_guess", Detail::Flag(self.reuses_guess())),
+            ("gxtb_reuse_guess", Detail::Flag(self.gxtb_reuses_guess())),
+            ("retries", Detail::Flag(o.retries && o.scf_retries.is_none())),
         ];
-        let parts = [
-            self.part(0, gx.singlepoint.energy, Some(&gx.singlepoint), &grung, grung.seconds),
-            self.part(1, solv.energy, Some(&solv), &prung, secs[1]),
-            self.part(2, gas.energy, Some(&gas), &prung, secs[0]),
-        ];
-        Ok(CompositeResults {
-            singlepoint: sp,
-            gxtb: gx,
-            gfn2_solvated: solv,
-            gfn2_gas: gas,
-            solvation_energy: dg,
-            solvation_gradient: dgrad,
-            parts,
-        })
+        if let Some(given) = &o.scf_retries {
+            out.push(("scf_retries", Detail::Text(retries_text(given))));
+        }
+        out
+    }
+}
+
+impl Method for CompositeCalculator {
+    fn info(&self) -> &MethodInfo {
+        self.inner.info()
     }
 
-    /// Hessian of the composite at `positions` (bohr): H_gxtb + H_GFN2+solv - H_GFN2.
-    ///
-    /// `method` applies to all parts; `None`: each part's default (g-xTB 2.0.1 and GFN2-xTB
-    /// analytic, g-xTB v1.1 numerical). `step` and `accuracy` apply to all parts when given,
-    /// else each part's defaults (see [`Calculator::hessian`] and `axtb::Calculator::hessian`).
-    pub fn hessian(
-        &mut self,
-        positions: &[[f64; 3]],
-        method: Option<HessianMethod>,
-        step: Option<f64>,
-        accuracy: Option<f64>,
-    ) -> Result<CompositeHessian> {
-        let t0 = Instant::now();
-        let gm = method.unwrap_or_else(|| self.gxtb.default_hessian_method());
-        let gopts = HessianOptions { method: gm, step, accuracy };
-        let (hg, grung) = self.run_gxtb(|c| c.hessian(positions, &gopts))?;
-        let fopts = HessianOptions { method: method.unwrap_or(HessianMethod::Analytic), step, accuracy };
-        let (hgas, hsolv, prung, secs) = self.run_pair(|c| c.hessian(positions, &fopts))?;
-        let dg = hsolv.energy - hgas.energy;
-        self.check(dg)?;
-        let n = hg.hessian.len();
-        let mut h = Vec::with_capacity(n);
-        for i in 0..n {
-            h.push(hg.hessian[i] + (hsolv.hessian[i] - hgas.hessian[i]));
+    fn check(&self, want: &Want, hessian: Option<&HessianOptions>) -> Result<()> {
+        self.inner.check(want, hessian)
+    }
+
+    /// E_gxtb + ΔG_solv and its gradient; the charges, electronic structure and terms are
+    /// g-xTB's, with `solvation_correction` (ΔG_solv) after them; the orbitals and bond orders
+    /// `want` asks for are g-xTB's. The report ([`Extras::composite`](axtb::method::Extras))
+    /// has the definition and settings, the components and how each part converged.
+    fn singlepoint(&mut self, positions: &[[f64; 3]], want: &Want) -> Result<SinglePoint> {
+        self.inner.singlepoint(positions, want)
+    }
+
+    /// H_gxtb + H_GFN2+solv - H_GFN2. A Hessian method given applies to all parts; `None`: each
+    /// part's default (g-xTB 2.0.1 and GFN2-xTB analytic, g-xTB v1.1 numerical); so do the step
+    /// and the accuracy. The method and the dipole derivatives (IR intensities) are g-xTB's.
+    fn hessian(&mut self, positions: &[[f64; 3]], opts: &HessianOptions) -> Result<axtb::Hessian> {
+        self.inner.hessian(positions, opts)
+    }
+
+    fn wavefunction(&self) -> Option<Wavefunction> {
+        self.inner.wavefunction()
+    }
+
+    /// The parts' wavefunctions of another composite of this method and molecule; starting
+    /// moments are refused as for g-xTB alone.
+    fn set_wavefunction(&mut self, wf: &Wavefunction) -> Result<()> {
+        if matches!(wf.data(), WavefunctionData::Scf(d) if d.densities.is_empty()) {
+            return Err(Error::Input(
+                "starting moments are GFN2-only; g-xTB starts from a whole wavefunction (the guess of another \
+                 calculator)"
+                    .into(),
+            ));
         }
-        let gradient = add(&hg.gradient, &add(&hsolv.gradient, &hgas.gradient, -1.0), 1.0);
-        let total = axtb::Hessian {
-            energy: hg.energy + dg,
-            gradient,
-            hessian: h,
-            max_asymmetry: hg.max_asymmetry.max(hsolv.max_asymmetry).max(hgas.max_asymmetry),
-            method: hg.method,
-            // the dipole is the g-xTB part's (IR intensities of the composite Hessian)
-            dipole_derivatives: hg.dipole_derivatives.clone(),
-            timings: vec![
-                ("gxtb", grung.seconds),
-                ("gfn2 gas", secs[0]),
-                ("gfn2 solvated", secs[1]),
-                ("total", t0.elapsed().as_secs_f64()),
-            ],
-        };
-        let mut parts = [
-            self.part(0, hg.energy, None, &grung, grung.seconds),
-            self.part(1, hsolv.energy, None, &prung, secs[1]),
-            self.part(2, hgas.energy, None, &prung, secs[0]),
-        ];
-        for (p, m) in parts.iter_mut().zip([hg.method, hsolv.method, hgas.method]) {
-            p.hessian_method = Some(m);
+        self.inner.set_wavefunction(wf)
+    }
+
+    fn reset_wavefunction(&mut self) {
+        self.inner.reset_wavefunction()
+    }
+
+    /// The parts' own previous wavefunctions (refused as `set_wavefunction` refuses).
+    fn set_history(&mut self, wf: Option<&Wavefunction>) -> Result<()> {
+        if let Some(w) = wf {
+            if matches!(w.data(), WavefunctionData::Scf(d) if d.densities.is_empty()) {
+                return Err(Error::Input(
+                    "starting moments are GFN2-only; g-xTB starts from a whole wavefunction (the guess of another \
+                     calculator)"
+                        .into(),
+                ));
+            }
         }
-        Ok(CompositeHessian { total, gxtb: hg, gfn2_solvated: hsolv, gfn2_gas: hgas, solvation_energy: dg, parts })
+        self.inner.set_history(wf)
+    }
+
+    fn set_scf_accuracy(&mut self, accuracy: f64) -> Result<()> {
+        self.inner.set_scf_accuracy(accuracy)
+    }
+
+    fn tries(&self) -> Vec<Try> {
+        self.inner.tries()
+    }
+
+    /// The g-xTB part's SCF from given densities (its wavefunction is the composite's).
+    fn set_density(&mut self, densities: Vec<Vec<f64>>) -> Result<()> {
+        self.inner.set_density(densities)
+    }
+
+    /// The composite with its three parts forked onto `threads` (one pool, as built).
+    fn fork(&self, threads: &Threads) -> Result<Box<dyn Method>> {
+        Ok(Box::new(Self {
+            options: CompositeOptions { threads: threads.count(), ..self.options.clone() },
+            inner: self.inner.forked(threads)?,
+            gxtb_base: self.gxtb_base,
+            gfn2_base: self.gfn2_base,
+            reuse_guess: self.reuse_guess,
+            gxtb_reuse_guess: self.gxtb_reuse_guess,
+        }))
     }
 }

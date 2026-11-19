@@ -1,9 +1,12 @@
 # Release builds and publishing.
 #
-# On a tag vX.Y.Z (the workspace version): build the manylinux_2_28 wheel, the sdist and the
-# stripped CLI; attach the CLI, the wheel and the sdist to a GitHub release of the tag; publish
-# the wheel and the sdist to PyPI (trusted publishing, no token) and the crates to crates.io (in
-# dependency order, with the CARGO_REGISTRY_TOKEN secret).
+# On a tag vX.Y.Z or vX.Y.Z-alpha.N (the workspace version): build the manylinux_2_28 wheel, the
+# sdist and the stripped CLI; attach the CLI, the wheel and the sdist to a GitHub release of the
+# tag (a pre-release when the version has a pre-release part); publish the wheel and the sdist to
+# PyPI (trusted publishing, no token; maturin writes 0.2.0-alpha.1 as the PEP 440 version 0.2.0a1)
+# and the crates to crates.io (in dependency order, with the CARGO_REGISTRY_TOKEN secret; the
+# workspace's path dependencies carry the exact version, "=X.Y.Z-alpha.N", so a pre-release's
+# crates depend on each other and on no other pre-release).
 #
 # Run by hand (workflow_dispatch): the same builds as workflow artifacts; with "publish" set, also
 # PyPI and crates.io (no GitHub release without a tag).
@@ -64,19 +67,21 @@ jobs:
         run: |
           set -eu
           ls -l dist
-          whl=$(ls dist/axtb-*-cp310-abi3-manylinux_2_28_x86_64.whl)
+          whl=$(ls dist/axtb-*-cp311-abi3-manylinux_2_28_x86_64.whl)
           unzip -p "$whl" axtb/_build.py | grep -q 'X86_64_V3 = True'
           for f in COPYING COPYING.LESSER LICENSE NOTICE; do
             unzip -l "$whl" | grep -q "dist-info/licenses/$f\$"
           done
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          # the oldest supported Python (requires-python, the abi3 floor)
+          python-version: "3.11"
       - name: install the wheel and run a calculation
         run: |
+          # qcdata's pre-releases come with the wheel: its requirement names one
           python -m pip install dist/axtb-*.whl
           cd "$RUNNER_TEMP"
-          python -c 'import axtb; r = axtb.singlepoint([8, 1, 1], [[0, 0, 0.22], [0, 1.43, -0.89], [0, -1.43, -0.89]], method="gxtb-v2.0.1", gradient=True); print(axtb.__version__, r["energy"])'
+          python "$GITHUB_WORKSPACE/.github/smoke.py"
       - uses: actions/upload-artifact@v7
         with:
           name: wheel
@@ -100,7 +105,7 @@ jobs:
         run: |
           python -m pip install "$PWD"/dist/axtb-*.tar.gz
           cd "$RUNNER_TEMP"
-          python -c 'import axtb; print(axtb.__version__, axtb.singlepoint([8, 1, 1], [[0, 0, 0.22], [0, 1.43, -0.89], [0, -1.43, -0.89]])["energy"])'
+          python "$GITHUB_WORKSPACE/.github/smoke.py"
       - uses: actions/upload-artifact@v7
         with:
           name: sdist
@@ -157,10 +162,14 @@ jobs:
       - name: create the release with the CLI, the wheel and the sdist
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY"
-          --title "axtb ${{ needs.version.outputs.version }}"
-          --notes "See CHANGELOG.md for what this release contains."
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          # a version with a pre-release part (0.2.0-alpha.1) makes a GitHub pre-release
+          pre=()
+          case "$VERSION" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" "${pre[@]}" \
+            --title "axtb $VERSION" --notes "See CHANGELOG.md for what this release contains."
 
   pypi:
     name: publish to PyPI
@@ -198,7 +207,12 @@ jobs:
           set -eu
           [ -n "$CARGO_REGISTRY_TOKEN" ] || { echo "::error::the CARGO_REGISTRY_TOKEN secret is not set"; exit 1; }
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          for crate in axtb-d4 axtb-solvation axtb axtb-gfnff axtb-gxtb axtb-driver axtb-cli; do
+          # every path dependency carries this exact version (the published manifests keep it)
+          if grep -E '^axtb[a-z0-9-]* = \{ path = ' Cargo.toml | grep -vq "version = \"=$version\""; then
+            echo "::error::a workspace dependency does not require exactly $version"
+            exit 1
+          fi
+          for crate in axtb-base axtb-d4 axtb-solvation axtb axtb-gfnff axtb-gxtb axtb-driver axtb-cli; do
             # a rerun after a partial failure skips what is already there
             if curl -sf -A "axtb-release (github.com/atomsforhumanity/axtb)" \
                 "https://crates.io/api/v1/crates/$crate/$version" > /dev/null; then

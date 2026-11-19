@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Analytic nuclear Hessian of the SCC tight-binding energy.
 //!
 //! With the gradient written as a functional `g_x(R; P, W, s)` of the density, the
@@ -15,25 +16,24 @@
 //! - `u^x` the skeleton response of the SCC variables (including `b^x = −Tr(P ∂O/∂x)`),
 //!   `c^x = ∂V/∂x|_s`, `K = ∂²E/∂s∂s` and `δs` the coupled-perturbed SCC response.
 //!
-//! The expression is symmetric term by term (see `response.rs` for the derivation of
-//! the response quantities).
+//! The expression is symmetric term by term (see `response/occupation.rs` and `response/scc.rs`
+//! for the derivation of the response quantities).
 
-use crate::error::Result;
 use crate::molecule::Molecule;
 use crate::response::Response;
-use crate::xtb::{ChargeDependentTerm, ScfState, XtbModel};
+use crate::terms::{Chain2, GeometryTerm, MomentTerm};
+use crate::xtb::{ScfState, XtbModel};
+use crate::Result;
 use faer::{Accum, Mat};
-use rayon::prelude::*;
 
 /// Analytic Hessian (row-major 3N x 3N), dipole derivatives (3N rows ∂μ/∂R_x) and timings.
 pub(crate) fn analytic_hessian(
     model: &XtbModel,
-    extra: &[&dyn ChargeDependentTerm],
     mol: &Molecule,
     st: &ScfState,
     threads: usize,
 ) -> Result<crate::hessian::HessianParts> {
-    let resp = Response::new(model, extra, mol, st, threads);
+    let resp = Response::new(model, mol, st, threads);
     let r = resp.scc_response(true)?;
     let dipd = resp.dipole_derivatives(&r.ds);
     let mut timings = r.timings.clone();
@@ -49,7 +49,7 @@ pub(crate) fn analytic_hessian(
     }
     for c in 0..nat {
         for x in 0..n3 {
-            t[(n3 + c, x)] = resp.jac[c * n3 + x];
+            t[(n3 + c, x)] = resp.jac()[c * n3 + x];
         }
     }
     let hs = r.hskel.as_ref().expect("skeleton Hessian");
@@ -91,7 +91,7 @@ pub(crate) fn explicit(
     let t0 = std::time::Instant::now();
     let mut h = extra_hessian.to_vec();
     h.resize(n3 * n3, 0.0);
-    let vao = st.pot.vao(bas);
+    let vao = crate::xtb::vao(&st.pot, bas);
     let geo = &st.geo;
     model.h0.add_hessian(
         mol,
@@ -102,72 +102,24 @@ pub(crate) fn explicit(
         &st.density,
         &st.wdensity,
         &vao,
-        &st.pot.vdp,
-        &st.pot.vqp,
+        &st.pot.dipole,
+        &st.pot.quadrupole,
         &model.ncoord,
-        &resp.jac,
+        resp.jac(),
         &mut h,
         parallel,
     );
     timings.push(("explicit: integrals", t0.elapsed().as_secs_f64()));
     let t0 = std::time::Instant::now();
-    model.es2.add_hessian(mol, &bas.ish_at, &bas.nsh_at, &st.qsh, &mut h);
+    let tg = model.term_geometry(mol, geo, parallel);
+    let s = st.moments();
+    let h2 = &mut Chain2 { h: &mut h, jacobians: &resp.jacobians };
+    let seconds = "GFN2-xTB's analytic second derivatives cannot fail";
+    model.es2.second_derivatives(&tg, &geo.gamma, &s, None, Some(&mut *h2)).expect(seconds);
     if let (Some(aes), Some(cache)) = (&model.aes2, &geo.mp_cache) {
-        aes.add_hessian(mol, cache, &geo.cn, &resp.jac, &st.qat, &st.dpat, &st.qpat, &mut h);
+        aes.second_derivatives(&tg, cache, &s, None, Some(&mut *h2)).expect(seconds);
     }
-    model.repulsion.add_hessian(mol, &mut h);
+    model.repulsion.add_hessian(&tg, &(), h2).expect(seconds);
     timings.push(("explicit: electrostatics+repulsion", t0.elapsed().as_secs_f64()));
     h
-}
-
-/// Explicit second derivatives by central differences of the gradient functional at fixed
-/// P, W and SCC variables, minus the potential response `b^x·c^y` that this includes
-/// (validation path).
-#[allow(dead_code)]
-pub(crate) fn explicit_fd(resp: &Response, c: &Mat<f64>, threads: usize) -> Vec<f64> {
-    let st = resp.st;
-    let mol = resp.mol;
-    let lay = resp.lay;
-    let n3 = 3 * lay.nat;
-    let h = crate::xtb::FD_STEP;
-    let column = |y: usize| -> Vec<f64> {
-        let (a, k) = (y / 3, y % 3);
-        let mut g = [Vec::new(), Vec::new()];
-        for (i, sign) in [1.0, -1.0].into_iter().enumerate() {
-            let mut mm = mol.clone();
-            mm.positions[a][k] += sign * h;
-            g[i] = resp.model.gradient_functional(
-                &mm,
-                resp.extra,
-                &st.density,
-                &st.wdensity,
-                &st.qsh,
-                &st.dpat,
-                &st.qpat,
-                false,
-            );
-        }
-        (0..n3).map(|x| (g[0][x / 3][x % 3] - g[1][x / 3][x % 3]) / (2.0 * h)).collect()
-    };
-    let cols: Vec<Vec<f64>> =
-        if threads > 1 { (0..n3).into_par_iter().map(column).collect() } else { (0..n3).map(column).collect() };
-    let mut out = vec![0.0; n3 * n3];
-    for (y, col) in cols.iter().enumerate() {
-        for x in 0..n3 {
-            out[x * n3 + y] = col[x];
-        }
-    }
-    // subtract b^x · c^y
-    let m = lay.dim();
-    for x in 0..n3 {
-        let b = &resp.blocks[x / 3].b[x % 3];
-        for y in 0..n3 {
-            let mut acc = 0.0;
-            for t in 0..m {
-                acc += b[t] * c[(t, y)];
-            }
-            out[x * n3 + y] -= acc;
-        }
-    }
-    out
 }

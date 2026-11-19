@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Validation of the coupled-perturbed SCC response and the Hessians against finite
 //! differences (run with `cargo test --release -p axtb --lib response -- --nocapture`).
 
+use crate::method::{Method, Want};
 use crate::molecule::Molecule;
 use crate::response::Response;
-use crate::xtb::ChargeDependentTerm;
-use crate::{Conventions, Method, Options};
+use crate::{Conventions, Hamiltonian, Options};
 
 pub fn mol_from(xyz: &str, charge: f64, uhf: Option<usize>) -> Molecule {
     let (num, pos) = crate::io::read_xyz(xyz, crate::units::AATOAU).unwrap();
@@ -27,14 +28,18 @@ pub fn tight(conv: Conventions, alpb: bool) -> Options {
 /// δs/δR against central differences of converged SCF moments for coordinates `xs`;
 /// returns the largest error relative to the largest component of each column.
 pub fn check_scc_response(mol: &Molecule, o: &Options, xs: &[usize]) -> f64 {
-    let (model, extra_box) = crate::build_method(Method::Gfn2, mol, o).unwrap();
-    let extra: Vec<&dyn ChargeDependentTerm> = extra_box.iter().map(|b| b.as_ref()).collect();
-    let (sp, st) = model.singlepoint_state(mol, &extra, &o.scf, None, false, true).unwrap();
+    let (model, extra_box) = crate::build_method(Hamiltonian::Gfn2, mol, o).unwrap();
+    let extra = extra_box;
+    let (sp, st) = model.singlepoint_state(mol, &extra, &o.run(1, &Want::ENERGY), None, false, true).unwrap();
     let st = st.unwrap();
-    let resp = Response::new(&model, &extra, mol, &st, 1);
+    let resp = Response::new(&model, mol, &st, 1);
     eprintln!(
         "nao {} n_o {} n_f {} kT {:.3e} Z {:?}",
-        model.basis.nao, resp.occ.n_o, resp.occ.n_f, resp.occ.kt, resp.occ.z
+        model.basis.nao,
+        resp.occ.n_o(),
+        resp.n_f,
+        resp.st.kt,
+        resp.occ.z()
     );
     let r = resp.scc_response(false).unwrap();
     let lay = resp.lay;
@@ -48,8 +53,8 @@ pub fn check_scc_response(mol: &Molecule, o: &Options, xs: &[usize]) -> f64 {
         for (i, sign) in [1.0, -1.0].into_iter().enumerate() {
             let mut mm = mol.clone();
             mm.positions[a][k] += sign * h;
-            let sp = model.singlepoint(&mm, &extra, &o.scf, Some(&guess), false).unwrap();
-            lay.pack(&sp.qsh, &sp.dpat, &sp.qpat, &mut s[i]);
+            let sp = model.singlepoint(&mm, &extra, &o.run(1, &Want::ENERGY), Some(&guess), false).unwrap();
+            lay.pack(&sp.qsh, &sp.dpat, &sp.qpat, None, &mut s[i]);
         }
         let fd: Vec<f64> = (0..m).map(|t| (s[0][t] - s[1][t]) / (2.0 * h)).collect();
         let scale = fd.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
@@ -78,12 +83,11 @@ pub fn check_scc_response(mol: &Molecule, o: &Options, xs: &[usize]) -> f64 {
 
 /// Explicit potential derivatives `∂V/∂R|_s` against central differences of the potentials.
 pub fn check_potential_derivative(mol: &Molecule, o: &Options) -> f64 {
-    use crate::xtb::Potential;
-    let (model, extra_box) = crate::build_method(Method::Gfn2, mol, o).unwrap();
-    let extra: Vec<&dyn ChargeDependentTerm> = extra_box.iter().map(|b| b.as_ref()).collect();
-    let (_, st) = model.singlepoint_state(mol, &extra, &o.scf, None, false, true).unwrap();
+    let (model, extra_box) = crate::build_method(Hamiltonian::Gfn2, mol, o).unwrap();
+    let extra = extra_box;
+    let (_, st) = model.singlepoint_state(mol, &extra, &o.run(1, &Want::ENERGY), None, false, true).unwrap();
     let st = st.unwrap();
-    let resp = Response::new(&model, &extra, mol, &st, 1);
+    let resp = Response::new(&model, mol, &st, 1);
     let c = resp.potential_derivative(None);
     let lay = resp.lay;
     let (nat, nsh) = (lay.nat, lay.nsh);
@@ -96,16 +100,11 @@ pub fn check_potential_derivative(mol: &Molecule, o: &Options) -> f64 {
         for (i, sign) in [1.0, -1.0].into_iter().enumerate() {
             let mut mm = mol.clone();
             mm.positions[a][k] += sign * h;
-            let geo = model.geometry(&mm, &extra);
-            let mut pot = Potential {
-                vat: vec![0.0; nat],
-                vsh: vec![0.0; nsh],
-                vdp: vec![[0.0; 3]; nat],
-                vqp: vec![[0.0; 6]; nat],
-            };
-            model.potentials(&mm, &extra, &geo, &st.qsh, &st.qat, &st.dpat, &st.qpat, &mut pot, false);
-            let vsh: Vec<f64> = (0..nsh).map(|s| pot.vsh[s] + pot.vat[model.basis.sh2at[s]]).collect();
-            lay.pack(&vsh, &pot.vdp, &pot.vqp, &mut v[i]);
+            let geo = model.geometry(&mm, &extra, false).unwrap();
+            let mut pot = crate::terms::Potentials::new(nsh, nat, false);
+            model.potentials(&mm, &geo, &st.qsh, &st.qat, &st.dpat, &st.qpat, &mut pot, false);
+            let vsh: Vec<f64> = (0..nsh).map(|s| pot.shell[s] + pot.atom[model.basis.sh2at[s]]).collect();
+            lay.pack(&vsh, &pot.dipole, &pot.quadrupole, None, &mut v[i]);
         }
         let mut err = [0.0f64; 3];
         let mut scale: f64 = 0.0;
@@ -146,8 +145,9 @@ pub fn hessian(
     acc: Option<f64>,
 ) -> crate::Hessian {
     let mut calc =
-        crate::Calculator::new(Method::Gfn2, &mol.numbers, &mol.positions, mol.charge, mol.uhf, o.clone()).unwrap();
-    let h = calc.hessian(&mol.positions, &crate::HessianOptions { method, step, accuracy: acc }).unwrap();
+        crate::Calculator::new(Hamiltonian::Gfn2, &mol.numbers, &mol.positions, mol.charge, mol.uhf, o.clone())
+            .unwrap();
+    let h = calc.hessian(&mol.positions, &crate::HessianOptions { method: Some(method), step, accuracy: acc }).unwrap();
     eprintln!("{:?}: asym {:.2e} timings {:?}", method, h.max_asymmetry, h.timings);
     h
 }
@@ -225,7 +225,7 @@ fn diagnose_alpb_smoothness() {
     for t in -8..=8 {
         let mut m = mol.clone();
         m.positions[y / 3][y % 3] += t as f64 * 2.5e-4;
-        let g = crate::singlepoint(Method::Gfn2, &m, &o, true).unwrap().gradient.unwrap();
+        let g = crate::singlepoint(Hamiltonian::Gfn2, &m, &o, &Want::gradient(true)).unwrap().gradient.unwrap();
         eprintln!("{:+.5} {:.12}", t as f64 * 2.5e-4, g[x / 3][x % 3]);
     }
 }
@@ -253,9 +253,9 @@ fn fd_check(name: &str, mol: &Molecule, hess: &[f64], grad: impl Fn(&Molecule) -
 
 /// Explicit second derivatives of the electrostatic and repulsion terms at fixed moments.
 pub fn check_term_hessians(mol: &Molecule, o: &Options) -> f64 {
-    let (model, extra_box) = crate::build_method(Method::Gfn2, mol, o).unwrap();
-    let extra: Vec<&dyn ChargeDependentTerm> = extra_box.iter().map(|b| b.as_ref()).collect();
-    let (_, st) = model.singlepoint_state(mol, &extra, &o.scf, None, false, true).unwrap();
+    let (model, extra_box) = crate::build_method(Hamiltonian::Gfn2, mol, o).unwrap();
+    let extra = extra_box;
+    let (_, st) = model.singlepoint_state(mol, &extra, &o.run(1, &Want::ENERGY), None, false, true).unwrap();
     let st = st.unwrap();
     let bas = &model.basis;
     let n3 = 3 * mol.nat();
@@ -265,7 +265,7 @@ pub fn check_term_hessians(mol: &Molecule, o: &Options) -> f64 {
     model.es2.add_hessian(mol, &bas.ish_at, &bas.nsh_at, &st.qsh, &mut h);
     worst = worst.max(fd_check("ES2", mol, &h, |m| {
         let mut g = vec![[0.0; 3]; m.nat()];
-        model.es2.add_gradient(m, &bas.ish_at, &bas.nsh_at, &st.qsh, &mut g);
+        model.es2.add_gradient(m, &bas.ish_at, &bas.nsh_at, &st.qsh, &mut g, false);
         g
     }));
     // AES
@@ -273,18 +273,26 @@ pub fn check_term_hessians(mol: &Molecule, o: &Options) -> f64 {
         let mut h = vec![0.0; n3 * n3];
         let cn = model.ncoord.compute(mol);
         let jac = model.ncoord.jacobian(mol);
-        let cache = aes.update(mol, &cn);
+        let cache = aes.cache(mol, &cn);
         aes.add_hessian(mol, &cache, &cn, &jac, &st.qat, &st.dpat, &st.qpat, &mut h);
         worst = worst.max(fd_check("AES", mol, &h, |m| {
-            let mut g = vec![[0.0; 3]; m.nat()];
-            let cache = aes.update(m, &model.ncoord.compute(m));
-            aes.add_gradient(m, &cache, &st.qat, &st.dpat, &st.qpat, &mut g);
-            g
+            let values = model.layout.compute(m).unwrap();
+            let geo = crate::terms::Geometry { mol: m, layout: &model.layout, values: &values, parallel: false };
+            let cache = aes.cache(m, values.get(model.cn));
+            let mut chain = crate::terms::Chain::new(&model.layout, m.nat());
+            aes.add_gradient(&geo, &cache, &st.qat, &st.dpat, &st.qpat, &mut chain);
+            chain.finish(&geo).unwrap()
         }));
     }
     // repulsion
     let mut h = vec![0.0; n3 * n3];
-    model.repulsion.add_hessian(mol, &mut h);
+    {
+        use crate::terms::{Chain2, Geometry, GeometryTerm, Jacobians};
+        let values = model.layout.compute(mol).unwrap();
+        let geo = Geometry { mol, layout: &model.layout, values: &values, parallel: false };
+        let jac = Jacobians::new(&model.layout);
+        model.repulsion.add_hessian(&geo, &(), &mut Chain2 { h: &mut h, jacobians: &jac }).unwrap();
+    }
     worst = worst.max(fd_check("repulsion", mol, &h, |m| {
         let mut g = vec![[0.0; 3]; m.nat()];
         let mut e = vec![0.0; m.nat()];
@@ -388,10 +396,11 @@ fn analytic_hessian_single_atom_and_threads() {
     assert!(h.hessian.iter().all(|x| x.abs() < 1e-12), "single atom: {:?}", h.hessian);
     // the analytic Hessian does not depend on the thread count beyond round-off
     let mol = caffeine();
-    let mut calc1 = crate::Calculator::new(Method::Gfn2, &mol.numbers, &mol.positions, 0.0, None, o.clone()).unwrap();
+    let mut calc1 =
+        crate::Calculator::new(Hamiltonian::Gfn2, &mol.numbers, &mol.positions, 0.0, None, o.clone()).unwrap();
     let mut o8 = o.clone();
-    o8.scf.threads = 4;
-    let mut calc8 = crate::Calculator::new(Method::Gfn2, &mol.numbers, &mol.positions, 0.0, None, o8).unwrap();
+    o8.threads = 4;
+    let mut calc8 = crate::Calculator::new(Hamiltonian::Gfn2, &mol.numbers, &mol.positions, 0.0, None, o8).unwrap();
     let ho = crate::HessianOptions::default();
     let h1 = calc1.hessian(&mol.positions, &ho).unwrap();
     let h8 = calc8.hessian(&mol.positions, &ho).unwrap();

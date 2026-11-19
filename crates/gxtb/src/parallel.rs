@@ -1,69 +1,17 @@
-//! Deterministic parallel loops: work is cut into fixed chunks that do not depend on the
-//! thread count, each chunk is evaluated on its own (on the current rayon pool when
-//! `parallel`, in order otherwise) and the chunk results are returned in chunk order, so that
-//! reductions over them give the same bits for every thread count. Without `parallel` no rayon
-//! call is made (a calculation with one thread spawns no threads).
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//! g-xTB's deterministic parallel loops on top of `axtb_base::threads`: work is cut into
+//! fixed chunks that do not depend on the thread count, each chunk is evaluated on its own (on
+//! the current rayon pool when `parallel`, in order otherwise) and the chunk results are
+//! combined in chunk order, so that reductions over them give the same bits for every thread
+//! count. Without `parallel` no rayon call is made (a calculation with one thread spawns no
+//! threads).
+//!
+//! The basic loops (`map`, `map_chunks` over the fixed `chunks`, `for_slices`) and the rule for
+//! parallel dense linear algebra (`dense_par`, `DENSE_MIN_AO`) are axtb-base's; this module
+//! adds the tiled fills, sums, row reductions and symmetric-matrix builders of g-xTB's terms.
 
-use axtb::{Error, Result};
-use faer::Par;
+use axtb_base::threads::{for_slices, map_chunks, NCHUNK};
 use rayon::prelude::*;
-use std::ops::Range;
-
-/// Basis size from which the dense linear algebra (matrix products, eigensolver) of a
-/// calculation on more than one thread runs in parallel; below it the threads' start-up costs
-/// more than they save (as for GFN2-xTB).
-pub const DENSE_MIN_AO: usize = 200;
-
-/// The parallelism of the dense linear algebra of `nao` basis functions on `threads` threads
-/// of the current rayon pool ([`DENSE_MIN_AO`]); 0 threads is an error.
-pub fn dense_par(threads: usize, nao: usize) -> Result<Par> {
-    match threads {
-        0 => Err(Error::Input("threads must be at least 1".into())),
-        t if t > 1 && nao >= DENSE_MIN_AO => Ok(Par::rayon(t)),
-        _ => Ok(Par::Seq),
-    }
-}
-
-/// Number of chunks of a loop (fixed: results do not depend on the thread count).
-pub const NCHUNK: usize = 64;
-
-/// The fixed chunks of `0..n`: at most [`NCHUNK`], of equal size.
-pub fn chunks(n: usize) -> Vec<Range<usize>> {
-    let nc = n.clamp(1, NCHUNK);
-    (0..nc).map(|c| c * n / nc..(c + 1) * n / nc).collect()
-}
-
-/// `f` on every chunk of `0..n` ([`chunks`]), results in chunk order.
-pub fn map_chunks<T: Send>(n: usize, parallel: bool, f: impl Fn(Range<usize>) -> T + Sync + Send) -> Vec<T> {
-    let c = chunks(n);
-    if parallel {
-        c.into_par_iter().map(f).collect()
-    } else {
-        c.into_iter().map(f).collect()
-    }
-}
-
-/// `f` on every index of `0..n`, results in index order (for independent outputs, e.g. matrix
-/// rows; no reduction).
-pub fn map_items<T: Send>(n: usize, parallel: bool, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
-    if parallel {
-        (0..n).into_par_iter().map(f).collect()
-    } else {
-        (0..n).map(f).collect()
-    }
-}
-
-/// Run `f(row, row data)` on the rows (of length `len`) of `out`, in parallel when `parallel`.
-pub fn for_rows(out: &mut [f64], len: usize, parallel: bool, f: impl Fn(usize, &mut [f64]) + Sync + Send) {
-    if len == 0 {
-        return;
-    }
-    if parallel {
-        out.par_chunks_mut(len).enumerate().for_each(|(i, r)| f(i, r));
-    } else {
-        out.chunks_mut(len).enumerate().for_each(|(i, r)| f(i, r));
-    }
-}
 
 /// Tile edge of the passes that read a matrix transposed.
 pub const TILE: usize = 32;
@@ -71,7 +19,7 @@ pub const TILE: usize = 32;
 /// `out[i n + j] = f(i, j)` for an n x n row-major `out`, in TILE x TILE tiles (so that reads
 /// of a transposed element stay in cache), tile rows in parallel when `parallel`.
 pub fn fill_tiled(out: &mut [f64], n: usize, parallel: bool, f: impl Fn(usize, usize) -> f64 + Sync + Send) {
-    for_rows(out, TILE * n, parallel, |t, rows| {
+    for_slices(out, TILE * n, parallel, |t, rows| {
         let i0 = t * TILE;
         let i1 = (i0 + TILE).min(n);
         for j0 in (0..n).step_by(TILE) {
@@ -86,6 +34,24 @@ pub fn fill_tiled(out: &mut [f64], n: usize, parallel: bool, f: impl Fn(usize, u
     });
 }
 
+/// `out[i n + j] = f(i, j, out[i n + j])` for an n x n row-major `out`, in the tiles of
+/// [`fill_tiled`].
+pub fn update_tiled(out: &mut [f64], n: usize, parallel: bool, f: impl Fn(usize, usize, f64) -> f64 + Sync + Send) {
+    for_slices(out, TILE * n, parallel, |t, rows| {
+        let i0 = t * TILE;
+        let i1 = (i0 + TILE).min(n);
+        for j0 in (0..n).step_by(TILE) {
+            let j1 = (j0 + TILE).min(n);
+            for i in i0..i1 {
+                let row = &mut rows[(i - i0) * n..(i - i0 + 1) * n];
+                for j in j0..j1 {
+                    row[j] = f(i, j, row[j]);
+                }
+            }
+        }
+    });
+}
+
 /// Sum of `f(k)` over `0..n` in fixed chunks, chunk sums added in order.
 pub fn sum(n: usize, parallel: bool, f: impl Fn(usize) -> f64 + Sync + Send) -> f64 {
     map_chunks(n, parallel, |r| r.map(&f).sum::<f64>()).into_iter().sum()
@@ -94,7 +60,7 @@ pub fn sum(n: usize, parallel: bool, f: impl Fn(usize) -> f64 + Sync + Send) -> 
 /// `f(k, &mut out[k])` for every element, in chunks in parallel when `parallel`.
 pub fn for_each_mut(out: &mut [f64], parallel: bool, f: impl Fn(usize, &mut f64) + Sync + Send) {
     let len = out.len().div_ceil(NCHUNK).max(1);
-    for_rows(out, len, parallel, |c, part| {
+    for_slices(out, len, parallel, |c, part| {
         for (k, x) in part.iter_mut().enumerate() {
             f(c * len + k, x);
         }

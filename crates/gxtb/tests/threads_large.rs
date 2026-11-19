@@ -1,26 +1,28 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! g-xTB 2.0.1 on several threads at a size where the dense linear algebra runs in parallel
-//! (at least `parallel::DENSE_MIN_AO` basis functions, and above the ~313 rows from which the
+//! (at least `axtb_base::threads::DENSE_MIN_AO` basis functions, and above the ~313 rows from which the
 //! eigensolver's tridiagonalization is threaded): energy and gradient on 4 threads equal the
 //! 1-thread results to round-off with the same SCF iterations, and a repeat on 4 threads gives
 //! the same bits. Both conventions, energy and analytic gradient.
 //!
 //! Own test binary: the 4-thread pools would disturb the thread counts of `threads.rs`.
 
-use axtb_gxtb::parallel::DENSE_MIN_AO;
-use axtb_gxtb::{Calculator, Conventions, ScfOptions, Version};
+use axtb::method::{Method, Want};
+use axtb_base::threads::DENSE_MIN_AO;
+use axtb_gxtb::{Calculator, Conventions, Options, Version};
 
 #[test]
 fn threads_agree_on_a_large_molecule() {
     let xyz = include_str!("../../../tests/structures/large/water100.xyz");
     for conventions in [Conventions::Axtb, Conventions::Gxtb] {
-        let mol = axtb_gxtb::v2::read_xyz(xyz, 0.0, None, conventions).unwrap();
-        let nao = axtb_gxtb::v2::scf::Setup::new(&mol, conventions).unwrap().nao;
+        let mol = axtb_gxtb::model::read_xyz(xyz, 0.0, None, conventions).unwrap();
+        let nao = axtb_gxtb::scf::Setup::new(&mol, axtb_gxtb::model::Model::v2_0_1(conventions)).unwrap().nao;
         assert!(nao >= DENSE_MIN_AO.max(314), "{nao} basis functions");
         let run = |threads: usize| {
-            let o = ScfOptions { threads, conventions, ..Default::default() };
+            let o = Options { threads, conventions, ..Default::default() };
             let mut c = Calculator::new(Version::V2_0_1, &mol.numbers, &mol.positions, 0.0, None, o).unwrap();
-            let sp = c.singlepoint(&mol.positions, true).unwrap().singlepoint;
-            (sp.energy, sp.iterations, sp.gradient.unwrap())
+            let sp = c.singlepoint(&mol.positions, &Want::gradient(true)).unwrap();
+            (sp.energy, sp.scf().unwrap().iterations, sp.gradient.unwrap())
         };
         let (e1, it1, g1) = run(1);
         let (e4, it4, g4) = run(4);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Parsers for the three g-xTB v1.1 parameter files.
 //!
 //! The layouts were established from the read statements of the program (`rdpar_`,
@@ -87,8 +88,21 @@ fn take<const N: usize>(v: &[f64], what: &str) -> Result<[f64; N]> {
     Ok(out)
 }
 
+/// The parameters shipped with g-xTB 1.1.0 ([`GxtbParams::v1_1`]), parsed once.
+pub fn gxtb_v1_1() -> &'static GxtbParams {
+    static P: std::sync::OnceLock<GxtbParams> = std::sync::OnceLock::new();
+    P.get_or_init(GxtbParams::v1_1)
+}
+
+/// The EEQ-BC parameters shipped with g-xTB 1.1.0 ([`EeqBcParams::v1_1`]), parsed once.
+pub fn eeqbc_v1_1() -> &'static EeqBcParams {
+    static P: std::sync::OnceLock<EeqBcParams> = std::sync::OnceLock::new();
+    P.get_or_init(EeqBcParams::v1_1)
+}
+
 impl GxtbParams {
-    /// The parameters shipped with g-xTB 1.1.0.
+    /// The parameters shipped with g-xTB 1.1.0 (parsed on every call; [`gxtb_v1_1`] parses
+    /// once).
     pub fn v1_1() -> Self {
         Self::parse(GXTB_PARAMETERS).expect("bundled gxtb_parameters")
     }
@@ -185,9 +199,24 @@ pub struct QvszpParams {
 }
 
 impl QvszpParams {
-    /// The basis shipped with g-xTB 1.1.0.
+    /// The basis shipped with g-xTB 1.1.0 ([`BASISQ`]), from its compiled-in table
+    /// (`data::qvszp`, generated from the file by `scripts/make_qvszp_table.py`: the same numbers
+    /// as [`QvszpParams::parse`] of the file, without parsing ~10,000 numbers at run time).
     pub fn v1_1() -> Self {
-        Self::parse(BASISQ).expect("bundled basisq")
+        let mut elements = vec![None; MAX_ELEM + 1];
+        for (z, el) in crate::data::qvszp::ELEMENTS.iter().enumerate() {
+            elements[z] = el.as_ref().map(|el| QvszpElement {
+                k_cn: el.k[0],
+                k_q2: el.k[1],
+                k_qcn: el.k[2],
+                shells: el
+                    .shells
+                    .iter()
+                    .map(|s| QvszpShell { l: s.l, alpha: s.alpha.to_vec(), c0: s.c0.to_vec(), c1: s.c1.to_vec() })
+                    .collect(),
+            });
+        }
+        Self { elements }
     }
 
     /// Parse the text of a `basisq` file: blocks separated by `*` lines, each with a header
@@ -343,5 +372,26 @@ mod tests {
         assert_eq!(e.elements[1].chi, 1.7500687479);
         assert_eq!(e.elements[103].cap, 1.1930672532);
         assert_eq!(e.elements[8].rcov2, 2.6466398902);
+    }
+
+    /// The compiled-in q-vSZP table is the parsed `basisq` file bit for bit (regenerate it with
+    /// `scripts/make_qvszp_table.py` when the file changes).
+    #[test]
+    fn qvszp_table_is_the_parsed_file() {
+        let (table, parsed) = (QvszpParams::v1_1(), QvszpParams::parse(BASISQ).unwrap());
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(table.elements.len(), parsed.elements.len());
+        for (a, b) in table.elements.iter().zip(&parsed.elements) {
+            let (Some(a), Some(b)) = (a, b) else {
+                assert!(a.is_none() && b.is_none());
+                continue;
+            };
+            assert_eq!(bits(&[a.k_cn, a.k_q2, a.k_qcn]), bits(&[b.k_cn, b.k_q2, b.k_qcn]));
+            assert_eq!(a.shells.len(), b.shells.len());
+            for (s, t) in a.shells.iter().zip(&b.shells) {
+                assert_eq!(s.l, t.l);
+                assert_eq!((bits(&s.alpha), bits(&s.c0), bits(&s.c1)), (bits(&t.alpha), bits(&t.c0), bits(&t.c1)));
+            }
+        }
     }
 }

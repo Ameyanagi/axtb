@@ -25,15 +25,17 @@ tblite (https://github.com/tblite/tblite), LGPL-3.0-or-later
 
 dftd4 (https://github.com/dftd4/dftd4), LGPL-3.0-or-later
   The DFT-D4 model of dftd4 4.3.1 and its reference tables (src/dftd4/reference.inc,
-  src/dftd4/data) in crates/d4; the revD4 tables that g-xTB shares with it.
+  src/dftd4/data) in crates/d4, which GFN-FF's dispersion (crates/gfnff) uses too; the revD4
+  tables that g-xTB shares with it.
 
 simple-dftd3 (https://github.com/dftd3/simple-dftd3), LGPL-3.0-or-later
   Five test structures in tests/structures (tests/structures/README.md).
 
 mctc-lib (https://github.com/grimme-lab/mctc-lib), Apache-2.0
   Element data (Pauling electronegativities, covalent and atomic radii) and the CODATA 2018
-  constants of src/mctc in crates/axtb and crates/d4; the Angstrom-to-bohr factor of the
-  programs that read structures through it.
+  constants of src/mctc in crates/base, crates/axtb and crates/d4; the coordination-number
+  counting functions of src/mctc/ncoord (as xtb, tblite and dftd4 use them) in crates/base;
+  the Angstrom-to-bohr factor of the programs that read structures through it.
 
 multicharge (https://github.com/grimme-lab/multicharge), Apache-2.0
   The EEQ 2019 parameters (param/eeq2019.f90) in crates/axtb; the EEQ-BC 2025 model that
@@ -41,10 +43,16 @@ multicharge (https://github.com/grimme-lab/multicharge), Apache-2.0
 
 g-xTB (https://github.com/grimme-lab/g-xtb), GPL-3.0
   crates/gxtb/param holds the parameter files of the g-xTB 1.1.0 release (gxtb_parameters,
-  basisq, eeq). crates/gxtb/src/data.rs and data_runtime.rs hold tables read from the g-xTB
-  1.1.0 program; crates/gxtb/src/data_v2.rs holds the g-xTB 2.0.1 parameters read from the
-  2.0.1 release binary (docs/gxtb-v2.0.1-spec.md says how). These make axtb-gxtb, and the
-  builds that include it, GPL-3.0-only (LICENSE).
+  basisq, eeq). crates/gxtb/src/data/v1_1.rs and data/runtime.rs hold tables read from the
+  g-xTB 1.1.0 program; crates/gxtb/src/data/v2_0_1.rs holds the g-xTB 2.0.1 parameters read
+  from the 2.0.1 release binary (docs/gxtb-v2.0.1-spec.md says how).
+  g-xTB is distributed under GPL-3.0. axtb distributes its g-xTB parts (crates/gxtb, these
+  parameters included) under LGPL-3.0-or-later, with the explicit permission the g-xTB
+  authors gave on 13 November 2026:
+    "In the meantime, you have our explicit permission to use g-xTB, including its
+    parameters (1.1 and 2.0.1), in your axtb implementation and to distribute your
+    implementation under LGPL-3.0-or-later."
+    (Thomas Froitzheim and Stefan Grimme)
   T. Froitzheim, M. Mueller, A. Hansen, S. Grimme, ChemRxiv 2025,
   doi:10.26434/chemrxiv-2025-bjxvt.
 

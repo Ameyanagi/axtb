@@ -1,11 +1,13 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! g-xTB 2.0.1 Hessians against a tight reference: Richardson extrapolation of central
 //! differences of analytic gradients (h = 2e-3 and 1e-3 bohr) with SCFs converged to 1e-13.
 //!
 //! `V2_HESS=reference/water,...` selects molecules.
 
-use axtb_gxtb::v2::hessian::{symmetrize, AnalyticOptions};
-use axtb_gxtb::v2::response::CpksOptions;
-use axtb_gxtb::v2::scf::{ScfResult, Setup};
+use axtb_base::fd::symmetrize;
+use axtb_gxtb::hessian::AnalyticOptions;
+use axtb_gxtb::response::CpksOptions;
+use axtb_gxtb::scf::{ScfResult, Setup};
 use axtb_gxtb::{Conventions, ScfOptions};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -24,7 +26,7 @@ fn molecule(rel: &str, conv: Conventions) -> axtb::Molecule {
     let charge = input["charge"].as_f64().unwrap();
     let uhf = input["uhf"].as_u64().unwrap() as usize;
     let xyz = std::fs::read_to_string(dir.join("mol.xyz")).unwrap();
-    axtb_gxtb::v2::read_xyz(&xyz, charge, Some(uhf), conv).unwrap()
+    axtb_gxtb::model::read_xyz(&xyz, charge, Some(uhf), conv).unwrap()
 }
 
 fn tight(c: Conventions) -> ScfOptions {
@@ -33,13 +35,13 @@ fn tight(c: Conventions) -> ScfOptions {
         energy_tol: Some(1e-12),
         residual_tol: Some(1e-13),
         max_iter: 1000,
-        keep_orbitals: true,
+        all_orbitals: true,
         ..Default::default()
     }
 }
 
 fn scf(m: &axtb::Molecule, c: Conventions, opts: &ScfOptions) -> (Setup, ScfResult) {
-    let s = Setup::new(m, c).unwrap();
+    let s = Setup::new(m, axtb_gxtb::model::Model::v2_0_1(c)).unwrap();
     let r = s.scf(opts).unwrap();
     (s, r)
 }

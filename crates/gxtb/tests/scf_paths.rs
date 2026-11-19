@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! SCF paths against the g-xTB programs where they are decided by round-off or by a switch of
 //! the program's mixer (data in tests/reference_elements/ and tests/reference_v2/elements/,
 //! see tests/gxtb_elements.py and docs/gxtb-v1.1-spec.md §4.17).
 
-use axtb_gxtb::scf::{Conventions, Setup};
+use axtb_gxtb::Conventions;
 use faer::{Mat, MatRef, Par};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -64,26 +65,26 @@ fn uf6_v11_degenerate_iteration_two() {
     .unwrap();
     let xyz = std::fs::read_to_string(tests().join("reference_v2/elements/UF6/mol.xyz")).unwrap();
     let mol = axtb_gxtb::read_xyz(&xyz, 0.0, Some(0)).unwrap();
-    let setup = Setup::new(&mol).unwrap();
+    let setup = axtb_gxtb::scf::Setup::new(&mol, axtb_gxtb::model::Model::v1_1(Conventions::Gxtb)).unwrap();
     let n = setup.nao;
-    let map = program_ao_map(&setup.ao);
+    let ao: Vec<(usize, usize, usize)> = setup.basis.scf.ao2sh.iter().map(|&i| setup.shells[i]).collect();
+    let map = program_ao_map(&ao);
     let (p1, p2) = (unpack(&floats(&d["P1"]), &map), unpack(&floats(&d["P2"]), &map));
     let printed = floats(&d["printed_energies"]);
-    let conv = Some(Conventions::Gxtb);
     // the program's printed iteration energies (8 decimals) are our energies of its densities
-    let e1 = setup.evaluate(std::slice::from_ref(&p1), conv).unwrap();
-    let e2 = setup.evaluate(std::slice::from_ref(&p2), conv).unwrap();
-    assert!((e1.energies.total - printed[0]).abs() < 5.1e-9, "iteration 1: {}", e1.energies.total);
-    assert!((e2.energies.total - printed[1]).abs() < 5.1e-9, "iteration 2: {}", e2.energies.total);
+    let e1 = setup.evaluate(&setup.state(std::slice::from_ref(&p1)), true);
+    let e2 = setup.evaluate(&setup.state(std::slice::from_ref(&p2)), true);
+    assert!((e1.0.total - printed[0]).abs() < 5.1e-9, "iteration 1: {}", e1.0.total);
+    assert!((e2.0.total - printed[1]).abs() < 5.1e-9, "iteration 2: {}", e2.0.total);
     // the damped Fock matrix of iteration 2 from the program's P1 (F~1 = a F(P0), F~2 = F~1 + a (F(P1) - F~1))
     let a = 0.1_f32 as f64;
-    let f0 = setup.evaluate(&setup.guess(), conv).unwrap().fock[0].clone();
-    let ft2: Vec<f64> = (0..n * n).map(|k| a * f0[k] + a * (e1.fock[0][k] - a * f0[k])).collect();
+    let f0 = setup.evaluate(&setup.state(&setup.start_density()), true).1[0].clone();
+    let ft2: Vec<f64> = (0..n * n).map(|k| a * f0[k] + a * (e1.1[0][k] - a * f0[k])).collect();
     let mut solver = axtb::linalg::GenEigSolver::new(MatRef::from_row_major_slice(&setup.s, n, n), Par::Seq).unwrap();
     let mut eps = vec![0.0; n];
     let mut c = Mat::<f64>::zeros(n, n);
     solver.solve(MatRef::from_row_major_slice(&ft2, n, n), &mut eps, &mut c).unwrap();
-    let nocc = setup.nalpha;
+    let nocc = setup.nalpha as usize;
     let set: Vec<usize> = (0..n).filter(|&k| (eps[k] - eps[nocc - 1]).abs() < 1e-12).collect();
     assert_eq!(set, vec![nocc - 2, nocc - 1, nocc], "HOMO set {:?}", &eps[nocc - 4..nocc + 4]);
     // the program's P2 in our orbitals: N = C^T S P2 S C
@@ -127,12 +128,12 @@ fn uf6_v11_degenerate_iteration_two() {
 /// 4 iterations, with the residuals of its printout.
 #[test]
 fn h2_v2_early_diis() {
-    use axtb_gxtb::{v2::scf::Setup, ScfOptions};
+    use axtb_gxtb::{scf::Setup, ScfOptions};
     let dir = tests().join("reference_v2/elements/H2");
     let summ: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json")).unwrap()).unwrap();
     let xyz = std::fs::read_to_string(dir.join("mol.xyz")).unwrap();
-    let mol = axtb_gxtb::v2::read_xyz(&xyz, 0.0, Some(0), Conventions::Gxtb).unwrap();
-    let r = Setup::new(&mol, Conventions::Gxtb)
+    let mol = axtb_gxtb::model::read_xyz(&xyz, 0.0, Some(0), Conventions::Gxtb).unwrap();
+    let r = Setup::new(&mol, axtb_gxtb::model::Model::v2_0_1(Conventions::Gxtb))
         .unwrap()
         .scf(&ScfOptions { conventions: Conventions::Gxtb, ..Default::default() })
         .unwrap();
@@ -155,19 +156,19 @@ fn h2_v2_early_diis() {
 /// gradient, not the program's.
 #[test]
 fn gd_aqua_v2_program_gradient_axis() {
-    use axtb_gxtb::{v2::scf::Setup, ScfOptions};
+    use axtb_gxtb::{scf::Setup, ScfOptions};
     let d: Value = serde_json::from_str(
         &std::fs::read_to_string(tests().join("reference_elements/gd_aqua_v2_gradient.json")).unwrap(),
     )
     .unwrap();
-    let mol = axtb_gxtb::v2::read_xyz(
+    let mol = axtb_gxtb::model::read_xyz(
         d["xyz"].as_str().unwrap(),
         d["charge"].as_f64().unwrap(),
         Some(d["uhf"].as_u64().unwrap() as usize),
         Conventions::Gxtb,
     )
     .unwrap();
-    let setup = Setup::new(&mol, Conventions::Gxtb).unwrap();
+    let setup = Setup::new(&mol, axtb_gxtb::model::Model::v2_0_1(Conventions::Gxtb)).unwrap();
     let r = setup.scf(&ScfOptions { conventions: Conventions::Gxtb, accuracy: 1e-4, ..Default::default() }).unwrap();
     assert!((r.energies.total - d["energy"].as_f64().unwrap()).abs() < 1e-9, "energy {}", r.energies.total);
     let g = setup.gradient(&r).unwrap();
@@ -181,5 +182,112 @@ fn gd_aqua_v2_program_gradient_axis() {
         // the program's energies have 10 decimals: FD noise ~2e-7 Eh/bohr
         assert!((g[a][k] - fd).abs() < 1e-6, "axtb vs FD of the program's energies");
         assert!((prog - fd).abs() > 2e-5, "the program's gradient no longer differs");
+    }
+}
+
+/// Every orbital (`all_orbitals`) changes no number of the SCF: its energy, levels, occupations
+/// and gradient, and the coefficients of the orbitals it computed are the same bits; the other
+/// orbitals, computed after it, complete an S-orthonormal set. Both versions and conventions,
+/// closed and open shells, singlet O2 at 0 K (a degenerate pi* pair split between occupied and
+/// empty) and at 3000 K.
+#[test]
+fn every_orbital_keeps_the_scf_ones() {
+    use axtb_gxtb::model::Model;
+    use axtb_gxtb::scf::Setup;
+    use axtb_gxtb::{ScfOptions, Version};
+    let structures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/structures");
+    let read = |path: &Path, charge: f64, uhf: usize| {
+        axtb_gxtb::read_xyz(&std::fs::read_to_string(path).unwrap(), charge, Some(uhf)).unwrap()
+    };
+    let o2 = tests().join("reference_v2/reference/dioxygen_triplet/mol.xyz");
+    let mols = [
+        ("caffeine", read(&structures.join("caffeine.xyz"), 0.0, 0), 0.0),
+        ("cu", read(&structures.join("cu-nh3-4.xyz"), 2.0, 1), 0.0),
+        ("o2 singlet", read(&o2, 0.0, 0), 0.0),
+        ("o2 singlet", read(&o2, 0.0, 0), 3000.0),
+    ];
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    for version in [Version::V2_0_1, Version::V1_1] {
+        for conventions in [Conventions::Axtb, Conventions::Gxtb] {
+            for (name, mol, etemp) in &mols {
+                let label = format!("{version:?} {conventions:?} {name} {etemp} K");
+                let setup = Setup::new(mol, Model::new(version, conventions)).unwrap();
+                let opts = ScfOptions { conventions, etemp: *etemp, ..Default::default() };
+                let r0 = setup.scf(&opts).unwrap();
+                let r1 = setup.scf(&ScfOptions { all_orbitals: true, ..opts }).unwrap();
+                assert!(r1.all_orbitals, "{label}");
+                assert_eq!(r0.energies.total.to_bits(), r1.energies.total.to_bits(), "{label}: energy");
+                assert_eq!(r0.iterations, r1.iterations, "{label}: iterations");
+                assert_eq!(bits(&r0.atom_charges), bits(&r1.atom_charges), "{label}: charges");
+                let (g0, g1) = (setup.gradient(&r0).unwrap(), setup.gradient(&r1).unwrap());
+                assert_eq!(bits(&g0.concat()), bits(&g1.concat()), "{label}: gradient");
+                let n = setup.nao;
+                let s = MatRef::from_row_major_slice(&setup.s, n, n);
+                for ch in 0..r0.coefficients.len() {
+                    assert_eq!(bits(&r0.orbital_energies[ch]), bits(&r1.orbital_energies[ch]), "{label}: levels");
+                    assert_eq!(bits(&r0.occupations[ch]), bits(&r1.occupations[ch]), "{label}: occupations");
+                    let (c0, c1) = (&r0.coefficients[ch], &r1.coefficients[ch]);
+                    // the columns the SCF computed (the others are zero without all_orbitals)
+                    let computed = (0..n).filter(|&k| (0..n).any(|mu| c0[mu * n + k] != 0.0));
+                    for k in computed {
+                        for mu in 0..n {
+                            assert_eq!(c0[mu * n + k].to_bits(), c1[mu * n + k].to_bits(), "{label}: orbital {k}");
+                        }
+                    }
+                    let c = MatRef::from_row_major_slice(c1, n, n);
+                    let ctsc: Mat<f64> = c.transpose() * s * c;
+                    for j in 0..n {
+                        for i in 0..n {
+                            let want = if i == j { 1.0 } else { 0.0 };
+                            assert!(
+                                (ctsc[(i, j)] - want).abs() < 1e-10,
+                                "{label}: C^T S C ({i}, {j}) {}",
+                                ctsc[(i, j)]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// g-xTB 2.0.1's unmixed final iteration in the axtb conventions is axtb's, not the program's:
+/// an SCF whose test is met in the last iteration the limit allows still converges, one
+/// iteration past the limit, with the result it has without the limit. The program conventions
+/// and v1.1 (whose unmixed iteration is its programs' own) stop at the limit as the programs do.
+#[test]
+fn the_unmixed_iteration_runs_past_the_limit() {
+    use axtb_gxtb::model::Model;
+    use axtb_gxtb::scf::Setup;
+    use axtb_gxtb::{ScfOptions, Version};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/structures/caffeine.xyz");
+    let mol = axtb_gxtb::read_xyz(&std::fs::read_to_string(path).unwrap(), 0.0, None).unwrap();
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    for (version, conventions, past) in [
+        (Version::V2_0_1, Conventions::Axtb, true),
+        (Version::V2_0_1, Conventions::Gxtb, false),
+        (Version::V1_1, Conventions::Axtb, false),
+        (Version::V1_1, Conventions::Gxtb, false),
+    ] {
+        let label = format!("{version:?} {conventions:?}");
+        let setup = Setup::new(&mol, Model::new(version, conventions)).unwrap();
+        let opts = ScfOptions { conventions, ..Default::default() };
+        let free = setup.scf(&opts).unwrap();
+        let n = free.iterations;
+        // the limit at the iteration that meets the test (with an unmixed final iteration, the
+        // last but one)
+        let met = if version == Version::V1_1 || past { n - 1 } else { n };
+        let at = setup.scf(&ScfOptions { max_iter: met, ..opts.clone() });
+        if version == Version::V1_1 {
+            assert!(at.is_err(), "{label}: the programs' own unmixed iteration stops at the limit");
+            continue;
+        }
+        let at = at.unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(at.iterations, n, "{label}: the real iteration count");
+        assert_eq!(at.energies.total.to_bits(), free.energies.total.to_bits(), "{label}");
+        assert_eq!(bits(&at.atom_charges), bits(&free.atom_charges), "{label}");
+        let below = ScfOptions { max_iter: met - 1, ..opts };
+        assert!(setup.scf(&below).is_err(), "{label}: a limit below the test's iteration");
     }
 }

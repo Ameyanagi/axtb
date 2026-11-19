@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Time per call of the SCF eigensolver for F C = S C ε: `GenEigSolver::solve_lowest` with
 //! the lowest two thirds of the eigenvectors (a closed-shell SCF's occupied orbitals in a
 //! minimal basis) and `solve` with all of them, on a random symmetric F and an overlap-like S
 //! (unit diagonal, off-diagonal elements decaying with |i - j|). faer, or from 200 rows on the
 //! library that `AXTB_LAPACK` names. Prints the median over the repeats (after one unrecorded
 //! call that allocates the work space). For the block sizes of the reduction to standard form
-//! (`SYGST_BLOCK` and its neighbours in `src/linalg.rs`): edit, rebuild, rerun.
+//! (`SYGST_BLOCK` and its neighbours in `crates/base/src/linalg/eigen.rs`): edit, rebuild, rerun.
 //!
 //!     cargo run --release -p axtb --example eigensolver -- N THREADS [REPEATS]
 

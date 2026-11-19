@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
 //! Properties of a converged SCF that the reference programs print: Mayer–Wiberg bond orders,
 //! the molecular quadrupole moment and the HOMO–LUMO gap. Shared by GFN2-xTB and g-xTB.
 //!
@@ -19,19 +20,7 @@
 
 use faer::{Mat, MatRef, Par};
 
-/// Orbital energies (Eh, ascending) and occupations of one spin channel.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct OrbitalLevels {
-    pub energies: Vec<f64>,
-    pub occupations: Vec<f64>,
-}
-
-impl OrbitalLevels {
-    /// Electrons in the channel.
-    pub fn electrons(&self) -> f64 {
-        self.occupations.iter().sum()
-    }
-}
+pub use axtb_base::orbitals::OrbitalLevels;
 
 /// The alpha and beta channels of `levels` (qcdata's `scf_eigenvalues_a/b`,
 /// `scf_occupations_a/b`): a closed shell's one channel twice with half its occupations.
@@ -111,22 +100,12 @@ pub fn spin_densities(coeff: MatRef<'_, f64>, occ_a: &[f64], occ_b: &[f64], par:
     [pa, pb]
 }
 
-/// How the molecular quadrupole is assembled from the atomic moments (see the module docs).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum QuadrupoleForm {
-    /// Θ = Σ_A [θ_A + 3/2 (q r r + r d + d r) − 1/2 (q r² + 2 r·d) 1]: the traceless
-    /// quadrupole in the convention of the atomic quadrupoles (xtb's `molmom`).
-    #[default]
-    Traceless,
-    /// tblite's `get_molecular_quadrupole_moment` (the g-xTB 2.0.1 program's `--quadrupole`):
-    /// the off-diagonal elements of the charge and dipole parts doubled.
-    Tblite,
-}
+pub use axtb_base::method::QuadrupoleForm;
 
-impl QuadrupoleForm {
-    /// The form GFN2-xTB prints in `conventions`: tblite's in the tblite conventions, the
-    /// traceless tensor otherwise (xtb's `molmom`).
-    pub fn for_gfn2(conventions: crate::Conventions) -> Self {
+/// The form GFN2-xTB prints in its conventions: tblite's in the tblite conventions, the
+/// traceless tensor otherwise (xtb's `molmom`).
+impl From<crate::Conventions> for QuadrupoleForm {
+    fn from(conventions: crate::Conventions) -> Self {
         match conventions {
             crate::Conventions::Tblite => QuadrupoleForm::Tblite,
             _ => QuadrupoleForm::Traceless,

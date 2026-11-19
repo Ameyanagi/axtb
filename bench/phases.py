@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Where axtb's time goes: per-phase wall times of axtb.singlepoint(..., gradient=True) for the
+"""Where axtb's time goes: per-phase wall times of flat.singlepoint(..., gradient=True) for the
 run_benchmarks.py timing molecules, as reported by axtb itself (r["timings"], r["iterations"]).
 Each (molecule, threads) is the run with the smallest total of 3 (same settings as the suite's
 timing rows: default accuracy, xtb conventions).
@@ -26,6 +26,7 @@ ap.add_argument("--out", type=Path, required=True)
 args = ap.parse_args()
 
 import axtb  # noqa: E402
+import flat  # tests/flat.py: axtb 0.1's calls through axtb.compute and Session
 
 mols = [(name, rb.read_xyz(rb.ROOT / rel)) for name, rel in rb.MOLECULES]
 largest = {name for name, (nums, _, _) in sorted(mols, key=lambda m: len(m[1][0]))[-3:]}
@@ -38,7 +39,7 @@ for name, (nums, pos, charge) in mols:
         best = None
         for _ in range(args.repeats):
             t0 = time.perf_counter()
-            r = axtb.singlepoint(nums, pos, charge=float(charge), uhf=rb.uhf_for(nums, charge), gradient=True,
+            r = flat.singlepoint(nums, pos, charge=float(charge), uhf=rb.uhf_for(nums, charge), gradient=True,
                                  threads=t, accuracy=1.0, conventions="xtb")
             wall = time.perf_counter() - t0
             if best is None or wall < best[0]:
