@@ -164,7 +164,7 @@ class Axtb:
 
     def numerics(self, spec: Any) -> str:
         """The numerics identity of a spec (an input or a subprogram's `ProgramSpec`): the method's
-        epoch (``gfn2:2``; the g-xTB solvation composite ``gxtb-v2.0.1:2+gfn2:2``), the same for every
+        epoch (``gfn2:3``; the g-xTB solvation composite ``gxtb-v2.0.1:3+gfn2:3``), the same for every
         conventions of a method; axtb's version for a spec that names no method axtb has (its
         result is a refusal). Never raises: the runner calls it before looking up the store."""
         try:

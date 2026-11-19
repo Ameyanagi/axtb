@@ -189,9 +189,9 @@ keywords = {"solvent": {"name": "water"},
   after that.
 - **A ladder that does not fire changes no number**, and a result from a rung is the calculation
   at that rung's settings, bit for bit (both are a fresh SCF with the same settings). The
-  composite's single point after its Hessian is the exception: it starts its GFN2 parts fresh at
-  the rung, not from their Hessians' references, so it agrees within the SCF thresholds (its
-  Hessian is bit for bit).
+  composite's single point after its Hessian is the exception: it starts its parts fresh at the
+  rung, not from their Hessians' references, so it agrees within the SCF thresholds (its Hessian
+  is bit for bit).
 - **The floor.** With `scf.etemp` the ladder starts at that temperature, and a rung below it is
   refused (`no_effect`, path `scf.retries[i].etemp`), so a path never drops below its floor.
 - **Hessians** run whole at one rung. When a try fails anywhere (the reference SCF, a displaced
@@ -515,8 +515,8 @@ Factors measured: 10, 3, 1, 0.3, 0.1, 0.03, 0.01, 0.001 (SCF), 0.1, 0.01, 0.001,
 
 Every output names the identity of the code that produced its numbers, `record.numerics`, and
 `axtb.program.numerics(spec)` gives it before a run, for a store's cache key: the method's
-epoch (`gfn2:2`, `gxtb-v1.1:2`, `gxtb-v2.0.1:2`, `gfnff:1`), one per method across all its
-conventions; the solvation composite joins its parts' (`gxtb-v2.0.1:2+gfn2:2`). An epoch
+epoch (`gfn2:3`, `gxtb-v1.1:3`, `gxtb-v2.0.1:3`, `gfnff:1`), one per method across all its
+conventions; the solvation composite joins its parts' (`gxtb-v2.0.1:3+gfn2:3`). An epoch
 changes with every axtb change that may change that method's results for an unchanged input,
 and never with one that keeps every result bit for bit; thread counts and a run-time LAPACK are
 not part of it. The CHANGELOG lists the epochs.

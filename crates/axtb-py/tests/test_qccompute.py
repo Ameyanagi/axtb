@@ -34,13 +34,13 @@ def test_entry_point():
 
 def test_numerics():
     p = axtb.program
-    assert p.numerics(inp()) == "gfn2:2"
-    assert p.numerics(inp("GFN2-xTB", keywords={"solvent": {"name": "water"}})) == "gfn2:2"
+    assert p.numerics(inp()) == "gfn2:3"
+    assert p.numerics(inp("GFN2-xTB", keywords={"solvent": {"name": "water"}})) == "gfn2:3"
     assert (
         p.numerics(inp("gxtb-v2.0.1", keywords={"solvent": {"name": "water", "correction": "gfn2"}}))
-        == "gxtb-v2.0.1:2+gfn2:2"
+        == "gxtb-v2.0.1:3+gfn2:3"
     )
-    assert p.numerics(inp("gxtb-v1.1", keywords={"conventions": "gxtb"})) == "gxtb-v1.1:2"
+    assert p.numerics(inp("gxtb-v1.1", keywords={"conventions": "gxtb"})) == "gxtb-v1.1:3"
     assert p.numerics(inp("gfn3")) == f"axtb {axtb.__version__}"
     from qcdata import ProgramSpec
 
@@ -49,7 +49,7 @@ def test_numerics():
 
 def test_runner_compute_and_identities():
     out = qccompute.compute(inp())
-    assert out.success and out.execution.identities == {"axtb": "gfn2:2"}
+    assert out.success and out.execution.identities == {"axtb": "gfn2:3"}
     assert out.execution.threads == 1
     direct = axtb.compute(inp(keywords={"threads": 1}))
     assert out.results.energy == direct.results.energy
@@ -86,7 +86,7 @@ def test_runner_session():
         assert f1.record["warm_start"] is True
         assert frames[1].results.energy == f1.results.energy
         assert s.lineages() is not None
-    assert f0.record["numerics"] == "gfn2:2"
+    assert f0.record["numerics"] == "gfn2:3"
 
 
 def test_worker_round_trip():

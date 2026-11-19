@@ -232,7 +232,7 @@ The response, for every front end (a field is present when it applies):
 
 | fields | what |
 |---|---|
-| `program`, `version`, `method`, `conventions`, `numerics`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the numerics identity of the code that produced the numbers (`"gfn2:2"`, `"gxtb-v2.0.1:2+gfn2:2"` for the solvation composite, `"analysis:1"`; a method's epoch changes with every change of its results, see the CHANGELOG), the SCF's eigensolver (`faer` or the run-time LAPACK library) |
+| `program`, `version`, `method`, `conventions`, `numerics`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the numerics identity of the code that produced the numbers (`"gfn2:3"`, `"gxtb-v2.0.1:3+gfn2:3"` for the solvation composite, `"analysis:1"`; a method's epoch changes with every change of its results, see the CHANGELOG), the SCF's eigensolver (`faer` or the run-time LAPACK library) |
 | `energy`, `gradient`, `charges`, `dipole`, `terms`, `timings`, `seconds` | Eh, Eh/bohr (with `gradient`), atomic charges (Mulliken; GFN-FF: EEQ), e·bohr, energy terms (Eh), wall time per phase and of the request (s) |
 | `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `fermi_levels`, `electronic_temperature`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB; `fermi_levels`: alpha and beta, `null` for the Aufbau filling, the same level twice for a closed shell; `electronic_temperature`: K, 0 for the Aufbau filling) |
 | `n_hbonds`, `n_xbonds`, `topology` | GFN-FF |
@@ -496,7 +496,9 @@ charges and magnetizations, atomic dipoles and quadrupoles and the density matri
 (`xtbrestart`), taken over as they are although the charge- and CN-dependent q-vSZP basis of the
 new geometry differs (the programs do the same). An SCF from a previous state that fails (does
 not converge, or breaks down) runs once more from the program's EEQ-BC start. Results say which start produced them
-(`guess`: `previous`, `eeq-bc`, `eeq`, `sad`; Rust `ScfReport::start`).
+(`guess`: `previous`, `eeq-bc`, `eeq`, `sad`; Rust `ScfReport::start`). A Hessian leaves its
+reference SCF's converged state as the previous one, like a single point, so the single point of
+a Hessian's response starts from it where the policy reuses the previous state.
 
 - `conventions="gxtb"` keeps the programs' fresh EEQ-BC start for every SCF, so each result is
   that of a fresh program run. `guess="previous"` (Python `scf.restart: previous`, Rust

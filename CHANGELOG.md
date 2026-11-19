@@ -8,6 +8,34 @@ Rust crates, the CLI and the Python package share one version.
 Result changes decided after 0.2.0, one commit each; each bumps the numerics epochs of the
 methods whose results it may change ("Numerics epochs" at the end).
 
+### After a Hessian, the restart policy decides the next start
+
+- A Hessian leaves its reference SCF's converged wavefunction as the previous one, like a single
+  point, and the restart policy decides whether the next SCF starts from it. Every Hessian
+  response includes the single point at its positions, so this decides its energy, gradient,
+  charges and orbitals. Before, GFN2-xTB started that single point from the reference whatever
+  the policy said, and g-xTB from the program's start.
+- g-xTB (both versions, analytic, response and numerical Hessians) in the axtb conventions: the
+  single point of a Hessian response starts from the reference (`guess` `previous`) and takes 3
+  iterations instead of 8-10. The Hessian converges its reference more tightly than a single
+  point, so these numbers are closer to the converged SCF than a plain gradient request's, from
+  which they now differ by that request's SCF error. Against an SCF at accuracy 1e-6, caffeine:
+  2.0.1 energy 2.1e-8 Eh and gradient 3.9e-5 Eh/bohr from the program's start, 0 and 2.7e-11 from
+  the reference; v1.1 gradient 2.6e-6 and 1.1e-8 Eh/bohr. Charges move by up to 1.1e-4 e. The
+  Hessians themselves do not change (1e-13 Eh/bohr² in the trajectories, where the next
+  Hessian's reference starts from the new state).
+- GFN2-xTB with `guess: fresh` (Python `scf.restart: off`) starts the single point after a
+  Hessian fresh, as it asked (water: 8 iterations instead of 2, gradient 9.6e-8 Eh/bohr).
+  GFN2-xTB's default policy reuses the previous state, so its default results do not change.
+- Unchanged: the program conventions (their policy is fresh), every result without a Hessian, and
+  the composite's single point after its Hessian with `scf.retries`, which starts its parts
+  fresh at the Hessian's rung. With `scf.retries` the single point after a Hessian at a rung
+  starts from that rung's reference. A Hessian that fails leaves no wavefunction, as before.
+- Golden set (189 cases: one new, `traj-gxtb2-water-hessian-gxtb`, a 2.0.1 Hessian trajectory in
+  the program conventions that stays fresh): 27 change, every g-xTB Hessian in the axtb
+  conventions and `traj-gfn2-water-hessian-fresh`.
+- Numerics epochs `gfn2:3`, `gxtb-v1.1:3`, `gxtb-v2.0.1:3`.
+
 ### A warm start that breaks down retries fresh
 
 - An SCF that starts from a previous wavefunction (the previous geometry, a session's history, a
@@ -554,3 +582,6 @@ before the epochs existed are listed in the entries above.
 | `gfn2` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
 | `gxtb-v1.1` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
 | `gxtb-v2.0.1` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
+| `gfn2` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
+| `gxtb-v1.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
+| `gxtb-v2.0.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |

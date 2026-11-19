@@ -495,8 +495,8 @@ pub struct Response {
     pub version: &'static str,
     pub method: Option<&'static str>,
     pub conventions: &'static str,
-    /// The numerics identity of the calculation ([`crate::numerics`]): `"gfn2:2"`,
-    /// `"gxtb-v2.0.1:2+gfn2:2"` for the composite, [`crate::ANALYSIS_NUMERICS`] for an analysis.
+    /// The numerics identity of the calculation ([`crate::numerics`]): `"gfn2:3"`,
+    /// `"gxtb-v2.0.1:3+gfn2:3"` for the composite, [`crate::ANALYSIS_NUMERICS`] for an analysis.
     pub numerics: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eigensolver: Option<String>,

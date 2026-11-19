@@ -297,14 +297,18 @@ def corpus():
     add("error-gfnff-hessian-accuracy", w, method="gfnff", hessian=True, hessian_accuracy=0.1)
     add("error-gfnff-bond-orders", w, method="gfnff", bond_orders=True)
     add("gfnff-water-hessian-numerical", w, method="gfnff", hessian=True, hessian_method="numerical")
-    # warm starts around Hessians: GFN2 with guess "fresh" (the single point after the Hessian starts from its
-    # reference), g-xTB 2.0.1 and v1.1 (the single point after the Hessian starts from the program's start,
-    # the next Hessian's reference from the previous state), the composite in both conventions
+    # warm starts around Hessians: a Hessian leaves its reference as the previous wavefunction and the restart
+    # policy decides the next start: GFN2 with guess "fresh" (every SCF fresh), GFN2, g-xTB 2.0.1 and v1.1 with
+    # "previous" (the single point after the Hessian from its reference, the next Hessian's reference from the
+    # previous state), 2.0.1 in the program's conventions (every SCF from the program's start), the composite in
+    # both conventions
     add("traj-gfn2-water-hessian-fresh", {**w, "trajectory": trajectory(w["positions"]), "guess": "fresh"},
         method="gfn2", hessian=True)
     add("traj-gfn2-water-hessian", traj(w), method="gfn2", hessian=True)
     add("traj-gxtb2-water-hessian", traj(w), method="gxtb-v2.0.1", hessian=True)
     add("traj-gxtb11-water-hessian", traj(w), method="gxtb-v1.1", hessian=True)
+    add("traj-gxtb2-water-hessian-gxtb", {**w, "trajectory": trajectory(w["positions"])}, method="gxtb-v2.0.1",
+        conventions="gxtb", hessian=True)
     for conv in ("axtb", "gxtb"):
         # each part as its conventions say (gxtb: every SCF from the programs' starts)
         add(f"traj-gxtb2-water-composite-grad-{conv}", {**w, "trajectory": trajectory(w["positions"])},

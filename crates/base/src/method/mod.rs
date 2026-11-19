@@ -62,8 +62,9 @@ pub trait Method: Send + Sync {
     fn singlepoint(&mut self, positions: &[[f64; 3]], want: &Want) -> Result<SinglePoint>;
 
     /// Hessian at `positions` (bohr); `None` fields of `opts` are the method's defaults
-    /// ([`MethodInfo::hessian`]). Afterwards the method holds the wavefunction its next single
-    /// point at these positions should start from (each method documents which).
+    /// ([`MethodInfo::hessian`]). Afterwards the method holds its reference's converged
+    /// wavefunction as the previous one, as after a single point: the restart policy decides
+    /// whether the next SCF (the single point at these positions) starts from it.
     fn hessian(&mut self, positions: &[[f64; 3]], opts: &HessianOptions) -> Result<Hessian>;
 
     /// The converged wavefunction of the last SCF; `None` before the first, after an error and

@@ -170,7 +170,7 @@ def test_composite_climbs_the_given_rungs_per_part():
         f"the {k} part converged on retry 1 of 2: etemp 1000 K, max_iter 250" for k in parts
     )
     # the composite at the rung's settings (every part at 1000 K): its Hessian bit for bit; the
-    # single point after it starts the GFN2 parts fresh at the rung, not from their Hessians'
+    # single point after it starts the parts fresh at the rung, not from their Hessians'
     # references, so it agrees within the SCF thresholds
     direct = axtb.compute(inp("gxtb-v2.0.1", "hessian", at_rung(**COMPOSITE)))
     assert np.array_equal(out.results.hessian, direct.results.hessian)

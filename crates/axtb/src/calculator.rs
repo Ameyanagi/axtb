@@ -222,8 +222,6 @@ impl Calculator {
             m @ (HessianMethod::Response | HessianMethod::Analytic) => self.response_hessian(start, m, opts),
         }?;
         out.timings.push(("total", t0.elapsed().as_secs_f64()));
-        // the reference's moments start the next SCF (the single point at these positions)
-        self.given = true;
         Ok(out)
     }
 
@@ -397,8 +395,9 @@ impl Method for Calculator {
     /// Hessian at `positions` (see [`HessianMethod`] and [`HessianOptions`]): analytic (the
     /// default) or response with the reference converged to `accuracy` (default 1e-3), or
     /// numerical with every displacement converged to `accuracy` (default 0.01) from the
-    /// reference's moments. The reference's moments start the next SCF (whatever the restart
-    /// policy says), so that the single point at these positions starts from them.
+    /// reference's moments. Afterwards the reference's moments are the previous ones, as after a
+    /// single point: the next SCF (the single point at these positions) starts from them when the
+    /// restart policy reuses the previous wavefunction.
     ///
     /// All methods run on the calculator's thread pool, parallel over displacements or
     /// perturbations with every inner piece sequential, so thread counts never multiply.
