@@ -11,8 +11,8 @@ use crate::response::{
 };
 use crate::task::Task;
 use axtb::method::{
-    Fingerprint, HessianOptions, Method as MethodTrait, Restart, Retry, RetryLadder, RetryOn, Rung, ScfData,
-    ScfSettings, SinglePoint, TermKind, Try, Want, WavefunctionData,
+    Fingerprint, HessianOptions, Method as MethodTrait, Restart, Retry, RetryLadder, Rung, ScfData, ScfSettings,
+    SinglePoint, TermKind, Try, Want, WavefunctionData,
 };
 use axtb::ToMolden;
 use std::time::Instant;
@@ -373,7 +373,7 @@ impl Calculator {
         let first = self.effective(&base);
         let mut rungs = vec![Rung::default()];
         rungs.extend(Retry::rungs(first, &self.retries));
-        let ladder = RetryLadder { rungs, on: RetryOn::Failed };
+        let ladder = RetryLadder { rungs };
         let mut attempts = Vec::new();
         let m: &mut dyn MethodTrait = self.method.as_mut();
         let r = ladder.climb_methods(&mut [m], 0, |_, m, i, rung| {

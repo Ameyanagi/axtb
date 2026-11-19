@@ -114,58 +114,44 @@ pub struct Try {
     pub error: Option<Error>,
 }
 
-/// Which errors climb to the next rung; every other error ends the climb.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RetryOn {
-    /// An SCF that did not converge ([`Error::ScfNotConverged`]).
-    NotConverged,
-    /// An SCF that failed: not converged or broken down ([`Error::Numerical`], e.g. a failed
-    /// mixer or a lost Fermi level).
-    Failed,
+/// Whether `e` climbs to the next rung: an SCF that failed, by not converging
+/// ([`Error::ScfNotConverged`]) or by breaking down ([`Error::Numerical`], e.g. a failed mixer or
+/// a lost Fermi level). Every other error ends the climb.
+fn climbs(e: &Error) -> bool {
+    matches!(e, Error::ScfNotConverged { .. } | Error::Numerical(_))
 }
 
-impl RetryOn {
-    /// Whether `e` climbs.
-    pub fn retries(self, e: &Error) -> bool {
-        match self {
-            RetryOn::NotConverged => matches!(e, Error::ScfNotConverged { .. }),
-            RetryOn::Failed => matches!(e, Error::ScfNotConverged { .. } | Error::Numerical(_)),
-        }
-    }
-}
-
-/// Tries in order ([`RetryLadder::climb`]).
+/// Tries in order ([`RetryLadder::climb`]); an SCF that fails climbs to the next rung.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetryLadder {
     pub rungs: Vec<Rung>,
-    pub on: RetryOn,
 }
 
 impl RetryLadder {
     /// One try, as the method stands.
     pub fn once() -> Self {
-        Self { rungs: vec![Rung::default()], on: RetryOn::NotConverged }
+        Self { rungs: vec![Rung::default()] }
     }
 
     /// The SCF as the method stands, and when `warm` (it started from a previous wavefunction)
-    /// and did not converge, once more from the method's own start.
+    /// and failed (did not converge or broke down), once more from the method's own start.
     pub fn warm_then_fresh(warm: bool) -> Self {
         let mut rungs = vec![Rung::default()];
         if warm {
             rungs.push(Rung { fresh: true, label: Some("fresh start".into()), ..Rung::default() });
         }
-        Self { rungs, on: RetryOn::NotConverged }
+        Self { rungs }
     }
 
-    /// Run `attempt` with each rung in order until one succeeds; an error the ladder does not
-    /// retry ends the climb with it, and so does the last rung's error. Returns the result and
+    /// Run `attempt` with each rung in order until one succeeds; an error that is not an SCF
+    /// failure ends the climb with it, and so does the last rung's error. Returns the result and
     /// the index of the rung that gave it.
     pub fn climb<T>(&self, mut attempt: impl FnMut(&Rung) -> Result<T>) -> Result<(T, usize)> {
         let mut last = None;
         for (i, rung) in self.rungs.iter().enumerate() {
             match attempt(rung) {
                 Ok(v) => return Ok((v, i)),
-                Err(e) if self.on.retries(&e) => last = Some(e),
+                Err(e) if climbs(&e) => last = Some(e),
                 Err(e) => return Err(e),
             }
         }
@@ -185,7 +171,7 @@ impl RetryLadder {
         mut f: impl FnMut(usize, &mut dyn Method, usize, &Rung) -> Result<T>,
     ) -> Result<(Vec<T>, usize)> {
         let base: Vec<_> = methods.iter().map(|m| m.scf_settings().cloned()).collect();
-        let ladder = RetryLadder { rungs: self.rungs.get(from..).unwrap_or_default().to_vec(), on: self.on };
+        let ladder = RetryLadder { rungs: self.rungs.get(from..).unwrap_or_default().to_vec() };
         let mut index = from;
         let r = ladder.climb(|rung| {
             let i = index;
@@ -233,16 +219,17 @@ mod tests {
         });
         assert_eq!(r, Ok((7, 1)));
         assert_eq!(tried, [false, true]);
-        // the last rung's error; a numerical failure ends a NotConverged ladder at once
+        // the last rung's error
         assert_eq!(ladder.climb(|r| Err::<(), _>(nc(r.fresh as usize))), Err(nc(1)));
+        // a warm start that breaks down climbs too
+        assert_eq!(ladder.climb(|r| if r.fresh { Ok(()) } else { Err(Error::Numerical("x".into())) }), Ok(((), 1)));
+        // any other error ends the climb at once
         let mut n = 0;
         let e = ladder.climb(|_| {
             n += 1;
-            Err::<(), _>(Error::Numerical("x".into()))
+            Err::<(), _>(Error::Input("x".into()))
         });
-        assert_eq!((e, n), (Err(Error::Numerical("x".into())), 1));
-        let failed = RetryLadder { on: RetryOn::Failed, ..ladder };
-        assert_eq!(failed.climb(|r| if r.fresh { Ok(()) } else { Err(Error::Numerical("x".into())) }), Ok(((), 1)));
+        assert_eq!((e, n), (Err(Error::Input("x".into())), 1));
         assert_eq!(RetryLadder::warm_then_fresh(false).rungs.len(), 1);
     }
 

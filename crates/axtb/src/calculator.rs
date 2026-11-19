@@ -382,8 +382,8 @@ impl Method for Calculator {
 
     /// Energy and what `want` asks for at `positions`. The SCF starts from the previous
     /// geometry's moments when the restart policy reuses them ([`ScfSettings::restart`]; `None`:
-    /// always) or from given ones; if that SCF does not converge, it runs once more from the
-    /// initial guess.
+    /// always) or from given ones; if that SCF fails (does not converge, or breaks down), it runs
+    /// once more from the initial guess.
     fn singlepoint(&mut self, positions: &[[f64; 3]], want: &Want) -> Result<crate::method::SinglePoint> {
         match self.singlepoint_inner(positions, want) {
             Ok(sp) => Ok(self.report(sp)),

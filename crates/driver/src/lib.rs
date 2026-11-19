@@ -33,8 +33,8 @@
 //! # Numerics epochs
 //!
 //! [`numerics`] gives the identity of the code that produced a result, per method (afh-stack
-//! decision 29): `"<method>:<epoch>"`, e.g. `"gfn2:1"`, `"gxtb-v1.1:1"`, `"gxtb-v2.0.1:1"`,
-//! `"gfnff:1"`, and for the g-xTB solvation composite its parts joined, `"gxtb-v2.0.1:1+gfn2:1"`.
+//! decision 29): `"<method>:<epoch>"`, e.g. `"gfn2:2"`, `"gxtb-v1.1:2"`, `"gxtb-v2.0.1:2"`,
+//! `"gfnff:1"`, and for the g-xTB solvation composite its parts joined, `"gxtb-v2.0.1:2+gfn2:2"`.
 //! A method's epoch changes with every commit whose results for an unchanged request of that
 //! method may change (classed R, round-off, or M, a model or default change, in the changelog),
 //! and never with a commit that keeps every result bit for bit (B). One epoch covers every
@@ -69,7 +69,7 @@ use std::time::Instant;
 /// The numerics epoch of each method ([`numerics`], "Numerics epochs" above): bumped by every
 /// commit classed R or M that changes that method's results, never by a B commit.
 pub const NUMERICS_EPOCHS: [(Method, u32); 4] =
-    [(Method::Gfn2, 1), (Method::GxtbV1_1, 1), (Method::GxtbV2_0_1, 1), (Method::Gfnff, 1)];
+    [(Method::Gfn2, 2), (Method::GxtbV1_1, 2), (Method::GxtbV2_0_1, 2), (Method::Gfnff, 1)];
 
 /// The numerics identity of the analysis of a given Hessian (`analyze_hessian`).
 pub const ANALYSIS_NUMERICS: &str = "analysis:1";
@@ -77,7 +77,7 @@ pub const ANALYSIS_NUMERICS: &str = "analysis:1";
 /// The numerics identity of `method` (afh-stack decision 29; "Numerics epochs" above):
 /// `"<canonical name>:<epoch>"`, the same for every conventions of the method; with `composite`,
 /// the g-xTB solvation composite (a g-xTB method with `solvation_correction`), its parts joined by
-/// `+`, the g-xTB part first: `"gxtb-v2.0.1:1+gfn2:1"` (`composite` means nothing for the other
+/// `+`, the g-xTB part first: `"gxtb-v2.0.1:2+gfn2:2"` (`composite` means nothing for the other
 /// methods: GFN2-xTB in solvent is GFN2-xTB's).
 pub fn numerics(method: Method, composite: bool) -> String {
     let one = |m: Method| {

@@ -121,7 +121,7 @@ def test_composite_and_its_record():
     assert set(rec["composite"]) >= {"definition", "components", "parts"}
     assert rec["wavefunction"] == {"part": "gxtb"}
     assert rec["contingent"]["composite.retries"]["fired"] is False
-    assert rec["numerics"] == "gxtb-v2.0.1:1+gfn2:1"
+    assert rec["numerics"] == "gxtb-v2.0.1:2+gfn2:2"
     assert abs(sum(out.results.energy_components.values()) - out.results.energy) < 1e-12
 
 

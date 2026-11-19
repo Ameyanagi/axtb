@@ -582,8 +582,8 @@ impl Method for Calculator {
 
     /// Energy and what `want` asks for at `positions` (bohr). The SCF starts from the previous
     /// converged state when the restart policy reuses it (or from a given one); if that SCF
-    /// does not converge, it runs once more from the program's start. The SCF report's `start`
-    /// says which start gave the result.
+    /// fails (does not converge, or breaks down), it runs once more from the program's start.
+    /// The SCF report's `start` says which start gave the result.
     fn singlepoint(&mut self, positions: &[[f64; 3]], want: &Want) -> Result<SinglePoint> {
         let r = self.singlepoint_inner(positions, want);
         if r.is_err() {

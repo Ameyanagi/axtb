@@ -184,8 +184,9 @@ keywords = {"solvent": {"name": "water"},
 ```
 
 - **Inside each try** the method does what it does without a ladder: GFN2-xTB's Broyden-then-DIIS
-  fallback in the axtb conventions, and in a session an SCF from history that does not converge
-  runs once more fresh (`record.scf.restart_fallback`). The rungs come after that.
+  fallback in the axtb conventions, and in a session an SCF from history that fails (does not
+  converge, or breaks down) runs once more fresh (`record.scf.restart_fallback`). The rungs come
+  after that.
 - **A ladder that does not fire changes no number**, and a result from a rung is the calculation
   at that rung's settings, bit for bit (both are a fresh SCF with the same settings). The
   composite's single point after its Hessian is the exception: it starts its GFN2 parts fresh at
@@ -514,8 +515,8 @@ Factors measured: 10, 3, 1, 0.3, 0.1, 0.03, 0.01, 0.001 (SCF), 0.1, 0.01, 0.001,
 
 Every output names the identity of the code that produced its numbers, `record.numerics`, and
 `axtb.program.numerics(spec)` gives it before a run, for a store's cache key: the method's
-epoch (`gfn2:1`, `gxtb-v1.1:1`, `gxtb-v2.0.1:1`, `gfnff:1`), one per method across all its
-conventions; the solvation composite joins its parts' (`gxtb-v2.0.1:1+gfn2:1`). An epoch
+epoch (`gfn2:2`, `gxtb-v1.1:2`, `gxtb-v2.0.1:2`, `gfnff:1`), one per method across all its
+conventions; the solvation composite joins its parts' (`gxtb-v2.0.1:2+gfn2:2`). An epoch
 changes with every axtb change that may change that method's results for an unchanged input,
 and never with one that keeps every result bit for bit; thread counts and a run-time LAPACK are
 not part of it. The CHANGELOG lists the epochs.

@@ -3,6 +3,30 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
+## Unreleased (0.3.0)
+
+Result changes decided after 0.2.0, one commit each; each bumps the numerics epochs of the
+methods whose results it may change ("Numerics epochs" at the end).
+
+### A warm start that breaks down retries fresh
+
+- An SCF that starts from a previous wavefunction (the previous geometry, a session's history, a
+  Hessian's reference) and breaks down (a failed mixer, a lost Fermi level, a non-finite Fock
+  matrix: error kind `numerical`) now runs once more from the method's own start, as one that
+  does not converge always did; before, the calculation failed with `numerical_failure`.
+  GFN2-xTB and g-xTB (both versions), single points and the reference SCFs of Hessians. The
+  solvation composite's retry ladders already retried on both, and so did `scf.retries`; with
+  `scf.retries` this fresh start runs inside each try, before the first rung. A fresh SCF that
+  breaks down still fails (or climbs the `scf.retries` ladder).
+- No result changes: the golden set (188 cases) is bit for bit the same, and no warm start of
+  112 two-geometry GFN2-xTB trajectories (H2O and F2 stretched from 1.0-2.5 Å to 2.5-3.5 Å,
+  Broyden and DIIS, axtb and tblite conventions) broke down. The g-xTB SCFs do not stop on a
+  numerical error.
+- Rust (unstable API): axtb-base's `RetryOn` and the `on` field of `RetryLadder` are gone; every
+  ladder climbs on `Error::ScfNotConverged` and `Error::Numerical`.
+- Numerics epochs `gfn2:2`, `gxtb-v1.1:2`, `gxtb-v2.0.1:2`: a calculation that failed may now
+  succeed.
+
 ## 0.2.0 (2026-11-19)
 
 The final release of the 0.2.0 alphas, for the final qc* releases: the alphas' entries below
@@ -527,3 +551,6 @@ before the epochs existed are listed in the entries above.
 | `gxtb-v2.0.1` | 1 | 0.2.0 alpha 1 | start (includes the unmixed final iteration of the axtb conventions) |
 | `gfnff` | 1 | 0.2.0 alpha 1 | start |
 | `analysis` | 1 | 0.2.0 alpha 1 | start (the analysis of a given Hessian) |
+| `gfn2` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
+| `gxtb-v1.1` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
+| `gxtb-v2.0.1` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |

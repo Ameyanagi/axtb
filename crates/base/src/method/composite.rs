@@ -594,9 +594,7 @@ impl Method for Composite {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        AnalysisConventions, AnalysisDefaults, Electrons, Extras, HessianDefaults, RetryOn, ScfSettings,
-    };
+    use super::super::{AnalysisConventions, AnalysisDefaults, Electrons, Extras, HessianDefaults, ScfSettings};
     use super::*;
 
     /// A one-atom "method" with energy `e` at temperatures of at least `needs` K (below: an SCF
@@ -688,7 +686,7 @@ mod tests {
         let info = toy(0.0, 0.0).info().clone();
         let fingerprint = Fingerprint::new("toy", &[1], 0.0, None);
         let rung = |t: f64| Rung { fresh: false, etemp: Some(t), max_iter: Some(1), label: Some(format!("{t} K")) };
-        let ladder = RetryLadder { rungs: vec![rung(0.0), rung(500.0), rung(1000.0)], on: RetryOn::NotConverged };
+        let ladder = RetryLadder { rungs: vec![rung(0.0), rung(500.0), rung(1000.0)] };
         let (ea, eb) = (0.1 + 0.2, 0.3_f64.sqrt());
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let s2 = seen.clone();
@@ -758,7 +756,7 @@ mod tests {
         let info = toy(0.0, 0.0).info().clone();
         let fingerprint = Fingerprint::new("toy", &[1], 0.0, None);
         let rung = |t: f64| Rung { fresh: t > 0.0, etemp: Some(t), max_iter: Some(1), label: Some(format!("{t} K")) };
-        let ladder = || RetryLadder { rungs: vec![rung(0.0), rung(500.0), rung(1000.0)], on: RetryOn::Failed };
+        let ladder = || RetryLadder { rungs: vec![rung(0.0), rung(500.0), rung(1000.0)] };
         let x = [[0.0; 3]];
         for pin in [false, true] {
             let base = part("base", toy_hessian(-1.5, 0.0, Some(800.0)));
