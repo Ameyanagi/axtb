@@ -3,6 +3,18 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
+## 0.2.0 (2026-11-19)
+
+The final release of the 0.2.0 alphas, for the final qc* releases: the alphas' entries below
+make up its changes since 0.1.2. Since 0.2.0-alpha.3:
+
+- The Python package requires `qcdata>=0.24.0,<0.25` (the final 0.24.0) and its `test` extra
+  `qccompute[testing]>=0.23.0,<0.24`; the README installs without `--pre`.
+- No result changes: the numerics epochs stay `gfn2:1`, `gxtb-v1.1:1`, `gxtb-v2.0.1:1` and
+  `gfnff:1`.
+- qccompute 0.23.0 lowers a `threads` keyword above its runner's count with a `RuntimeWarning`;
+  axtb still reports `resource_capped` and runs on the lowered count (tested).
+
 ## 0.2.0-alpha.3 (2026-11-17)
 
 ### Threads: one count per calculation, axtb's internal cap within it
@@ -340,6 +352,9 @@ and `scf.max_iter`, its retry ladder to `{"scf": {"etemp": ..., "max_iter": 1000
   for an LGPL build without g-xTB, and g-xTB is now always built in. `--no-default-features` no
   longer leaves g-xTB out; a dependency that names the feature (`features = ["gxtb"]`) must
   drop it.
+
+## 0.1.2 (2026-11-17)
+
 - g-xTB 2.0.1 analytic Hessians: the response terms in a symmetric form
   (`AnalyticOptions::symmetric`, on by default) whose error is quadratic in the response
   solver's tolerance, and a default tolerance of 1e-6 (was 1e-10). Over 15 cases (closed and
@@ -363,6 +378,10 @@ and `scf.max_iter`, its retry ladder to `{"scf": {"etemp": ..., "max_iter": 1000
     geometry instead of building it again (results unchanged).
   - The D4 three-body term no longer gives NaN for a pair whose C6 is exactly zero (no element
     of the shipped tables has one).
+- The Python package's `qc` extra requires `qcdata<0.24` and `qccodec<0.22`: qcdata 0.24 removes the
+  `SinglePointData` fields the qccodec codec fills for Hessians (`freqs_wavenumber`,
+  `normal_modes_cartesian`, `gibbs_free_energy`). axtb 0.2 fills `vibrational_analysis` and
+  `thermochemistry` instead.
 - Every validation gate of `scripts/check.sh programs` now fails when a result exceeds its
   documented limit (the numbers of docs/validation.md and the specs; `tests/gate.py`), or a
   calculation fails, except the known differences the docs explain. 17 of the 24 gates used to

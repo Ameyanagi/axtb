@@ -36,12 +36,12 @@ qccompute finds axtb through its entry point (`axtb.program`), with no import of
 in axtb: `qccompute.compute(inp)`, `qccompute.session(inp)` and `python -m qccompute.serve
 axtb` run it like any other program.
 
-**Install.** This is a pre-release: `pip install --pre axtb` (or `pip install axtb==0.2.0a1`).
-It needs qcdata 0.24 (a pre-release, which pip installs with it) and numpy. The wheels are for
-x86-64 Linux with glibc 2.28 or newer and Python 3.11 or newer (one abi3 wheel), and need an
-x86-64-v3 CPU (AVX2, FMA: Intel since Haswell, AMD since Excavator); `import axtb` checks the
-CPU and raises `ImportError` on one without these instructions. On other platforms pip builds
-the package from the source distribution, which needs Rust 1.89 or newer.
+**Install.** `pip install axtb`. It needs qcdata 0.24 and numpy, which pip installs with it.
+The wheels are for x86-64 Linux with glibc 2.28 or newer and Python 3.11 or newer (one abi3
+wheel), and need an x86-64-v3 CPU (AVX2, FMA: Intel since Haswell, AMD since Excavator);
+`import axtb` checks the CPU and raises `ImportError` on one without these instructions. On
+other platforms pip builds the package from the source distribution, which needs Rust 1.89 or
+newer.
 
 **Documentation.** [docs/python.md](https://github.com/atomsforhumanity/axtb/blob/main/docs/python.md)
 is the reference of the Python interface: keywords, outputs, the record, errors, sessions,

@@ -45,12 +45,12 @@ other platforms are untested.
 
 **Released builds.** The Python package from PyPI, with wheels for x86-64 Linux
 (manylinux_2_28: glibc 2.28 or newer; Python 3.11 or newer, one abi3 wheel for all versions);
-elsewhere pip builds it from the source distribution, which needs Rust. 0.2 is in alpha, and
-it needs the pre-release of qcdata 0.24 (pip takes it with axtb, whose requirement names it):
+elsewhere pip builds it from the source distribution, which needs Rust. It needs qcdata 0.24,
+which pip installs with it:
 
 ```bash
-pip install --pre axtb                     # or axtb==0.2.0a1; 0.1.x without --pre
-pip install --pre "axtb[test]"             # with pytest and qccompute, for the package's tests
+pip install axtb
+pip install "axtb[test]"                   # with pytest and qccompute, for the package's tests
 ```
 
 The CLI from crates.io, or as the stripped `axtb` binary attached to each GitHub release:
@@ -78,7 +78,7 @@ The Python package (Python 3.11 or newer, numpy, qcdata 0.24) from a wheel built
 pip install maturin
 maturin build --release --compatibility linux -m crates/axtb-py/Cargo.toml -o dist
 pip install dist/axtb-*.whl
-pip install --pre "qccompute>=0.23.0a4"    # to run axtb through qccompute (optional)
+pip install "qccompute>=0.23"            # to run axtb through qccompute (optional)
 ```
 
 `pip install ./crates/axtb-py` builds and installs it in one step. qccompute finds it through
