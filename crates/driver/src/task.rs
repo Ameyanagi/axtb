@@ -83,8 +83,8 @@ impl VibSettings {
 /// A Hessian and its vibrational analysis.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HessianTask {
-    /// `None`: the method's default (analytic; g-xTB v1.1 numerical; the composite each
-    /// part's).
+    /// `None`: the method's default (analytic; g-xTB v1.1 response, in its program's conventions
+    /// numerical; the composite each part's).
     pub method: Option<HessianMethod>,
     pub step: Option<f64>,
     pub accuracy: Option<f64>,

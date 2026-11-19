@@ -33,7 +33,7 @@
 //! # Numerics epochs
 //!
 //! [`numerics`] gives the identity of the code that produced a result, per method (afh-stack
-//! decision 29): `"<method>:<epoch>"`, e.g. `"gfn2:3"`, `"gxtb-v1.1:3"`, `"gxtb-v2.0.1:3"`,
+//! decision 29): `"<method>:<epoch>"`, e.g. `"gfn2:3"`, `"gxtb-v1.1:4"`, `"gxtb-v2.0.1:3"`,
 //! `"gfnff:1"`, and for the g-xTB solvation composite its parts joined, `"gxtb-v2.0.1:3+gfn2:3"`.
 //! A method's epoch changes with every commit whose results for an unchanged request of that
 //! method may change (classed R, round-off, or M, a model or default change, in the changelog),
@@ -69,7 +69,7 @@ use std::time::Instant;
 /// The numerics epoch of each method ([`numerics`], "Numerics epochs" above): bumped by every
 /// commit classed R or M that changes that method's results, never by a B commit.
 pub const NUMERICS_EPOCHS: [(Method, u32); 4] =
-    [(Method::Gfn2, 3), (Method::GxtbV1_1, 3), (Method::GxtbV2_0_1, 3), (Method::Gfnff, 1)];
+    [(Method::Gfn2, 3), (Method::GxtbV1_1, 4), (Method::GxtbV2_0_1, 3), (Method::Gfnff, 1)];
 
 /// The numerics identity of the analysis of a given Hessian (`analyze_hessian`).
 pub const ANALYSIS_NUMERICS: &str = "analysis:1";

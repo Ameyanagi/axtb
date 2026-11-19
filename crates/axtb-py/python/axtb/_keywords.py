@@ -500,7 +500,7 @@ KEYS: tuple[Key, ...] = (
         _enum_schema("analytic", "response", "numerical"),
         _ALL,
         _H,
-        "analytic; g-xTB v1.1 numerical; the composite each part's",
+        "analytic; g-xTB v1.1 response (its program's conventions: numerical); the composite each part's",
         "analytic second derivatives, response (central differences of the response gradient) or numerical "
         "(central differences of analytic gradients). g-xTB v1.1: numerical, response (axtb conventions); "
         "GFN-FF: analytic, numerical.",
@@ -1007,8 +1007,11 @@ def _hessian_methods(method: str, conventions: str) -> tuple[str, ...]:
     return ("analytic", "response", "numerical")
 
 
-def _default_hessian_method(method: str) -> str:
-    return "numerical" if method == "gxtb-v1.1" else "analytic"
+def _default_hessian_method(method: str, conventions: str) -> str:
+    """The Hessian method of a calculation that names none (the driver's ``MethodInfo``)."""
+    if method == "gxtb-v1.1":
+        return "response" if conventions == "axtb" else "numerical"
+    return "analytic"
 
 
 def _analysis_default(method: str, conventions: str) -> str:
@@ -1184,7 +1187,7 @@ def _plan_input(
         pass  # the conventions' own start
     elif v.get("scf.guess") == "eeq" and conventions == "tblite-0.8.0":
         raise no_effect("scf.guess", "tblite-0.8.0 starts every SCF from neutral atoms (sad)")
-    hm = v.get("hessian.method", _default_hessian_method(method))
+    hm = v.get("hessian.method", _default_hessian_method(method, conventions))
     if "hessian.step" in v and hm == "analytic":
         raise no_effect("hessian.step", "the analytic Hessian takes no step")
     if v.get("freq.analysis") == "off":
@@ -1670,7 +1673,7 @@ def _resolve(
         put("solvent.correction_conventions", gfn2_conventions)
     if hessian:
         hm_given = v.get("hessian.method")
-        hm = hm_given or _default_hessian_method(method)
+        hm = hm_given or _default_hessian_method(method, conventions)
         if composite and hm_given is None:
             reasons["hessian.method"] = "the composite: each part its method's default"
         else:

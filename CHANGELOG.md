@@ -8,6 +8,32 @@ Rust crates, the CLI and the Python package share one version.
 Result changes decided after 0.2.0, one commit each; each bumps the numerics epochs of the
 methods whose results it may change ("Numerics epochs" at the end).
 
+### g-xTB v1.1's default Hessian is the response Hessian (axtb conventions)
+
+- In the axtb conventions a v1.1 Hessian without `hessian_method` (Python `hessian.method`, CLI
+  `--hess-method`) is now the response Hessian (central differences of the analytic gradient
+  functional with the density extrapolated by the coupled-perturbed response, step 2e-4 bohr,
+  reference SCF at accuracy 1e-5), not the numerical one. It is the more accurate of the two
+  (within 1e-6 Eh/bohr² of Richardson-extrapolated finite differences in
+  `crates/gxtb/tests/hessian_v11.rs`; the numerical Hessian carries its O(h²) step error and SCF
+  noise) and faster: caffeine on one thread 1.64 s against 2.41 s (Hessian 2.6e-5 Eh/bohr²,
+  frequencies 0.15 cm⁻¹ apart). Water's Hessian moves by 2.1e-5 Eh/bohr², its frequencies by
+  0.07 cm⁻¹, dipole derivatives by 5e-6.
+  `hessian_method: numerical` gives the old one; the program conventions keep the numerical
+  Hessian, their only one. The response reports `hessian_method`, Python
+  `resolved.settings.hessian` gives `method: response`, `step: 2e-4`, `accuracy_scale: 1e-5`, and
+  the composite's g-xTB part takes it too.
+- A Hessian accuracy target for v1.1 in the axtb conventions keeps the response Hessian's default
+  `hessian.accuracy_scale` (1e-5) without an estimate: the accuracy model has no fit for it yet.
+- Golden set (190 cases: one new, `gxtb11-water-hessian-numerical`, which keeps v1.1's numerical
+  Hessian covered): the three v1.1 Hessians in the axtb conventions change method
+  (`gxtb11-water-hessian`, `traj-gxtb11-water-hessian`, the g-xTB part of
+  `gxtb11-water-composite-hessian`), and so does `gxtb11-h2o-3a-retries-hessian`, the water
+  stretched to 3 Å at the 1000 K rung of `scf.retries`, whose numerical Hessian was dominated by
+  displaced SCFs ending on different solutions (frequencies -4100 and +4698 cm⁻¹; the response
+  Hessian: two imaginary modes, -631 and -445 cm⁻¹).
+- Numerics epoch `gxtb-v1.1:4`.
+
 ### After a Hessian, the restart policy decides the next start
 
 - A Hessian leaves its reference SCF's converged wavefunction as the previous one, like a single
@@ -585,3 +611,4 @@ before the epochs existed are listed in the entries above.
 | `gfn2` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
 | `gxtb-v1.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
 | `gxtb-v2.0.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
+| `gxtb-v1.1` | 4 | 0.3.0 | the default Hessian of the axtb conventions is the response Hessian (was numerical) |

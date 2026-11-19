@@ -159,7 +159,8 @@ struct Cli {
     #[arg(long = "hess", help_heading = "Hessian")]
     hessian: bool,
 
-    /// Hessian method: analytic (default; g-xTB v1.1 numerical), response or numerical
+    /// Hessian method: analytic (default; g-xTB v1.1 response, in its program's conventions
+    /// numerical), response or numerical
     #[arg(long = "hess-method", value_name = "METHOD", help_heading = "Hessian")]
     hessian_method: Option<String>,
 

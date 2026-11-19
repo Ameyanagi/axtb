@@ -7,7 +7,8 @@ doi:10.26434/chemrxiv-2025-bjxvt) in Rust, in two versions:
   analytic gradients, analytic (default), response and numerical Hessians, finite electronic
   temperature;
 - **v1.1**, the public preprint version as the g-xTB 1.1.0 program implements it: energies,
-  analytic gradients, semi-numerical Hessians, finite electronic temperature.
+  analytic gradients, response (default; the default conventions) and numerical Hessians,
+  finite electronic temperature.
 
 In the program conventions (`Conventions::Gxtb`) it reproduces each program's numbers to the
 last digits; the default `Conventions::Axtb` uses CODATA 2022 units and, for v1.1, the exact

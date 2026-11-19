@@ -40,7 +40,7 @@ def test_numerics():
         p.numerics(inp("gxtb-v2.0.1", keywords={"solvent": {"name": "water", "correction": "gfn2"}}))
         == "gxtb-v2.0.1:3+gfn2:3"
     )
-    assert p.numerics(inp("gxtb-v1.1", keywords={"conventions": "gxtb"})) == "gxtb-v1.1:3"
+    assert p.numerics(inp("gxtb-v1.1", keywords={"conventions": "gxtb"})) == "gxtb-v1.1:4"
     assert p.numerics(inp("gfn3")) == f"axtb {axtb.__version__}"
     from qcdata import ProgramSpec
 

@@ -280,7 +280,7 @@ raises (kind `input`):
 | `solvent.correction_conventions` | axtb |  | axtb; xtb-6.7.1 with g-xTB's program conventions | XC | EGH | Conventions of the composite's GFN2-xTB parts. |
 | `topology.geometry` | axtb | bohr | the input's geometry (a session: the opening one; not echoed) | FF | EGH | The positions GFN-FF sets its topology up from. |
 | `topology.fragment_charges` | axtb | e | the charge on atom 1's fragment (in record.gfnff; not echoed) | FF | EGH | Charges of the molecular fragments, in the order of their first atoms, summing to the charge. |
-| `hessian.method` | axtb |  | analytic; g-xTB v1.1 numerical; the composite each part's | G2, X1, X2, XC, FF | H | analytic second derivatives, response (central differences of the response gradient) or numerical (central differences of analytic gradients). g-xTB v1.1: numerical, response (axtb conventions); GFN-FF: analytic, numerical. |
+| `hessian.method` | axtb |  | analytic; g-xTB v1.1 response (its program's conventions: numerical); the composite each part's | G2, X1, X2, XC, FF | H | analytic second derivatives, response (central differences of the response gradient) or numerical (central differences of analytic gradients). g-xTB v1.1: numerical, response (axtb conventions); GFN-FF: analytic, numerical. |
 | `hessian.step` | axtb | bohr | numerical 0.005; response GFN2-xTB 5e-4, g-xTB 2e-4 | G2, X1, X2, XC, FF | H | Finite-difference step of the numerical and response Hessians. |
 | `hessian.accuracy_scale` | axtb |  | numerical 0.01; analytic and response GFN2-xTB 1e-3, g-xTB 1e-5 | G2, X1, X2, XC | H | SCF accuracy factor of the numerical Hessian's displacements, or of the analytic and response Hessians' reference; never looser than the calculation's. |
 | `freq.analysis` | axtb |  | harmonic | G2, X1, X2, XC, FF | H | The harmonic analysis of the Hessian (vibrational_analysis), and its thermochemistry. |
@@ -457,8 +457,10 @@ closed shells'. Between measured factors the errors plateau, so an estimate rest
 measurement at its factor or above. An explicit `accuracy_scale` is a floor under the factor.
 g-xTB v1.1's open shells, whose errors do not fall monotonically, use a table of the worst error
 at each measured factor. A Hessian target sets `hessian.accuracy_scale` the same way (factors
-0.1 to 1e-6), never looser than the method's default or an explicit value. GFN-FF has no
-thresholds: it meets every target (estimate 0).
+0.1 to 1e-6), never looser than the method's default or an explicit value; a Hessian method
+without a fitted model (g-xTB v1.1's response Hessian, its default in the axtb conventions) keeps
+its default factor (1e-5) and reports no estimate. GFN-FF has no thresholds: it meets every
+target (estimate 0).
 
 `record.accuracy` holds the target, the thresholds used and the model's estimate at them: a
 bound fitted to measurements, not a measurement of the run. A target below what the floor
@@ -515,7 +517,7 @@ Factors measured: 10, 3, 1, 0.3, 0.1, 0.03, 0.01, 0.001 (SCF), 0.1, 0.01, 0.001,
 
 Every output names the identity of the code that produced its numbers, `record.numerics`, and
 `axtb.program.numerics(spec)` gives it before a run, for a store's cache key: the method's
-epoch (`gfn2:3`, `gxtb-v1.1:3`, `gxtb-v2.0.1:3`, `gfnff:1`), one per method across all its
+epoch (`gfn2:3`, `gxtb-v1.1:4`, `gxtb-v2.0.1:3`, `gfnff:1`), one per method across all its
 conventions; the solvation composite joins its parts' (`gxtb-v2.0.1:3+gfn2:3`). An epoch
 changes with every axtb change that may change that method's results for an unchanged input,
 and never with one that keeps every result bit for bit; thread counts and a run-time LAPACK are

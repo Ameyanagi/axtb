@@ -46,7 +46,7 @@ from qcdata import (
 
 from . import _accuracy, _axtb
 from ._errors import from_driver
-from ._keywords import Planned, plan_input, thread_cap
+from ._keywords import Planned, _default_hessian_method, plan_input, thread_cap
 from ._models import build
 
 __all__ = [
@@ -217,7 +217,7 @@ def accuracy(
         )
     h = None
     if target.hessian is not None and calctype == "hessian":
-        hm = p.settings.get("hessian", {}).get("method") or ("numerical" if p.method == "gxtb-v1.1" else "analytic")
+        hm = p.settings.get("hessian", {}).get("method") or _default_hessian_method(p.method, p.conventions)
         default = p.settings.get("hessian", {}).get("accuracy_scale")
         if default is None:
             d = _HESSIAN_DEFAULT[hm]

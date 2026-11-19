@@ -141,6 +141,7 @@ def corpus():
         add(f"gxtb11-caffeine-grad-{conv}", caf, method="gxtb-v1.1", conventions=conv, gradient=True)
     add("gxtb11-cu-doublet-grad", cu, method="gxtb-v1.1", gradient=True)
     add("gxtb11-water-hessian", w, method="gxtb-v1.1", hessian=True)
+    add("gxtb11-water-hessian-numerical", w, method="gxtb-v1.1", hessian=True, hessian_method="numerical")
     add("gxtb11-water-hessian-gxtb", w, method="gxtb-v1.1", hessian=True, conventions="gxtb")
     add("gxtb11-caffeine-etemp", caf, method="gxtb-v1.1", gradient=True, etemp=3000.0)
     # Step 17 (v1.1 on the 2.0.1 engine): a large system on one and four threads (the parallel dense

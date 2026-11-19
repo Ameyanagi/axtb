@@ -9,8 +9,9 @@
 //! Energies, analytic gradients ([`crate::gradient`]; v1.1 in the program's conventions with the
 //! response of its Fock matrix)
 //! and Hessians ([`Method::hessian`]: for 2.0.1 analytic (the default) or response,
-//! [`crate::hessian`]; for both versions numerical, central differences of analytic
-//! gradients as GFN2-xTB's), with the settings of [`Options`] (refused when out of range or
+//! [`crate::hessian`], for v1.1 in the default conventions response (its default); for both
+//! versions numerical, central differences of analytic gradients as GFN2-xTB's, v1.1's only
+//! Hessian in the program's conventions), with the settings of [`Options`] (refused when out of range or
 //! meant for the other version, [`ScfOptions::check`]). Where an SCF starts is the restart
 //! policy [`ScfSettings::restart`]: in the default conventions from the previous geometry's
 //! converged state (the programs' restart files `xtbrestart` and `gxtbrestart` carry the same),
@@ -267,12 +268,12 @@ fn info(version: Version, conventions: Conventions) -> MethodInfo {
                 numerical,
             ],
         },
-        // v1.1: the response Hessian in the default conventions, where its Fock matrix is the
-        // derivative of its energy (the program's is not: numerical only)
-        Version::V1_1 => HessianDefaults {
-            default: HessianMethod::Numerical,
-            offered: match conventions {
-                Conventions::Axtb => vec![
+        // v1.1: the response Hessian (the default) in the default conventions, where its Fock
+        // matrix is the derivative of its energy; the program's is not: numerical only
+        Version::V1_1 => match conventions {
+            Conventions::Axtb => HessianDefaults {
+                default: HessianMethod::Response,
+                offered: vec![
                     numerical,
                     HessianDefault {
                         method: HessianMethod::Response,
@@ -280,8 +281,8 @@ fn info(version: Version, conventions: Conventions) -> MethodInfo {
                         accuracy: Some(ANALYTIC_ACCURACY),
                     },
                 ],
-                Conventions::Gxtb => vec![numerical],
             },
+            Conventions::Gxtb => HessianDefaults { default: HessianMethod::Numerical, offered: vec![numerical] },
         },
     };
     MethodInfo {
@@ -614,13 +615,15 @@ impl Method for Calculator {
     ///
     /// - `Analytic` (2.0.1, its default): analytic second derivatives with the coupled-perturbed
     ///   response ([`crate::analytic`]), SCF accuracy of the reference default [`ANALYTIC_ACCURACY`];
-    /// - `Response` (2.0.1): central differences of the analytic gradient functional with the
-    ///   density and energy-weighted density extrapolated by the coupled-perturbed response
-    ///   ([`crate::hessian`]; no SCF per displacement), step default [`RESPONSE_STEP`], SCF accuracy
-    ///   of the reference default [`ANALYTIC_ACCURACY`];
-    /// - `Numerical` (both versions; v1.1's default): central differences of analytic gradients,
-    ///   step default [`NUMERICAL_STEP`], the SCF of every displacement from the program's start
-    ///   with the thresholds scaled by the accuracy (default [`NUMERICAL_ACCURACY`]).
+    /// - `Response` (2.0.1; v1.1 in the default conventions, its default there): central
+    ///   differences of the analytic gradient functional with the density and energy-weighted
+    ///   density extrapolated by the coupled-perturbed response ([`crate::hessian`]; no SCF per
+    ///   displacement), step default [`RESPONSE_STEP`], SCF accuracy of the reference default
+    ///   [`ANALYTIC_ACCURACY`];
+    /// - `Numerical` (both versions; v1.1's default in the program's conventions, where it is the
+    ///   only one): central differences of analytic gradients, step default [`NUMERICAL_STEP`],
+    ///   the SCF of every displacement from the program's start with the thresholds scaled by the
+    ///   accuracy (default [`NUMERICAL_ACCURACY`]).
     ///
     /// The accuracy is never looser than the calculator's own. Displacements run in parallel
     /// on the calculator's threads, each sequentially, so the result is the same for every

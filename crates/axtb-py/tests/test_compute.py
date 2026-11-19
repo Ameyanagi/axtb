@@ -43,7 +43,7 @@ METHODS = ["gfn2", "gxtb-v1.1", "gxtb-v2.0.1", "gfnff"]
 @pytest.mark.parametrize("structure", [WATER, CAFFEINE], ids=["water", "caffeine"])
 def test_every_method_and_calctype(method, calctype, structure):
     if calctype == "hessian" and structure is CAFFEINE and method == "gxtb-v1.1":
-        pytest.skip("numerical v1.1 Hessian of caffeine: slow, covered on water")
+        pytest.skip("v1.1 Hessian of caffeine: slow, covered on water")
     out = axtb.compute(inp(method, calctype, structure=structure))
     r = out.results
     n = len(structure.symbols)

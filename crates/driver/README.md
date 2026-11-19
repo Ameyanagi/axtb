@@ -9,7 +9,7 @@ analysis. A stateful `Calculator` runs one geometry after another.
 
 Every response names the numerics identity of the code that produced it, `numerics`, which
 `numerics(method, composite)` gives before a run: `"<method>:<epoch>"` (`"gfn2:3"`,
-`"gxtb-v1.1:3"`, `"gxtb-v2.0.1:3"`, `"gfnff:1"`; the g-xTB solvation composite
+`"gxtb-v1.1:4"`, `"gxtb-v2.0.1:3"`, `"gfnff:1"`; the g-xTB solvation composite
 `"gxtb-v2.0.1:3+gfn2:3"`). One epoch per method covers all its conventions; it changes with every
 commit that may change that method's results (round-off or model changes, R or M in the
 changelog) and never with one that keeps them bit for bit. The history of the epochs is in the

@@ -19,7 +19,7 @@ License: LGPL-3.0-or-later, every crate, the CLI and the Python package ([Licens
 | GFN2-xTB energies and analytic gradients (self-consistent D4, multipole electrostatics) | xtb 6.8.0 and 6.7.1, tblite 0.8.0 |
 | GFN2-xTB Hessians: analytic (coupled-perturbed SCC response; the default), response and numerical | finite differences, `xtb --hess` |
 | ALPB/GBSA implicit solvation for GFN2-xTB (25 ALPB / 14 GBSA solvents, 3 reference states) | xtb 6.8.0 and 6.7.1, tblite 0.8.0 |
-| g-xTB v1.1 (public parameters): energies, analytic gradients, semi-numerical Hessians, finite electronic temperature | the g-xTB 1.1.0 program |
+| g-xTB v1.1 (public parameters): energies, analytic gradients, response (default) and numerical Hessians, finite electronic temperature | the g-xTB 1.1.0 program |
 | g-xTB 2.0.1: energies, analytic gradients, analytic (default), response and numerical Hessians, finite electronic temperature | the g-xTB 2.0.1 program |
 | g-xTB in implicit solvent: g-xTB plus GFN2-xTB's ALPB/GBSA solvation energy, as one calculation | the three xtb program runs it replaces |
 | GFN-FF: energies, analytic gradients, analytic (default) and numerical Hessians with dipole derivatives | xtb 6.8.0 and 6.7.1 (`--gfnff`) |
@@ -609,7 +609,7 @@ smoothed FD Hessian that xtb reports, without SCF noise.
 
 g-xTB v1.1: `model.method` `"gxtb-v1.1"` in Python, `--method gxtb-v1.1` in the CLI,
 `axtb_gxtb::Calculator` in Rust (implements the `Method` trait, as `axtb::Calculator`
-does): energies, analytic gradients, semi-numerical Hessians. It uses the
+does): energies, analytic gradients, response and numerical Hessians. It uses the
 g-xTB 1.1.0 program's SCF (thresholds, start density, mixing; the CLI reads XYZ files with
 the program's Ångström factor), accepts `accuracy` (multiplier of the program's SCF
 thresholds), `etemp` (Fermi smearing, see below), `max_iter`, `threads` and `conventions`, and
@@ -623,7 +623,13 @@ ferrocene) and ≤ 1.1e-5 Eh in the energy differences tested (conformers, the S
 reaction and HCN → HNC with their barriers, bindings, dissociations;
 `tests/gxtb_energy_differences.py`, spec §4.18). In program conventions, as in the program, results depend slightly on the
 orientation of the molecule (up to ~1e-7 Eh; the program's onsite-exchange Fock matrix is not
-rotation covariant); the default conventions are invariant.
+rotation covariant); the default conventions are invariant. v1.1's Hessian in the default
+conventions is the response Hessian (central differences of the analytic gradient functional
+with the density extrapolated by the coupled-perturbed response, step 2e-4 bohr, reference SCF
+at accuracy 1e-5; within 1e-6 Eh/bohr² of Richardson-extrapolated finite differences,
+`crates/gxtb/tests/hessian_v11.rs`); `hessian_method="numerical"` gives central differences of
+analytic gradients. The program's conventions offer the numerical one only (their Fock matrix
+is not the derivative of the energy).
 
 g-xTB 2.0.1 (the grimme-lab/g-xtb 2.0.1 release, `xtb --gxtb`): `method="gxtb-v2.0.1"`
 (also `gxtb-2.0.1`, `g-xTB 2.0`) everywhere `gxtb-v1.1` is accepted, with the same options.
@@ -802,8 +808,8 @@ The dipole derivatives for the IR intensities come with the Hessian (`dipole_der
 3N x 3): from the SCC response for GFN2-xTB (analytic and response Hessians), from the
 coupled-perturbed density response for g-xTB 2.0.1 (analytic: the Mulliken charges' and atomic
 dipoles' integral derivatives plus the Mulliken analysis of dP; response: the extrapolated
-densities), and from the displaced dipoles of numerical Hessians (GFN2-xTB, g-xTB v1.1 and
-2.0.1).
+densities; v1.1's response Hessian likewise), and from the displaced dipoles of numerical
+Hessians (GFN2-xTB, g-xTB v1.1 and 2.0.1).
 
 Three conventions, chosen with the calculation's (`xtb` for GFN2-xTB and GFN-FF
 `conventions="xtb"`, `xtb-6.7.1` for `conventions="xtb-6.7.1"` and g-xTB's `conventions="gxtb"`,
