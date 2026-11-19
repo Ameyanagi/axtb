@@ -70,7 +70,9 @@ def test_runner_list_with_a_failure():
 
 def test_runner_grant():
     runner = qccompute.Runner(threads=2)
-    out = runner.compute(inp(keywords={"threads": 8}))
+    # qccompute 0.23.0 lowers a threads keyword above the runner's count and says so
+    with pytest.warns(RuntimeWarning, match="threads=8"):
+        out = runner.compute(inp(keywords={"threads": 8}))
     assert [w.code for w in out.warnings] == ["resource_capped"]
     assert out.resolved.settings["threads"] == 2
 

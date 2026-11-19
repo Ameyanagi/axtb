@@ -128,17 +128,17 @@ make_venv() {
   mkdir -p "$CHECK_DIR"
   if command -v uv > /dev/null; then
     uv venv -q -p "${AXTB_CHECK_PYTHON:-3.12}" "$VENV" || return 1
-    PIP=(uv pip install -q --prerelease=allow --python "$PY")
+    PIP=(uv pip install -q --python "$PY")
     REINSTALL=--reinstall
   else
     "${AXTB_CHECK_PYTHON:-python3}" -m venv "$VENV" || return 1
-    PIP=("$PY" -m pip install -q --pre)
+    PIP=("$PY" -m pip install -q)
     REINSTALL=--force-reinstall
   fi
-  # the qc* alphas the Python interface is built on (qcdata; qccompute for check_program and the
-  # runner), the linters of python/axtb
-  "${PIP[@]}" maturin numpy pytest "tblite==0.8.0" "dftd4==4.3.1" "qcdata>=0.24.0a5,<0.25" \
-    "qccompute[testing]>=0.23.0a4,<0.24" ruff mypy
+  # the qc* releases the Python interface is built on (qcdata; qccompute for check_program and
+  # the runner), the linters of python/axtb
+  "${PIP[@]}" maturin numpy pytest "tblite==0.8.0" "dftd4==4.3.1" "qcdata>=0.24.0,<0.25" \
+    "qccompute[testing]>=0.23.0,<0.24" ruff mypy
 }
 
 wheel() {
