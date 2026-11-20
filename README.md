@@ -611,9 +611,11 @@ g-xTB v1.1: `model.method` `"gxtb-v1.1"` in Python, `--method gxtb-v1.1` in the 
 `axtb_gxtb::Calculator` in Rust (implements the `Method` trait, as `axtb::Calculator`
 does): energies, analytic gradients, response and numerical Hessians. It uses the
 g-xTB 1.1.0 program's SCF (thresholds, start density, mixing; the CLI reads XYZ files with
-the program's Ångström factor), accepts `accuracy` (multiplier of the program's SCF
-thresholds), `etemp` (Fermi smearing, see below), `max_iter`, `threads` and `conventions`, and
-rejects the GFN2-only settings.
+the program's Ångström factor) in both conventions: 2.0.1's DIIS and thresholds would save 2-3
+iterations only by converging about ten times less tightly (caffeine gradient error 2.6e-6 →
+3.0e-5 Eh/bohr), and at v1.1's thresholds they save none. It accepts `accuracy` (multiplier of
+the program's SCF thresholds), `etemp` (Fermi smearing, see below), `max_iter`, `threads` and
+`conventions`, and rejects the GFN2-only settings.
 As for GFN2, the default is corrected and a mode reproduces the program exactly:
 `conventions="axtb"` (default) diagonalizes the exact derivative of the energy, so the SCF
 is stationary; `conventions="gxtb"` uses the program's Fock matrix (it leaves out two
