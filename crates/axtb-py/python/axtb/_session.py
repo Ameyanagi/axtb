@@ -449,7 +449,9 @@ class Session:
         elif p.composite:
             warm = history is not None and any(p.restart)
         else:
-            warm = scf["guess"] == "previous"
+            # without history a Hessian frame's single point still starts from the Hessian's own
+            # reference ("previous"): not a warm start
+            warm = history is not None and scf["guess"] == "previous"
         if r["given"]:
             warm = False
         rec: dict[str, Any] = {"warm_start": warm, "from_lineage": from_lineage}

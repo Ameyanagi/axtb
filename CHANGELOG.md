@@ -8,6 +8,14 @@ Rust crates, the CLI and the Python package share one version.
 Result changes decided after 0.2.0, one commit each; each bumps the numerics epochs of the
 methods whose results it may change ("Numerics epochs" at the end).
 
+### Python: a session's Hessian frame without history is no warm start
+
+- A session frame of a Hessian request on a lineage without history reports `warm_start: false`
+  (and `contingent["scf.restart"]` not fired). Its single point starts from the Hessian's own
+  reference (`record.scf.start` "previous"), which is no warm start in the session's sense;
+  before, GFN2-xTB's frames, and g-xTB's since the change above, reported true. No number
+  changes.
+
 ### g-xTB v1.1's default Hessian is the response Hessian (axtb conventions)
 
 - In the axtb conventions a v1.1 Hessian without `hessian_method` (Python `hessian.method`, CLI
