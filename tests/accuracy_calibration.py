@@ -19,7 +19,8 @@ The fit (`fit`): per method, conventions kind (axtb or the program's) and quanti
 err <= k acc^p as the upper envelope over molecules and starts (p from the slope, k the largest
 err / acc^p), and the smallest factor still worth setting (the floor, where errors stop falling).
 g-xTB v1.1's open shells do not fall monotonically: they get a table of the worst error at each
-factor instead. The constants go into crates/axtb-py/python/axtb/_accuracy.py.
+factor instead. The constants go into crates/axtb-py/python/axtb/_accuracy.py. After a
+recalibration, tests/accuracy_heldout.py checks them on molecules outside this set.
 """
 
 from __future__ import annotations
@@ -327,9 +328,9 @@ def up(x, digits=3):
     return math.ceil(x / 10**e - 1e-9) * 10**e
 
 
-def write_constants(f, source, data):
-    """Write the fitted constants into the CALIBRATION block of axtb/_accuracy.py."""
-    cal = {
+def constants(f, data):
+    """The CALIBRATION dict of a fit `f` of the calibration `data` (axtb/_accuracy.py's)."""
+    return {
         "source": "bench/results/accuracy.json",
         "axtb": data.get("axtb"),
         "commit": data.get("commit"),
@@ -349,6 +350,11 @@ def write_constants(f, source, data):
             for name, v in f["hessian"].items()
         },
     }
+
+
+def write_constants(f, source, data):
+    """Write the fitted constants into the CALIBRATION block of axtb/_accuracy.py."""
+    cal = constants(f, data)
     path = ROOT / "crates/axtb-py/python/axtb/_accuracy.py"
     text = path.read_text()
     begin = "# BEGIN CALIBRATION (written by tests/accuracy_calibration.py --write; do not edit by hand)\n"

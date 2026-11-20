@@ -120,8 +120,8 @@ fn v11_response_hessians_match_reference() {
 }
 
 /// The calculator offers v1.1's response Hessian in the default conventions only (the program's
-/// Fock matrix is not the derivative of its energy), and the analytic one in neither; on 1 and 4
-/// threads it gives the same bits.
+/// Fock matrix is not the derivative of its energy), as its default there, and the analytic one
+/// in neither; on 1 and 4 threads it gives the same bits.
 #[test]
 fn v11_response_hessian_through_the_calculator() {
     use axtb::method::Method;
@@ -141,6 +141,11 @@ fn v11_response_hessian_through_the_calculator() {
     let h1 = calc(Conventions::Axtb, 1).hessian(&mol.positions, &response).unwrap();
     let h4 = calc(Conventions::Axtb, 4).hessian(&mol.positions, &response).unwrap();
     assert_eq!(h1.method, HessianMethod::Response);
+    // the default: the response Hessian in the default conventions, numerical in the program's
+    assert_eq!(calc(Conventions::Axtb, 1).info().hessian.default, HessianMethod::Response);
+    assert_eq!(calc(Conventions::Gxtb, 1).info().hessian.default, HessianMethod::Numerical);
+    let default = calc(Conventions::Axtb, 1).hessian(&mol.positions, &HessianOptions::default()).unwrap();
+    assert_eq!((default.method, &default.hessian), (HessianMethod::Response, &h1.hessian));
     assert_eq!(h1.hessian, h4.hessian, "1 vs 4 threads");
     assert_eq!(h1.dipole_derivatives, h4.dipole_derivatives, "1 vs 4 threads");
     // the calculator's reference SCF (accuracy 1e-5) against the tight reference of this file

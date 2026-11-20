@@ -19,7 +19,7 @@ License: LGPL-3.0-or-later, every crate, the CLI and the Python package ([Licens
 | GFN2-xTB energies and analytic gradients (self-consistent D4, multipole electrostatics) | xtb 6.8.0 and 6.7.1, tblite 0.8.0 |
 | GFN2-xTB Hessians: analytic (coupled-perturbed SCC response; the default), response and numerical | finite differences, `xtb --hess` |
 | ALPB/GBSA implicit solvation for GFN2-xTB (25 ALPB / 14 GBSA solvents, 3 reference states) | xtb 6.8.0 and 6.7.1, tblite 0.8.0 |
-| g-xTB v1.1 (public parameters): energies, analytic gradients, semi-numerical Hessians, finite electronic temperature | the g-xTB 1.1.0 program |
+| g-xTB v1.1 (public parameters): energies, analytic gradients, response (default) and numerical Hessians, finite electronic temperature | the g-xTB 1.1.0 program |
 | g-xTB 2.0.1: energies, analytic gradients, analytic (default), response and numerical Hessians, finite electronic temperature | the g-xTB 2.0.1 program |
 | g-xTB in implicit solvent: g-xTB plus GFN2-xTB's ALPB/GBSA solvation energy, as one calculation | the three xtb program runs it replaces |
 | GFN-FF: energies, analytic gradients, analytic (default) and numerical Hessians with dipole derivatives | xtb 6.8.0 and 6.7.1 (`--gfnff`) |
@@ -232,7 +232,7 @@ The response, for every front end (a field is present when it applies):
 
 | fields | what |
 |---|---|
-| `program`, `version`, `method`, `conventions`, `numerics`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the numerics identity of the code that produced the numbers (`"gfn2:1"`, `"gxtb-v2.0.1:1+gfn2:1"` for the solvation composite, `"analysis:1"`; a method's epoch changes with every change of its results, see the CHANGELOG), the SCF's eigensolver (`faer` or the run-time LAPACK library) |
+| `program`, `version`, `method`, `conventions`, `numerics`, `eigensolver` | `"axtb"`, axtb's version, the canonical method (`null` for an analysis) and conventions, the numerics identity of the code that produced the numbers (`"gfn2:3"`, `"gxtb-v2.0.1:3+gfn2:3"` for the solvation composite, `"analysis:1"`; a method's epoch changes with every change of its results, see the CHANGELOG), the SCF's eigensolver (`faer` or the run-time LAPACK library) |
 | `energy`, `gradient`, `charges`, `dipole`, `terms`, `timings`, `seconds` | Eh, Eh/bohr (with `gradient`), atomic charges (Mulliken; GFN-FF: EEQ), e·bohr, energy terms (Eh), wall time per phase and of the request (s) |
 | `iterations`, `guess`, `mixer_used`, `scf_attempts`, `homo_lumo_gap`, `quadrupole`, `shell_charges`, `atomic_dipoles`, `atomic_quadrupoles`, `orbital_energies_alpha`/`_beta`, `occupations_alpha`/`_beta`, `fermi_levels`, `electronic_temperature`, `bond_orders` | SCF methods (`mixer_used` and `scf_attempts`: GFN2-xTB; `fermi_levels`: alpha and beta, `null` for the Aufbau filling, the same level twice for a closed shell; `electronic_temperature`: K, 0 for the Aufbau filling) |
 | `n_hbonds`, `n_xbonds`, `topology` | GFN-FF |
@@ -494,9 +494,11 @@ shell charges and atomic multipoles), g-xTB in the default conventions. For g-xT
 what the programs' restart files hold: v1.1 the density matrices (`gxtbrestart`), 2.0.1 the shell
 charges and magnetizations, atomic dipoles and quadrupoles and the density matrices
 (`xtbrestart`), taken over as they are although the charge- and CN-dependent q-vSZP basis of the
-new geometry differs (the programs do the same). An SCF from a previous state that does not
-converge runs once more from the program's EEQ-BC start. Results say which start produced them
-(`guess`: `previous`, `eeq-bc`, `eeq`, `sad`; Rust `ScfReport::start`).
+new geometry differs (the programs do the same). An SCF from a previous state that fails (does
+not converge, or breaks down) runs once more from the program's EEQ-BC start. Results say which start produced them
+(`guess`: `previous`, `eeq-bc`, `eeq`, `sad`; Rust `ScfReport::start`). A Hessian leaves its
+reference SCF's converged state as the previous one, like a single point, so the single point of
+a Hessian's response starts from it where the policy reuses the previous state.
 
 - `conventions="gxtb"` keeps the programs' fresh EEQ-BC start for every SCF, so each result is
   that of a fresh program run. `guess="previous"` (Python `scf.restart: previous`, Rust
@@ -546,7 +548,7 @@ none) is a ladder of rungs for an SCF that fails (does not converge, or breaks d
 calculation runs again at each rung in order, as a fresh SCF from the method's own start with the
 rung's electronic temperature and iteration limit (a missing one: the calculation's), until one
 converges. GFN2-xTB's Broyden-then-DIIS fallback and a calculator's fresh start after a history
-that did not converge run inside each try, before any rung.
+that failed run inside each try, before any rung.
 
 ```
 axtb h2o-stretched.xyz --grad --max-iter 30 --scf-retry etemp=1000,max_iter=1000 --scf-retry etemp=3000,max_iter=1000
@@ -607,11 +609,13 @@ smoothed FD Hessian that xtb reports, without SCF noise.
 
 g-xTB v1.1: `model.method` `"gxtb-v1.1"` in Python, `--method gxtb-v1.1` in the CLI,
 `axtb_gxtb::Calculator` in Rust (implements the `Method` trait, as `axtb::Calculator`
-does): energies, analytic gradients, semi-numerical Hessians. It uses the
+does): energies, analytic gradients, response and numerical Hessians. It uses the
 g-xTB 1.1.0 program's SCF (thresholds, start density, mixing; the CLI reads XYZ files with
-the program's Ångström factor), accepts `accuracy` (multiplier of the program's SCF
-thresholds), `etemp` (Fermi smearing, see below), `max_iter`, `threads` and `conventions`, and
-rejects the GFN2-only settings.
+the program's Ångström factor) in both conventions: 2.0.1's DIIS and thresholds would save 2-3
+iterations only by converging about ten times less tightly (caffeine gradient error 2.6e-6 →
+3.0e-5 Eh/bohr), and at v1.1's thresholds they save none. It accepts `accuracy` (multiplier of
+the program's SCF thresholds), `etemp` (Fermi smearing, see below), `max_iter`, `threads` and
+`conventions`, and rejects the GFN2-only settings.
 As for GFN2, the default is corrected and a mode reproduces the program exactly:
 `conventions="axtb"` (default) diagonalizes the exact derivative of the energy, so the SCF
 is stationary; `conventions="gxtb"` uses the program's Fock matrix (it leaves out two
@@ -621,7 +625,18 @@ ferrocene) and ≤ 1.1e-5 Eh in the energy differences tested (conformers, the S
 reaction and HCN → HNC with their barriers, bindings, dissociations;
 `tests/gxtb_energy_differences.py`, spec §4.18). In program conventions, as in the program, results depend slightly on the
 orientation of the molecule (up to ~1e-7 Eh; the program's onsite-exchange Fock matrix is not
-rotation covariant); the default conventions are invariant.
+rotation covariant); the default conventions are invariant. The default conventions also switch
+the primitive pairs of the H0 and ACP overlaps off smoothly between a b R²/(a + b) = 20 and 25,
+where the program cuts them at 20: a hard cutoff leaves steps of ~1e-11 to 1e-10 Eh in the
+energy surface wherever a pair crosses it, which finite differences with steps of 5e-4 bohr or
+more cross (CuCl4²⁻: 5-point error 8.3e-9 Eh/bohr at h = 1e-3); energies differ by up to
+~7e-9 Eh. v1.1's Hessian in the default
+conventions is the response Hessian (central differences of the analytic gradient functional
+with the density extrapolated by the coupled-perturbed response, step 2e-4 bohr, reference SCF
+at accuracy 1e-5; within 1e-6 Eh/bohr² of Richardson-extrapolated finite differences,
+`crates/gxtb/tests/hessian_v11.rs`); `hessian_method="numerical"` gives central differences of
+analytic gradients. The program's conventions offer the numerical one only (their Fock matrix
+is not the derivative of the energy).
 
 g-xTB 2.0.1 (the grimme-lab/g-xtb 2.0.1 release, `xtb --gxtb`): `method="gxtb-v2.0.1"`
 (also `gxtb-2.0.1`, `g-xTB 2.0`) everywhere `gxtb-v1.1` is accepted, with the same options.
@@ -800,8 +815,8 @@ The dipole derivatives for the IR intensities come with the Hessian (`dipole_der
 3N x 3): from the SCC response for GFN2-xTB (analytic and response Hessians), from the
 coupled-perturbed density response for g-xTB 2.0.1 (analytic: the Mulliken charges' and atomic
 dipoles' integral derivatives plus the Mulliken analysis of dP; response: the extrapolated
-densities), and from the displaced dipoles of numerical Hessians (GFN2-xTB, g-xTB v1.1 and
-2.0.1).
+densities; v1.1's response Hessian likewise), and from the displaced dipoles of numerical
+Hessians (GFN2-xTB, g-xTB v1.1 and 2.0.1).
 
 Three conventions, chosen with the calculation's (`xtb` for GFN2-xTB and GFN-FF
 `conventions="xtb"`, `xtb-6.7.1` for `conventions="xtb-6.7.1"` and g-xTB's `conventions="gxtb"`,

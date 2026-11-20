@@ -13,6 +13,10 @@ and feature, a few thread counts and the run-time LAPACK path) and compare outpu
                                                   object, e.g. terms.band) new: ignored where the
                                                   golden output lacks them (a commit that adds
                                                   fields)
+    scripts/golden.py compare DIR --ignore-numerics
+                                                  the same, without comparing the `numerics`
+                                                  identities (a commit that bumps an epoch: every
+                                                  output of that method names the new one)
     scripts/golden.py list                        the cases
 
 Outputs are compared exactly (every float, every field) except the timing fields. Golden files
@@ -67,10 +71,12 @@ def mol(path: Path, charge=0.0, uhf=None):
 WATER, CAFF, TAXOL = S / "water.xyz", S / "caffeine.xyz", S / "taxol.xyz"
 W100, W333, C50 = S / "large/water100.xyz", S / "large/water333.xyz", S / "large/c50h102.xyz"
 O2, CU, FC = R2 / "reference/dioxygen_triplet/mol.xyz", S / "cu-nh3-4.xyz", S / "ferrocene.xyz"
+CUCL4 = ROOT / "crates/gxtb/tests/reference/tetrachlorocuprate/mol.xyz"
 BENI, CF3BR, TYR, IL, GH106, MB33, ZNCL4 = (S / f for f in ("beni-acetone.xyz", "cf3br-benzene.xyz", "tyr-xab.xyz",
                                          "s229-cl.xyz", "gh106.xyz", "mb33.xyz", "zncl4.xyz"))
 # hard SCFs (tests/scf_hard_set.py): stretched H2O and F2 (both bonds / the bond at 3 or 3.5 Å, singlets)
 # and a seeded random molecule (a doublet)
+H2O25 = ROOT / "tests/scf_hard/scan-H2O-2.5.xyz"
 H2O3, F23, F235, MBH112 = (ROOT / "tests/scf_hard" / f for f in ("scan-H2O-3.0.xyz", "scan-F2-3.0.xyz",
                                                                    "scan-F2-3.5.xyz", "random-mbheavy-112.xyz"))
 
@@ -141,6 +147,7 @@ def corpus():
         add(f"gxtb11-caffeine-grad-{conv}", caf, method="gxtb-v1.1", conventions=conv, gradient=True)
     add("gxtb11-cu-doublet-grad", cu, method="gxtb-v1.1", gradient=True)
     add("gxtb11-water-hessian", w, method="gxtb-v1.1", hessian=True)
+    add("gxtb11-water-hessian-numerical", w, method="gxtb-v1.1", hessian=True, hessian_method="numerical")
     add("gxtb11-water-hessian-gxtb", w, method="gxtb-v1.1", hessian=True, conventions="gxtb")
     add("gxtb11-caffeine-etemp", caf, method="gxtb-v1.1", gradient=True, etemp=3000.0)
     # Step 17 (v1.1 on the 2.0.1 engine): a large system on one and four threads (the parallel dense
@@ -263,6 +270,10 @@ def corpus():
     add("gxtb2-caffeine-etemp-gxtb", caf, method="gxtb-v2.0.1", conventions="gxtb", etemp=3000.0)
     add("gxtb11-o2-triplet-etemp-grad", o2, method="gxtb-v1.1", gradient=True, etemp=5000.0)
     add("gxtb11-cu-doublet-etemp", cu, method="gxtb-v1.1", etemp=3000.0)
+    # v1.1's smooth primitive screening of H0 and ACP (axtb conventions; the program's hard 20 made steps of
+    # ~1e-10 Eh in this energy): CuCl4 2- (doublet) at 5000 K, tightly converged
+    add("gxtb11-cucl4-etemp5000-grad", mol(CUCL4, -2.0, 1), method="gxtb-v1.1", gradient=True, etemp=5000.0,
+        accuracy=1e-6, max_iter=1000)
     # Warm starts: a structure and two small displacements on one calculator, each SCF from the previous
     # geometry's converged wavefunction (guess "previous": GFN2's moments, g-xTB 2.0.1's state, v1.1's
     # densities); the axtb conventions of 2.0.1 restart at RESTART_ACCURACY, the program's at its own thresholds
@@ -297,54 +308,74 @@ def corpus():
     add("error-gfnff-hessian-accuracy", w, method="gfnff", hessian=True, hessian_accuracy=0.1)
     add("error-gfnff-bond-orders", w, method="gfnff", bond_orders=True)
     add("gfnff-water-hessian-numerical", w, method="gfnff", hessian=True, hessian_method="numerical")
-    # warm starts around Hessians: GFN2 with guess "fresh" (the single point after the Hessian starts from its
-    # reference), g-xTB 2.0.1 and v1.1 (the single point after the Hessian starts from the program's start,
-    # the next Hessian's reference from the previous state), the composite in both conventions
+    # warm starts around Hessians: a Hessian leaves its reference as the previous wavefunction and the restart
+    # policy decides the next start: GFN2 with guess "fresh" (every SCF fresh), GFN2, g-xTB 2.0.1 and v1.1 with
+    # "previous" (the single point after the Hessian from its reference, the next Hessian's reference from the
+    # previous state), 2.0.1 in the program's conventions (every SCF from the program's start), the composite in
+    # both conventions
     add("traj-gfn2-water-hessian-fresh", {**w, "trajectory": trajectory(w["positions"]), "guess": "fresh"},
         method="gfn2", hessian=True)
     add("traj-gfn2-water-hessian", traj(w), method="gfn2", hessian=True)
     add("traj-gxtb2-water-hessian", traj(w), method="gxtb-v2.0.1", hessian=True)
     add("traj-gxtb11-water-hessian", traj(w), method="gxtb-v1.1", hessian=True)
+    add("traj-gxtb2-water-hessian-gxtb", {**w, "trajectory": trajectory(w["positions"])}, method="gxtb-v2.0.1",
+        conventions="gxtb", hessian=True)
     for conv in ("axtb", "gxtb"):
         # each part as its conventions say (gxtb: every SCF from the programs' starts)
         add(f"traj-gxtb2-water-composite-grad-{conv}", {**w, "trajectory": trajectory(w["positions"])},
             method="gxtb-v2.0.1", conventions=conv, gradient=True, **comp)
-    # the retry from the method's own start: water, then the same atoms stretched to 3 Å, where the SCF from
-    # water's converged state does not converge within max_iter and the fresh one does (the second response's
-    # guess is the method's own start)
+    # the retry from the method's own start: water, then the same atoms stretched, where the SCF from water's
+    # converged state does not converge within max_iter and the fresh one does (the second response's guess is
+    # the method's own start). GFN2-xTB at 2.5 Å, where the SCF has one solution: from water's state Broyden stops
+    # at max_iter 23 and DIIS would need 27 iterations, the fresh start converges in 19 (at 3 Å round-off decided
+    # whether the slowly converging fresh rung converged within max_iter 60: moving an atom by 1e-10 bohr flipped
+    # it)
     h3 = mol(H2O3, 0.0, 0)
     h3w = [h3["positions"][i] for i in (1, 2, 0)]  # in water.xyz's atom order (H, H, O)
+    h25 = mol(H2O25, 0.0, 0)
+    h25w = [h25["positions"][i] for i in (1, 2, 0)]
     jump = {**w, "trajectory": [w["positions"], h3w], "guess": "previous"}
-    add("traj-gfn2-water-stretch-retry", jump, method="gfn2", accuracy=1e-4, max_iter=60, gradient=True)
-    add("traj-gfn2-water-stretch-retry-hessian", jump, method="gfn2", accuracy=1e-4, max_iter=60, hessian=True)
+    jump25 = {**w, "trajectory": [w["positions"], h25w], "guess": "previous"}
+    add("traj-gfn2-water-stretch-retry", jump25, method="gfn2", accuracy=1e-4, max_iter=23, gradient=True)
+    add("traj-gfn2-water-stretch-retry-hessian", jump25, method="gfn2", accuracy=1e-4, max_iter=23, hessian=True)
     # 2.0.1, ladder cases: at accuracy 1 the stretched SCF converges where round-off decides (energies 9e-9
-    # apart between builds), at 1e-3 the iteration counts differ, at 1e-4 it sits on the Fock residual's
-    # round-off floor (~3e-9); at 1e-2 builds agree to 1e-10 in the energy. The Hessian's reference SCF
-    # (accuracy 1e-5) at 3 Å never reaches its thresholds: an error whose numbers round-off decides
-    add("traj-gxtb2-water-stretch-retry", jump, method="gxtb-v2.0.1", accuracy=1e-2, max_iter=40, gradient=True)
-    add("traj-gxtb2-water-stretch-retry-hessian", jump, method="gxtb-v2.0.1", max_iter=40, hessian=True)
+    # apart between builds), at 1e-4 it sits on the Fock residual's round-off floor (~3e-9), at 1e-2 the
+    # gradient's stopping point moves by 6e-7 when an atom moves by 1e-10 bohr; at 1e-3 the fresh SCF converges
+    # in 35-43 iterations on one state (energies 5e-12, gradients 9e-8 apart), the warm start would need
+    # hundreds. The Hessian fails at 2.5 Å: its
+    # reference SCF needs 21 iterations from water's state and more fresh, water's 12 (at 3 Å round-off decided
+    # how it failed: stopping on the residual's floor, with numbers 1e-2 apart, or the response refusing an
+    # unstable solution)
+    add("traj-gxtb2-water-stretch-retry", jump, method="gxtb-v2.0.1", accuracy=1e-3, max_iter=60, gradient=True)
+    add("traj-gxtb2-water-stretch-retry-hessian", jump25, method="gxtb-v2.0.1", max_iter=16, hessian=True)
     # v1.1, compared as a ladder case: at accuracy 1 the stretched SCF stops where round-off decides
     # (charges ~1e-5 apart between builds), at 1e-4 builds agree to 1e-11 (step 17, C10); max_iter
     # 100 leaves both rungs a margin there (the warm start would converge after 181 iterations with
     # 803e316 and 144 at C10, on a state 0.0099 Eh lower; the fresh start converges after 56 and 61)
     add("traj-gxtb11-water-stretch-retry", jump, method="gxtb-v1.1", accuracy=1e-4, max_iter=100, gradient=True)
-    # scf_retries, mepd's ladder (1000 K, then 3000 K, each with 1000 iterations): water at 3 Å, whose SCF at the
+    # scf_retries, mepd's ladder (1000 K, then 3000 K, each with 1000 iterations): stretched water, whose SCF at the
     # calculation's own settings does not converge within max_iter and does on the first rung, in each method; a
     # gradient, a Hessian (whole at the rung, with its single point), a trajectory (water, then the stretched water
     # twice: the second frame tries the own settings first, from the rung's state), the composite (every part on the
-    # rung, the single point after the Hessian starting there) and every rung failing
+    # rung, the single point after the Hessian starting there) and every rung failing. GFN2-xTB at 3 Å; g-xTB at
+    # 2.5 Å, where its SCF has one solution at every rung (at 3 Å the fresh SCF at 1000 K ends on one of four or
+    # more, which moving an atom by 1e-10 bohr changes). 2.0.1's warm start from water converges in 14
+    # iterations, so its trajectory runs at max_iter 6, where water climbs too (its fresh SCF needs 11)
     ladder = [{"etemp": 1000.0, "max_iter": 1000}, {"etemp": 3000.0, "max_iter": 1000}]
-    retry_traj = {**w, "trajectory": [w["positions"], h3w, h3w], "guess": "previous"}
-    for name, method, kw in (("gfn2", "gfn2", {"accuracy": 1e-4, "max_iter": 30}),
-                             ("gxtb2", "gxtb-v2.0.1", {"accuracy": 1e-2, "max_iter": 20}),
-                             ("gxtb11", "gxtb-v1.1", {"accuracy": 1e-4, "max_iter": 30})):
-        add(f"{name}-h2o-3a-retries", h3, method=method, gradient=True, scf_retries=ladder, **kw)
-        add(f"{name}-h2o-3a-retries-hessian", h3, method=method, hessian=True, scf_retries=ladder, **kw)
-        add(f"traj-{name}-water-stretch-retries", retry_traj, method=method, gradient=True, scf_retries=ladder, **kw)
-    add("gxtb2-h2o-3a-composite-retries-hessian", h3, method="gxtb-v2.0.1", accuracy=1e-2, max_iter=20, hessian=True,
+    for name, method, (x, xw, d), kw, traj_iter in (
+            ("gfn2", "gfn2", (h3, h3w, "3a"), {"accuracy": 1e-4, "max_iter": 30}, 30),
+            ("gxtb2", "gxtb-v2.0.1", (h25, h25w, "2.5a"), {"accuracy": 1e-2, "max_iter": 20}, 6),
+            ("gxtb11", "gxtb-v1.1", (h25, h25w, "2.5a"), {"accuracy": 1e-4, "max_iter": 16}, 16)):
+        retry_traj = {**w, "trajectory": [w["positions"], xw, xw], "guess": "previous"}
+        add(f"{name}-h2o-{d}-retries", x, method=method, gradient=True, scf_retries=ladder, **kw)
+        add(f"{name}-h2o-{d}-retries-hessian", x, method=method, hessian=True, scf_retries=ladder, **kw)
+        add(f"traj-{name}-water-stretch-retries", retry_traj, method=method, gradient=True, scf_retries=ladder,
+            **{**kw, "max_iter": traj_iter})
+    add("gxtb2-h2o-2.5a-composite-retries-hessian", h25, method="gxtb-v2.0.1", accuracy=1e-2, max_iter=6, hessian=True,
         scf_retries=ladder, **comp)
-    add("error-gfn2-h2o-3a-retries", h3, method="gfn2", accuracy=1e-4, max_iter=30, gradient=True,
-        scf_retries=[{"max_iter": 31}, {"max_iter": 32}])
+    # (its last rung's numbers after 2 x 12 iterations: 32 left them 6.5e-8 apart when an atom moved by 1e-10 bohr)
+    add("error-gfn2-h2o-3a-retries", h3, method="gfn2", accuracy=1e-4, max_iter=10, gradient=True,
+        scf_retries=[{"max_iter": 11}, {"max_iter": 12}])
     return c
 
 
@@ -382,6 +413,15 @@ def trajectory_runner(axtb: str, given: str) -> str:
         return given
     beside = Path(axtb + "-trajectory")
     return str(beside if beside.exists() else Path(axtb).parent / "examples/golden_trajectory")
+
+
+def without_numerics(x):
+    """The output without its `numerics` identities, at any depth."""
+    if isinstance(x, dict):
+        return {k: without_numerics(v) for k, v in x.items() if k != "numerics"}
+    if isinstance(x, list):
+        return [without_numerics(v) for v in x]
+    return x
 
 
 def strip_timings(x):
@@ -447,17 +487,15 @@ THRESHOLDS = {
 # RMS density change 2e-5, energy change 1e-8 Eh): charges 2e-5, atomic and molecular dipoles 1e-4
 # (x 5 bohr), quadrupoles 2e-4 (x 10 bohr^2), terms, orbital energies and the gap 1e-5 Eh (x 0.5 Eh);
 # the iteration counts may differ and are always printed; the numbers in an error's message (energy change,
-# residual) within the SCF test's scale, 1e-8. The gfn2 stretch-retry cases joined at alpha 1 (the commit
-# that computes GFN2's orbitals without occupation after the SCF, whose SCFs keeping every orbital moved
-# from the full eigensolver to the occupied orbitals' path): at 3 Å the warm start fails within max_iter 60,
-# and round-off decides where the slowly converging fresh rung stops (charges 1.1e-9, dipole 3.7e-9 apart);
-# with max_iter 200 the two builds agree to 6e-13.
+# residual) within the SCF test's scale, 1e-8. Every ladder case lands on one state: moving any atom of its
+# stretched geometry by +-1e-10 bohr along x, y or z, on 1 and 4 threads, gives the same outcome (start, rung,
+# energy to 1e-7 Eh, error kind) in every frame.
 LADDER_CASES = ("traj-gxtb11-water-stretch-retry", "traj-gxtb2-water-stretch-retry",
                 "traj-gxtb2-water-stretch-retry-hessian", "traj-gfn2-water-stretch-retry",
                 "traj-gfn2-water-stretch-retry-hessian") + tuple(
-    f"{p}{m}{c}" for m in ("gfn2", "gxtb2", "gxtb11")
-    for p, c in (("", "-h2o-3a-retries"), ("", "-h2o-3a-retries-hessian"), ("traj-", "-water-stretch-retries"))
-) + ("gxtb2-h2o-3a-composite-retries-hessian", "error-gfn2-h2o-3a-retries")
+    f"{p}{m}{c}" for m, d in (("gfn2", "3a"), ("gxtb2", "2.5a"), ("gxtb11", "2.5a"))
+    for p, c in (("", f"-h2o-{d}-retries"), ("", f"-h2o-{d}-retries-hessian"), ("traj-", "-water-stretch-retries"))
+) + ("gxtb2-h2o-2.5a-composite-retries-hessian", "error-gfn2-h2o-3a-retries")
 LADDER_THRESHOLDS = {
     "energy": 1e-10, "gradient": 1e-7, "charges": 2e-5, "shell_charges": 2e-5, "atomic_dipoles": 1e-4,
     "dipole": 1e-4, "atomic_quadrupoles": 2e-4, "quadrupole": 2e-4, "terms": 1e-5, "orbital_energies_alpha": 1e-5,
@@ -724,6 +762,8 @@ def main():
     ap.add_argument("--allow", default="gxtb11", help="comma-separated substrings of the cases that may change")
     ap.add_argument("--added", default="", help="comma-separated response fields that are new (absent from DIR); "
                     "group.field for a field inside an object")
+    ap.add_argument("--ignore-numerics", action="store_true",
+                    help="leave the numerics identities out of the comparison (a commit that bumps epochs)")
     a = ap.parse_args()
     cases = corpus()
     if a.only:
@@ -767,6 +807,8 @@ def main():
     for name, req, env in cases:
         gold = json.loads((d / f"{name}.json").read_text())
         new = run(a.axtb, req, env, traj)
+        if a.ignore_numerics:
+            gold, new = without_numerics(gold), without_numerics(new)
         if added:
             new, dropped = drop_added(gold, new, added)
             for k in dropped:

@@ -129,6 +129,19 @@ def test_compute_many_in_order_with_failures_in_place():
     assert bits(frames[3]) == want and frames[2].record["warm_start"] is True
 
 
+@pytest.mark.parametrize("method", ["gfn2", "gxtb-v2.0.1", "gxtb-v1.1"])
+def test_a_hessian_frame_without_history_is_no_warm_start(method):
+    """A Hessian frame's single point starts from the Hessian's own reference (`scf.start`
+    "previous"): without lineage history that is no warm start; with history it is."""
+    with axtb.Session(inp(method, structure=WATER), calctypes=["hessian"]) as s:
+        first = s.compute(calctype="hessian")
+        second = s.compute(calctype="hessian")
+    assert first.record["scf"]["start"] == "previous"
+    assert first.record["warm_start"] is False and first.record["contingent"]["scf.restart"]["fired"] is False
+    assert "restart_fallback" not in first.record["scf"]
+    assert second.record["warm_start"] is True
+
+
 def test_calctypes_and_keywords():
     kw = {"threads": 1, "hessian": {"method": "numerical"}}
     with pytest.raises(ProgramError) as e:

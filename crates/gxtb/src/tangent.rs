@@ -160,7 +160,7 @@ pub fn h0_pair(
     let r = norm2_sq(rab).sqrt();
     let nv = [rab[0] / r, rab[1] / r, rab[2] / r];
     let kmu = diat_scale(model, za, zb);
-    let intcut = model.intcut_h0();
+    let screen = model.screen_h0();
     let radsum = model.h0_rad(za) + model.h0_rad(zb);
     let vec = sub3(ra, rb);
     let (mut ba, mut bb) = ([0.0; MBLK], [0.0; MBLK]);
@@ -186,9 +186,9 @@ pub fn h0_pair(
         for (isb, sb) in shb.iter().enumerate() {
             let (pib, dpib) = shell_poly(model, zb, sb.l, r, radsum);
             let (seb, dseb) = selfenergy(model, zb, isb, cnb);
-            multipole_grad(sb, sa, vec, intcut, mg, scr);
-            overlap(sb, &dsha[isa], vec, intcut, &mut ba);
-            overlap(&dshb[isb], sa, vec, intcut, &mut bb);
+            multipole_grad(sb, sa, vec, screen, mg, scr);
+            overlap(sb, &dsha[isa], vec, screen, &mut ba);
+            overlap(&dshb[isb], sa, vec, screen, &mut bb);
             let (la, lb) = (sa.l, sb.l);
             let (ma, mb) = (2 * la + 1, 2 * lb + 1);
             let pick = |src: &dyn Fn(usize) -> f64| -> Vec<f64> {
@@ -454,7 +454,7 @@ impl Setup {
         let mut bq = [0.0; MBLK];
         let mut blk = [0.0; MBLK];
         let set = AcpSet::new(&self.model, mol, &self.cn, self.cutoff);
-        let (acp_cut2, acp_intcut) = (set.cutoff * set.cutoff, set.intcut);
+        let (acp_cut2, acp_screen) = (set.cutoff * set.cutoff, set.screen);
         for &(ip, ref proj, w, _) in &set.list {
             {
                 let (l, proj) = (proj.l, *proj);
@@ -473,10 +473,10 @@ impl Setup {
                         continue;
                     }
                     for (is, s) in shells[ia].iter().enumerate() {
-                        overlap(&proj, s, vec, acp_intcut, &mut blk);
-                        overlap(&proj, &dsh[ia][is], vec, acp_intcut, &mut bq);
+                        overlap(&proj, s, vec, acp_screen, &mut blk);
+                        overlap(&proj, &dsh[ia][is], vec, acp_screen, &mut bq);
                         if ia != ip {
-                            multipole_grad(&proj, s, vec, acp_intcut, &mut mg, &mut scr);
+                            multipole_grad(&proj, s, vec, acp_screen, &mut mg, &mut scr);
                         }
                         for a in 0..2 * s.l + 1 {
                             let mu = first[ia][is] + a;

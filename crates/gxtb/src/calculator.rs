@@ -9,8 +9,9 @@
 //! Energies, analytic gradients ([`crate::gradient`]; v1.1 in the program's conventions with the
 //! response of its Fock matrix)
 //! and Hessians ([`Method::hessian`]: for 2.0.1 analytic (the default) or response,
-//! [`crate::hessian`]; for both versions numerical, central differences of analytic
-//! gradients as GFN2-xTB's), with the settings of [`Options`] (refused when out of range or
+//! [`crate::hessian`], for v1.1 in the default conventions response (its default); for both
+//! versions numerical, central differences of analytic gradients as GFN2-xTB's, v1.1's only
+//! Hessian in the program's conventions), with the settings of [`Options`] (refused when out of range or
 //! meant for the other version, [`ScfOptions::check`]). Where an SCF starts is the restart
 //! policy [`ScfSettings::restart`]: in the default conventions from the previous geometry's
 //! converged state (the programs' restart files `xtbrestart` and `gxtbrestart` carry the same),
@@ -180,6 +181,16 @@ enum Start {
     V1_1(Vec<Vec<f64>>),
 }
 
+impl Start {
+    /// The start a converged SCF state of `version` leaves.
+    fn of(version: Version, state: crate::scf::State) -> Self {
+        match version {
+            Version::V1_1 => Start::V1_1(state.p),
+            Version::V2_0_1 => Start::V2_0_1(Box::new(state)),
+        }
+    }
+}
+
 /// g-xTB bound to one molecule (atomic numbers, charge, unpaired electrons).
 pub struct Calculator {
     mol: Molecule,
@@ -257,12 +268,12 @@ fn info(version: Version, conventions: Conventions) -> MethodInfo {
                 numerical,
             ],
         },
-        // v1.1: the response Hessian in the default conventions, where its Fock matrix is the
-        // derivative of its energy (the program's is not: numerical only)
-        Version::V1_1 => HessianDefaults {
-            default: HessianMethod::Numerical,
-            offered: match conventions {
-                Conventions::Axtb => vec![
+        // v1.1: the response Hessian (the default) in the default conventions, where its Fock
+        // matrix is the derivative of its energy; the program's is not: numerical only
+        Version::V1_1 => match conventions {
+            Conventions::Axtb => HessianDefaults {
+                default: HessianMethod::Response,
+                offered: vec![
                     numerical,
                     HessianDefault {
                         method: HessianMethod::Response,
@@ -270,8 +281,8 @@ fn info(version: Version, conventions: Conventions) -> MethodInfo {
                         accuracy: Some(ANALYTIC_ACCURACY),
                     },
                 ],
-                Conventions::Gxtb => vec![numerical],
             },
+            Conventions::Gxtb => HessianDefaults { default: HessianMethod::Numerical, offered: vec![numerical] },
         },
     };
     MethodInfo {
@@ -411,10 +422,11 @@ impl Calculator {
         Ok(r)
     }
 
-    fn hessian_inner(&mut self, positions: &[[f64; 3]], opts: &HessianOptions) -> Result<axtb::Hessian> {
+    /// The Hessian and the converged state of its reference SCF.
+    fn hessian_inner(&mut self, positions: &[[f64; 3]], opts: &HessianOptions) -> Result<(axtb::Hessian, Start)> {
         let t0 = Instant::now();
         let method = opts.method.unwrap_or(self.info.hessian.default);
-        let mut out = match (method, self.version) {
+        let (mut out, state) = match (method, self.version) {
             (HessianMethod::Numerical, _) => {
                 self.numerical(positions, opts.step.unwrap_or(NUMERICAL_STEP), opts.accuracy)
             }
@@ -427,7 +439,7 @@ impl Calculator {
             (m, v) => Err(unavailable(m, v)),
         }?;
         out.timings.push(("total", t0.elapsed().as_secs_f64()));
-        Ok(out)
+        Ok((out, state))
     }
 
     /// The SCF accuracy of a Hessian: `accuracy` (default `default`), never looser than the
@@ -440,7 +452,12 @@ impl Calculator {
         Ok(accuracy.min(self.options.scf.accuracy))
     }
 
-    fn numerical(&mut self, positions: &[[f64; 3]], step: f64, accuracy: Option<f64>) -> Result<axtb::Hessian> {
+    fn numerical(
+        &mut self,
+        positions: &[[f64; 3]],
+        step: f64,
+        accuracy: Option<f64>,
+    ) -> Result<(axtb::Hessian, Start)> {
         if !(step > 0.0 && step.is_finite()) {
             return Err(Error::Input(format!("Hessian step must be positive and finite, got {step}")));
         }
@@ -450,8 +467,9 @@ impl Calculator {
         let opts = ScfOptions { accuracy, threads: 1, ..self.options.run(false) };
         let mol = &self.mol;
         let version = self.version;
-        // energy, gradient and dipole of one geometry
-        let point = |m: &Molecule| -> Result<(f64, Vec<[f64; 3]>, [f64; 3])> {
+        // energy, gradient, dipole and converged state of one geometry
+        type Point = (f64, Vec<[f64; 3]>, [f64; 3], crate::scf::State);
+        let point = |m: &Molecule| -> Result<Point> {
             let setup = crate::scf::Setup::new(m, crate::model::Model::new(version, opts.conventions))?;
             let r = setup.scf(&opts)?;
             let g = setup.gradient(&r)?;
@@ -462,21 +480,21 @@ impl Calculator {
                     mu[k] += qa[a] * p[k] + dip[a][k];
                 }
             }
-            Ok((energy, g, mu))
+            Ok((energy, g, mu, r.state))
         };
-        let (energy, gradient, _) = point(mol)?;
+        let (energy, gradient, _, reference) = point(mol)?;
         // every atom moved forward by the step and back by twice the step, as GFN2-xTB does
         let displaced = |x: &[[f64; 3]]| -> Result<(Vec<[f64; 3]>, [f64; 3])> {
             let mut m = mol.clone();
             m.positions.copy_from_slice(x);
-            let (_, g, mu) = point(&m)?;
+            let (_, g, mu, _) = point(&m)?;
             Ok((g, mu))
         };
         let parallel = self.threads.parallel();
         let nh = self.threads.install(|| {
             fd::numerical_hessian(&mol.positions, step, fd::Displacement::ForwardBack, parallel, displaced)
         })?;
-        Ok(axtb::Hessian {
+        let hess = axtb::Hessian {
             energy,
             gradient,
             hessian: nh.hessian,
@@ -485,7 +503,8 @@ impl Calculator {
             method: HessianMethod::Numerical,
             timings: Vec::new(),
             parts: Vec::new(),
-        })
+        };
+        Ok((hess, Start::of(version, reference)))
     }
 
     fn response_hessian(
@@ -493,7 +512,7 @@ impl Calculator {
         positions: &[[f64; 3]],
         opts: &HessianOptions,
         method: HessianMethod,
-    ) -> Result<axtb::Hessian> {
+    ) -> Result<(axtb::Hessian, Start)> {
         let step = opts.step.unwrap_or(RESPONSE_STEP);
         let accuracy = self.hessian_accuracy(opts.accuracy, ANALYTIC_ACCURACY)?;
         self.check_options()?;
@@ -510,7 +529,7 @@ impl Calculator {
         // the setup of this geometry, when the calculator holds one (move_to dropped it otherwise)
         let cached = self.setup.take().map(|s| *s);
         let mol = &self.mol;
-        let run = || -> Result<(axtb::Hessian, crate::scf::Setup)> {
+        let run = || -> Result<(axtb::Hessian, crate::scf::Setup, Start)> {
             let t0 = Instant::now();
             let mut setup = match cached {
                 Some(s) => s,
@@ -547,11 +566,11 @@ impl Calculator {
                 timings,
                 parts: Vec::new(),
             };
-            Ok((hess, setup))
+            Ok((hess, setup, Start::of(version, r.state)))
         };
-        let (hess, setup) = self.threads.install(run)?;
+        let (hess, setup, state) = self.threads.install(run)?;
         self.setup = Some(Box::new(setup));
-        Ok(hess)
+        Ok((hess, state))
     }
 }
 
@@ -582,8 +601,8 @@ impl Method for Calculator {
 
     /// Energy and what `want` asks for at `positions` (bohr). The SCF starts from the previous
     /// converged state when the restart policy reuses it (or from a given one); if that SCF
-    /// does not converge, it runs once more from the program's start. The SCF report's `start`
-    /// says which start gave the result.
+    /// fails (does not converge, or breaks down), it runs once more from the program's start.
+    /// The SCF report's `start` says which start gave the result.
     fn singlepoint(&mut self, positions: &[[f64; 3]], want: &Want) -> Result<SinglePoint> {
         let r = self.singlepoint_inner(positions, want);
         if r.is_err() {
@@ -596,22 +615,34 @@ impl Method for Calculator {
     ///
     /// - `Analytic` (2.0.1, its default): analytic second derivatives with the coupled-perturbed
     ///   response ([`crate::analytic`]), SCF accuracy of the reference default [`ANALYTIC_ACCURACY`];
-    /// - `Response` (2.0.1): central differences of the analytic gradient functional with the
-    ///   density and energy-weighted density extrapolated by the coupled-perturbed response
-    ///   ([`crate::hessian`]; no SCF per displacement), step default [`RESPONSE_STEP`], SCF accuracy
-    ///   of the reference default [`ANALYTIC_ACCURACY`];
-    /// - `Numerical` (both versions; v1.1's default): central differences of analytic gradients,
-    ///   step default [`NUMERICAL_STEP`], the SCF of every displacement from the program's start
-    ///   with the thresholds scaled by the accuracy (default [`NUMERICAL_ACCURACY`]).
+    /// - `Response` (2.0.1; v1.1 in the default conventions, its default there): central
+    ///   differences of the analytic gradient functional with the density and energy-weighted
+    ///   density extrapolated by the coupled-perturbed response ([`crate::hessian`]; no SCF per
+    ///   displacement), step default [`RESPONSE_STEP`], SCF accuracy of the reference default
+    ///   [`ANALYTIC_ACCURACY`];
+    /// - `Numerical` (both versions; v1.1's default in the program's conventions, where it is the
+    ///   only one): central differences of analytic gradients, step default [`NUMERICAL_STEP`],
+    ///   the SCF of every displacement from the program's start with the thresholds scaled by the
+    ///   accuracy (default [`NUMERICAL_ACCURACY`]).
     ///
     /// The accuracy is never looser than the calculator's own. Displacements run in parallel
     /// on the calculator's threads, each sequentially, so the result is the same for every
-    /// thread count. Afterwards the calculator holds no wavefunction: the single point at these
-    /// positions starts from the program's start, as without the Hessian.
+    /// thread count. Afterwards the converged state of the reference SCF is the previous one, as
+    /// after a single point: the next SCF (the single point at these positions) starts from it
+    /// when the restart policy reuses the previous state (the default conventions), from the
+    /// program's start otherwise. After an error the calculator holds none.
     fn hessian(&mut self, positions: &[[f64; 3]], opts: &HessianOptions) -> Result<axtb::Hessian> {
-        let r = self.hessian_inner(positions, opts);
-        self.reset_wavefunction();
-        r
+        match self.hessian_inner(positions, opts) {
+            Ok((h, state)) => {
+                self.state = Some(state);
+                self.given = false;
+                Ok(h)
+            }
+            Err(e) => {
+                self.reset_wavefunction();
+                Err(e)
+            }
+        }
     }
 
     fn wavefunction(&self) -> Option<Wavefunction> {
@@ -906,7 +937,6 @@ fn results(
         want.bond_orders.then(|| bond_orders(setup.mol.nat(), &setup.basis.scf.ao2at, &setup.s, &r.state.p, setup.par));
     let (dpat, qpat) = (r.state.dip.clone(), r.state.qp.clone());
     let positions = &setup.mol.positions;
-    let v1 = setup.model.version == Version::V1_1;
     let shell_populations = setup.shell_populations(&setup.total_density_ref(&r.state.p));
     let shell_atoms: Vec<usize> = setup.shells.iter().map(|&(a, _, _)| a).collect();
     let core_electrons = axtb::method::core_electrons(&setup.mol.numbers, &shell_atoms, &setup.ref_occ)
@@ -953,6 +983,5 @@ fn results(
         extras: Extras::default(),
         timings,
     };
-    let start = if v1 { Start::V1_1(r.state.p) } else { Start::V2_0_1(Box::new(r.state)) };
-    (sp, start)
+    (sp, Start::of(setup.model.version, r.state))
 }

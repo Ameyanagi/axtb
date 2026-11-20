@@ -11,8 +11,8 @@ use crate::response::{
 };
 use crate::task::Task;
 use axtb::method::{
-    Fingerprint, HessianOptions, Method as MethodTrait, Restart, Retry, RetryLadder, RetryOn, Rung, ScfData,
-    ScfSettings, SinglePoint, TermKind, Try, Want, WavefunctionData,
+    Fingerprint, HessianOptions, Method as MethodTrait, Restart, Retry, RetryLadder, Rung, ScfData, ScfSettings,
+    SinglePoint, TermKind, Try, Want, WavefunctionData,
 };
 use axtb::ToMolden;
 use std::time::Instant;
@@ -277,9 +277,9 @@ impl Calculator {
     }
 
     /// Run `task` at `positions` (bohr). With a Hessian, the response is that of the single
-    /// point at `positions` (energy, gradient, charges, orbitals; g-xTB's SCF from its own
-    /// start, as without the Hessian) plus the Hessian, its dipole derivatives and its
-    /// vibrational analysis.
+    /// point at `positions` (energy, gradient, charges, orbitals; its SCF from the Hessian's
+    /// reference when the restart policy reuses the previous wavefunction) plus the Hessian, its
+    /// dipole derivatives and its vibrational analysis.
     pub fn compute(&mut self, positions: &[[f64; 3]], task: &Task) -> Result<Response> {
         let t0 = Instant::now();
         let nat = self.numbers.len();
@@ -373,7 +373,7 @@ impl Calculator {
         let first = self.effective(&base);
         let mut rungs = vec![Rung::default()];
         rungs.extend(Retry::rungs(first, &self.retries));
-        let ladder = RetryLadder { rungs, on: RetryOn::Failed };
+        let ladder = RetryLadder { rungs };
         let mut attempts = Vec::new();
         let m: &mut dyn MethodTrait = self.method.as_mut();
         let r = ladder.climb_methods(&mut [m], 0, |_, m, i, rung| {

@@ -8,9 +8,9 @@ GFN-FF), the structure and the settings; `run` checks it, dispatches it, and ret
 analysis. A stateful `Calculator` runs one geometry after another.
 
 Every response names the numerics identity of the code that produced it, `numerics`, which
-`numerics(method, composite)` gives before a run: `"<method>:<epoch>"` (`"gfn2:1"`,
-`"gxtb-v1.1:1"`, `"gxtb-v2.0.1:1"`, `"gfnff:1"`; the g-xTB solvation composite
-`"gxtb-v2.0.1:1+gfn2:1"`). One epoch per method covers all its conventions; it changes with every
+`numerics(method, composite)` gives before a run: `"<method>:<epoch>"` (`"gfn2:3"`,
+`"gxtb-v1.1:5"`, `"gxtb-v2.0.1:3"`, `"gfnff:1"`; the g-xTB solvation composite
+`"gxtb-v2.0.1:3+gfn2:3"`). One epoch per method covers all its conventions; it changes with every
 commit that may change that method's results (round-off or model changes, R or M in the
 changelog) and never with one that keeps them bit for bit. The history of the epochs is in the
 changelog.

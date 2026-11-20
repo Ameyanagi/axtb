@@ -24,6 +24,7 @@
 //!   pair cutoff), so energy and gradient are continuous for any system size.
 
 use crate::options::{Conventions, Version};
+use axtb::integrals::Screen;
 use axtb::units::reference::MCTC_AATOAU;
 
 /// Highest atomic number with g-xTB 2.0.1 parameters.
@@ -145,14 +146,18 @@ impl Model {
         }
     }
 
-    /// The primitive screening of the H0-basis overlaps and of the ACP projector overlaps
-    /// (2.0.1: tblite's 25; v1.1: the 1.1.0 program's 20); the SCF-basis integrals use
-    /// [`crate::basis::INTCUT`] (25) in both versions.
+    /// The primitive screening of the H0-basis overlaps and of the ACP projector overlaps:
+    /// 2.0.1 tblite's hard 25 ([`crate::basis::INTCUT`]); v1.1 the 1.1.0 program's hard 20
+    /// ([`crate::h0::INTCUT_V1_1`]) in its conventions and, in the default conventions,
+    /// [`crate::h0::SCREEN_V1_1`], which switches the pairs off smoothly from 20 to 25 (the hard
+    /// cutoffs leave steps of up to ~1e-10 Eh in the energy). The SCF-basis integrals use the
+    /// hard [`crate::basis::INTCUT`] in both versions.
     #[inline]
-    pub fn intcut_h0(&self) -> f64 {
+    pub fn screen_h0(&self) -> Screen {
         match self.version {
-            Version::V2_0_1 => crate::basis::INTCUT,
-            Version::V1_1 => crate::h0::INTCUT_V1_1,
+            Version::V2_0_1 => Screen::Hard(crate::basis::INTCUT),
+            Version::V1_1 if self.program() => Screen::Hard(crate::h0::INTCUT_V1_1),
+            Version::V1_1 => crate::h0::SCREEN_V1_1,
         }
     }
 

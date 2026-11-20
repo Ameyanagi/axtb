@@ -13,6 +13,9 @@ A cell fails when median(new) / median(baseline) exceeds --limit both in its fir
 in a confirming pass with three times the rounds (identical binaries differ by up to ~4% on
 the shortest cells over 5 rounds on the laptop). Cells whose baseline median is below 20 ms
 (process start-up dominates) run three times the rounds in their first pass already.
+
+A few cells have an accepted limit above --limit (ACCEPTED: a model change whose cost was
+measured and accepted); the gate holds them to that limit instead and says so.
 """
 import argparse
 import json
@@ -68,6 +71,18 @@ def cells():
 # baseline median (s) below which a cell runs three times the rounds in its first pass
 SHORT = 0.020
 
+# cells whose cost was measured and accepted against the baseline: cell -> (limit, why)
+ACCEPTED = {
+    "gxtb11 caffeine Hessian(num) 1t": (
+        1.04,
+        (
+            "0.3.0 R9: v1.1's smooth primitive screen (axtb conventions), 1.032-1.033 on the laptop, of"
+            " which 2.3 points are the screen's; accepted 2026-11-20 (the numerical Hessian is no longer"
+            " v1.1's default there)"
+        ),
+    ),
+}
+
 
 def load1():
     return float(Path("/proc/loadavg").read_text().split()[0])
@@ -116,18 +131,24 @@ def main():
         first = len(tb)
         mb, mn = statistics.median(tb), statistics.median(tn)
         ratio = mn / mb
-        if ratio > a.limit:
+        limit, why = ACCEPTED.get(name, (a.limit, ""))
+        limit = max(limit, a.limit)
+        if ratio > limit:
             # confirm with three times the rounds of the first pass before calling it a slowdown
             tb, tn = measure(req, 3 * first)
             mb, mn = statistics.median(tb), statistics.median(tn)
             ratio = mn / mb
-        flag = "SLOWER" if ratio > a.limit else ""
-        failed += bool(flag)
-        rows.append({"cell": name, "baseline_s": mb, "new_s": mn, "ratio": ratio, "baseline_runs": tb, "new_runs": tn})
+        flag = "SLOWER" if ratio > limit else (f"(accepted up to {limit:.2f}x)" if ratio > a.limit else "")
+        failed += ratio > limit
+        rows.append({"cell": name, "baseline_s": mb, "new_s": mn, "ratio": ratio, "limit": limit, "accepted": why,
+                     "baseline_runs": tb, "new_runs": tn})
         print(f"{name:32} baseline {mb:9.4f} s  new {mn:9.4f} s  new/baseline {ratio:5.3f} {flag}", flush=True)
     if a.json:
         Path(a.json).write_text(json.dumps(rows, indent=1))
-    print(f"{len(rows) - failed} of {len(rows)} cells within {a.limit:.2f}x")
+    print(f"{len(rows) - failed} of {len(rows)} cells within {a.limit:.2f}x or their accepted limit")
+    for name, (limit, why) in ACCEPTED.items():
+        if any(r["cell"] == name for r in rows):
+            print(f"  accepted: {name} up to {limit:.2f}x: {why}")
     sys.exit(1 if failed else 0)
 
 

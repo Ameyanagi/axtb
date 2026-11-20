@@ -32,7 +32,7 @@ use crate::model::{Model, SQRTPI};
 use crate::options::Version;
 use axtb::ao::ShellPairs;
 use axtb::basis::{Basis as AoBasis, Cgto, MAXPRIM};
-use axtb::integrals::{overlap, MBLK};
+use axtb::integrals::{overlap, Screen, MBLK};
 use axtb::molecule::{norm2_sq, sub3};
 use axtb::Molecule;
 use axtb_base::math::primitive_norm;
@@ -125,8 +125,8 @@ pub fn build_h0(model: &Model, mol: &Molecule, h0: &AoBasis, cn: &[f64], cutoff:
     }
     let mut bounds = h0.iao_at.clone();
     bounds.push(nao);
-    let intcut = model.intcut_h0();
-    let pairs = ShellPairs::screened(mol, h0, cutoff, intcut);
+    let screen = model.screen_h0();
+    let pairs = ShellPairs::screened(mol, h0, cutoff, screen.cutoff());
     crate::parallel::for_row_blocks(&mut [&mut h], nao, &bounds, parallel, |ia, rows| {
         let rows = &mut rows[0];
         let row0 = bounds[ia];
@@ -144,7 +144,7 @@ pub fn build_h0(model: &Model, mol: &Molecule, h0: &AoBasis, cn: &[f64], cutoff:
                 let (sa, sb) = (sp.ci, sp.cj);
                 let pia = shell_poly(model, za, sa.l, r, radsum).0;
                 let pib = shell_poly(model, zb, sb.l, r, radsum).0;
-                overlap(sb, sa, p.vec, intcut, &mut blk);
+                overlap(sb, sa, p.vec, screen, &mut blk);
                 let (na, nb) = (2 * sa.l + 1, 2 * sb.l + 1);
                 let mut s: Vec<f64> = (0..na * nb).map(|x| blk[(x % nb) + nb * (x / nb)]).collect();
                 scale_diatomic_block(sa.l, sb.l, nv, k, &mut s);
@@ -290,7 +290,7 @@ pub struct AcpSet {
     pub nrow: usize,
     /// The pair cutoff (bohr) and primitive screening of the projector overlaps.
     pub cutoff: f64,
-    pub intcut: f64,
+    pub screen: Screen,
     /// The version of the weights.
     pub version: Version,
 }
@@ -313,7 +313,7 @@ impl AcpSet {
                         }
                     }
                 }
-                Self { list, dw, nrow, cutoff, intcut: model.intcut_h0(), version: model.version }
+                Self { list, dw, nrow, cutoff, screen: model.screen_h0(), version: model.version }
             }
             Version::V1_1 => {
                 // `setupcbas_`: w = acp_coeff_l (1 + acpcn sqrt(CN)), one projector per l
@@ -330,7 +330,7 @@ impl AcpSet {
                         }
                     }
                 }
-                Self { list, dw, nrow, cutoff: ACP_CUTOFF_V1_1, intcut: model.intcut_h0(), version: model.version }
+                Self { list, dw, nrow, cutoff: ACP_CUTOFF_V1_1, screen: model.screen_h0(), version: model.version }
             }
         }
     }
@@ -346,8 +346,8 @@ impl AcpSet {
 /// exactly zero, are skipped ([`ShellPairs::screened`]).
 pub fn acp_overlaps(mol: &Molecule, bas: &AoBasis, set: &AcpSet, parallel: bool) -> Vec<f64> {
     let n = bas.nao;
-    let intcut = set.intcut;
-    let pairs = ShellPairs::screened(mol, bas, set.cutoff, intcut);
+    let screen = set.screen;
+    let pairs = ShellPairs::screened(mol, bas, set.cutoff, screen.cutoff());
     let blocks = threads::map(set.list.len(), parallel, |k| {
         let (ip, ref proj, _, _) = set.list[k];
         let np = 2 * proj.l + 1;
@@ -356,7 +356,7 @@ pub fn acp_overlaps(mol: &Molecule, bas: &AoBasis, set: &AcpSet, parallel: bool)
         for ia in 0..mol.nat() {
             let Some(p) = pairs.pair_with(ia, ip, proj.min_alpha()) else { continue };
             pairs.for_each_against(&p, proj, |sp| {
-                overlap(proj, sp.ci, p.vec, intcut, &mut blk);
+                overlap(proj, sp.ci, p.vec, screen, &mut blk);
                 for a in 0..2 * sp.ci.l + 1 {
                     for m in 0..np {
                         out[m * n + sp.ii + a] = blk[m + np * a];
@@ -416,6 +416,13 @@ pub fn add_acp(mol: &Molecule, bas: &AoBasis, set: &AcpSet, h: &mut [f64], par: 
 /// Primitive-pair screening of the program's overlap code (`xtb_intgrad::get_overlap`, as
 /// called from `sintm_diat_`): pairs with a_i a_j R^2/(a_i + a_j) > 20 are skipped.
 pub const INTCUT_V1_1: f64 = 20.0;
+
+/// v1.1's primitive-pair screening of the H0 and ACP overlaps in the default conventions: the
+/// program's pairs in full up to [`INTCUT_V1_1`], switched off smoothly up to 25 (2.0.1's
+/// screening), so that the energy has no steps where a pair crosses the threshold (with the
+/// program's hard 20 or a hard 25, finite differences of energies at steps of 5e-4 to 1e-3
+/// bohr were off by up to 2.4e-8 Eh/bohr where they crossed one).
+pub const SCREEN_V1_1: Screen = Screen::Smooth { from: INTCUT_V1_1, to: 25.0 };
 
 /// Delta-bond scaling of the diatomic-frame overlap.
 pub const K_DELTA: f64 = 5.0;

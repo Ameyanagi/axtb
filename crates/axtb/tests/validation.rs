@@ -149,7 +149,9 @@ fn invalid_hessian_settings_are_input_errors() {
 
 /// A guess must have this molecule's sizes and finite values; a finite guess so large that the
 /// potentials overflow stops the SCF with a numerical error at its first Fock matrix, in every
-/// conventions mode (before, the NaN eigenvalues panicked in the eigensolver's sort).
+/// conventions mode (before, the NaN eigenvalues panicked in the eigensolver's sort), and the
+/// single point runs once more from the initial guess, as after a warm start that does not
+/// converge: the result is the fresh one, bit for bit.
 #[test]
 fn bad_guesses_are_errors_not_panics() {
     let (z, r) = water();
@@ -167,9 +169,15 @@ fn bad_guesses_are_errors_not_panics() {
         short.atomic_quadrupoles.pop();
         assert!(matches!(calc.set_wavefunction(&with(short)), Err(Error::Input(_))));
         let huge = ScfData { shell_charges: vec![1e300; g.shell_charges.len()], ..g };
+        calc.reset_wavefunction();
+        let fresh = calc.singlepoint(&r, &Want::gradient(true)).unwrap();
         calc.set_wavefunction(&with(huge)).unwrap();
-        let e = calc.singlepoint(&r, &Want::gradient(true));
-        assert!(matches!(e, Err(Error::Numerical(_))), "{conv:?}: {e:?}");
+        let sp = calc.singlepoint(&r, &Want::gradient(true)).unwrap();
+        let (a, b) = (sp.scf().unwrap(), fresh.scf().unwrap());
+        assert_eq!((a.start, a.iterations), (b.start, b.iterations), "{conv:?}");
+        assert_ne!(a.start, "previous", "{conv:?}");
+        assert_eq!(sp.energy.to_bits(), fresh.energy.to_bits(), "{conv:?}");
+        assert_eq!(sp.gradient, fresh.gradient, "{conv:?}");
     }
 }
 

@@ -3,6 +3,135 @@
 All notable changes to axtb. Versions follow [Semantic Versioning](https://semver.org); the
 Rust crates, the CLI and the Python package share one version.
 
+## Unreleased (0.3.0)
+
+Result changes decided after 0.2.0, one commit each; each bumps the numerics epochs of the
+methods whose results it may change ("Numerics epochs" at the end).
+
+### g-xTB v1.1: no steps in the energy surface (axtb conventions)
+
+- v1.1 in the axtb conventions switches the primitive pairs of its H0 and ACP overlaps off
+  smoothly: each pair's contribution is scaled by a quintic smoothstep in x = a b R²/(a + b),
+  from 1 at x = 20 (the 1.1.0 program's hard cutoff) to 0 at 25. The gradient (and the response
+  Hessian built from it) includes the switch's derivative. A hard cutoff made the energy jump
+  by ~1e-11 to 1e-10 Eh wherever a primitive pair crossed it, and finite differences with steps
+  of 5e-4 bohr or more saw the jumps; moving the hard cutoff to 25 only moved them. The program
+  conventions keep the program's hard 20; GFN2-xTB and g-xTB 2.0.1 are unchanged, bit for bit.
+- Worst 5-point finite-difference error of the analytic gradient over all coordinates (SCF
+  accuracy 1e-6), hard 20 before → smooth now: CuCl4²⁻ 8.3e-9 → 3.0e-10 Eh/bohr at h = 1e-3,
+  caffeine 7.6e-9 → 2.2e-10; Ni(CO)4 (2.1e-10 → 1.4e-10 at h = 5e-4), water, O2, mesyl chloride,
+  iodomethane, SiH4/PH3, ferrocene and the anthracene dimer stay at ≤ 6.7e-10 (h = 5e-4) and
+  ≤ 3.8e-10 (h = 1e-3), the SCF's noise. A hard 25 would have left 1.2e-8 (Ni(CO)4) and 2.4e-8
+  (caffeine, h = 5e-4).
+- v1.1 energies in the axtb conventions move by up to 6.6e-9 Eh (CuCl4²⁻ at 5000 K; taxol
+  3.7e-9, caffeine 2.3e-9), gradients by 2.5e-8 Eh/bohr, Hessians by 2e-8 Eh/bohr², frequencies by
+  1e-5 cm⁻¹ (2.5e-4 cm⁻¹ for water stretched to 2.5 Å). v1.1 taxol gradients take about 4 %
+  longer on one thread (the pairs between 20 and 25 and the switch: 1.038 to 1.042 in two
+  measurements), the other v1.1 timings 1.5 to 2.6 % longer; GFN2-xTB and 2.0.1 are unchanged.
+  Against the performance baseline, the v1.1 numerical Hessian (caffeine, one thread; no longer
+  v1.1's default in these conventions) is 1.027-1.033: `scripts/perf_gate.py` holds that cell to
+  an accepted 1.04 (`ACCEPTED`), every other cell to 1.02.
+- g-xTB v1.1 accuracy targets now pick tighter SCF factors. The accuracy model is recalibrated
+  on this engine (`bench/results/accuracy.json`; only v1.1's constants move): the closed-shell
+  gradient envelope rises from 1.12e-5 to 6.46e-5 Eh/bohr × acc^0.5, because the 39-atom gh106,
+  whose v1.1 SCF did not converge in 1000 iterations with the hard cutoff and now converges in
+  320, joins the calibration with a gradient error of 6.5e-5 Eh/bohr at factor 1 (without it the
+  envelope would be 6.8e-6); the open-shell table at factor 0.001 rises from 3.0e-7 to 4.4e-7
+  (the Cu(NH3)4²⁺ doublet), and the numerical Hessian's from 3.0e-3 to 3.5e-3. A v1.1 gradient
+  target of 1e-5 Eh/bohr runs at factor 0.001 instead of 0.1: caffeine 16 instead of 12
+  iterations (18 ms instead of 16), taxol 15 instead of 12 (0.40 s instead of 0.35, one thread).
+  On the held-out check (`tests/accuracy_heldout.py`, 10 molecules outside the calibration,
+  targets 1e-4 to 1e-6 Eh/bohr) every v1.1 error stays within its target with the old constants
+  and the new ones (worst error over target 0.038 and 0.005).
+- Golden set (191 cases: one new, `gxtb11-cucl4-etemp5000-grad`): the 23 v1.1 cases in the axtb
+  conventions change, no other.
+- Rust: `axtb::integrals::Screen` (hard or smooth) for the primitive-pair screening of
+  `overlap`, `multipole`, `multipole_raw`, `multipole_grad` and `overlap_grad_coeff`, which take
+  `impl Into<Screen>` (a number is a hard screen, as before); axtb-gxtb's `Model::intcut_h0` is
+  `Model::screen_h0`, `AcpSet::intcut` is `AcpSet::screen`, new `h0::SCREEN_V1_1`.
+- Numerics epoch `gxtb-v1.1:5`.
+
+### Python: a session's Hessian frame without history is no warm start
+
+- A session frame of a Hessian request on a lineage without history reports `warm_start: false`
+  (and `contingent["scf.restart"]` not fired). Its single point starts from the Hessian's own
+  reference (`record.scf.start` "previous"), which is no warm start in the session's sense;
+  before, GFN2-xTB's frames, and g-xTB's since a Hessian leaves its reference as the previous
+  wavefunction (below), reported true. No number changes.
+
+### g-xTB v1.1's default Hessian is the response Hessian (axtb conventions)
+
+- In the axtb conventions a v1.1 Hessian without `hessian_method` (Python `hessian.method`, CLI
+  `--hess-method`) is now the response Hessian (central differences of the analytic gradient
+  functional with the density extrapolated by the coupled-perturbed response, step 2e-4 bohr,
+  reference SCF at accuracy 1e-5), not the numerical one. It is the more accurate of the two
+  (within 1e-6 Eh/bohr² of Richardson-extrapolated finite differences in
+  `crates/gxtb/tests/hessian_v11.rs`; the numerical Hessian carries its O(h²) step error and SCF
+  noise) and faster: caffeine on one thread 1.64 s against 2.41 s (Hessian 2.6e-5 Eh/bohr²,
+  frequencies 0.15 cm⁻¹ apart). Water's Hessian moves by 2.1e-5 Eh/bohr², its frequencies by
+  0.07 cm⁻¹, dipole derivatives by 5e-6.
+  `hessian_method: numerical` gives the old one; the program conventions keep the numerical
+  Hessian, their only one. The response reports `hessian_method`, Python
+  `resolved.settings.hessian` gives `method: response`, `step: 2e-4`, `accuracy_scale: 1e-5`, and
+  the composite's g-xTB part takes it too.
+- A Hessian accuracy target for v1.1 in the axtb conventions keeps the response Hessian's default
+  `hessian.accuracy_scale` (1e-5) without an estimate: the accuracy model has no fit for it yet.
+- Golden set (190 cases: one new, `gxtb11-water-hessian-numerical`, which keeps v1.1's numerical
+  Hessian covered): the three v1.1 Hessians in the axtb conventions change method
+  (`gxtb11-water-hessian`, `traj-gxtb11-water-hessian`, the g-xTB part of
+  `gxtb11-water-composite-hessian`), and so does `gxtb11-h2o-3a-retries-hessian`, the water
+  stretched to 3 Å at the 1000 K rung of `scf.retries`, whose numerical Hessian was dominated by
+  displaced SCFs ending on different solutions (frequencies -4100 and +4698 cm⁻¹; the response
+  Hessian: two imaginary modes, -631 and -445 cm⁻¹).
+- Numerics epoch `gxtb-v1.1:4`.
+
+### After a Hessian, the restart policy decides the next start
+
+- A Hessian leaves its reference SCF's converged wavefunction as the previous one, like a single
+  point, and the restart policy decides whether the next SCF starts from it. Every Hessian
+  response includes the single point at its positions, so this decides its energy, gradient,
+  charges and orbitals. Before, GFN2-xTB started that single point from the reference whatever
+  the policy said, and g-xTB from the program's start.
+- g-xTB (both versions, analytic, response and numerical Hessians) in the axtb conventions: the
+  single point of a Hessian response starts from the reference (`guess` `previous`) and takes 3
+  iterations instead of 8-10. The Hessian converges its reference more tightly than a single
+  point, so these numbers are closer to the converged SCF than a plain gradient request's, from
+  which they now differ by that request's SCF error. Against an SCF at accuracy 1e-6, caffeine:
+  2.0.1 energy 2.1e-8 Eh and gradient 3.9e-5 Eh/bohr from the program's start, 0 and 2.7e-11 from
+  the reference; v1.1 gradient 2.6e-6 and 1.1e-8 Eh/bohr. Charges move by up to 1.1e-4 e. The
+  Hessians themselves do not change (1e-13 Eh/bohr² in the trajectories, where the next
+  Hessian's reference starts from the new state).
+- GFN2-xTB with `guess: fresh` (Python `scf.restart: off`) starts the single point after a
+  Hessian fresh, as it asked (water: 8 iterations instead of 2, gradient 9.6e-8 Eh/bohr).
+  GFN2-xTB's default policy reuses the previous state, so its default results do not change.
+- Unchanged: the program conventions (their policy is fresh), every result without a Hessian, and
+  the composite's single point after its Hessian with `scf.retries`, which starts its parts
+  fresh at the Hessian's rung. With `scf.retries` the single point after a Hessian at a rung
+  starts from that rung's reference. A Hessian that fails leaves no wavefunction, as before.
+- Golden set (189 cases: one new, `traj-gxtb2-water-hessian-gxtb`, a 2.0.1 Hessian trajectory in
+  the program conventions that stays fresh): 27 change, every g-xTB Hessian in the axtb
+  conventions and `traj-gfn2-water-hessian-fresh`.
+- Numerics epochs `gfn2:3`, `gxtb-v1.1:3`, `gxtb-v2.0.1:3`.
+
+### A warm start that breaks down retries fresh
+
+- An SCF that starts from a previous wavefunction (the previous geometry, a session's history, a
+  Hessian's reference) and breaks down (a failed mixer, a lost Fermi level, a non-finite Fock
+  matrix: error kind `numerical`) now runs once more from the method's own start, as one that
+  does not converge always did; before, the calculation failed with `numerical_failure`.
+  GFN2-xTB and g-xTB (both versions), single points and the reference SCFs of Hessians. The
+  solvation composite's retry ladders already retried on both, and so did `scf.retries`; with
+  `scf.retries` this fresh start runs inside each try, before the first rung. A fresh SCF that
+  breaks down still fails (or climbs the `scf.retries` ladder).
+- No result changes: the golden set (188 cases) is bit for bit the same, and no warm start of
+  112 two-geometry GFN2-xTB trajectories (H2O and F2 stretched from 1.0-2.5 Å to 2.5-3.5 Å,
+  Broyden and DIIS, axtb and tblite conventions) broke down. The g-xTB SCFs do not stop on a
+  numerical error.
+- Rust (unstable API): axtb-base's `RetryOn` and the `on` field of `RetryLadder` are gone; every
+  ladder climbs on `Error::ScfNotConverged` and `Error::Numerical`.
+- Numerics epochs `gfn2:2`, `gxtb-v1.1:2`, `gxtb-v2.0.1:2`: a calculation that failed may now
+  succeed.
+
 ## 0.2.0 (2026-11-19)
 
 The final release of the 0.2.0 alphas, for the final qc* releases: the alphas' entries below
@@ -527,3 +656,11 @@ before the epochs existed are listed in the entries above.
 | `gxtb-v2.0.1` | 1 | 0.2.0 alpha 1 | start (includes the unmixed final iteration of the axtb conventions) |
 | `gfnff` | 1 | 0.2.0 alpha 1 | start |
 | `analysis` | 1 | 0.2.0 alpha 1 | start (the analysis of a given Hessian) |
+| `gfn2` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
+| `gxtb-v1.1` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
+| `gxtb-v2.0.1` | 2 | 0.3.0 | a warm start that breaks down retries from the method's own start |
+| `gfn2` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
+| `gxtb-v1.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
+| `gxtb-v2.0.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
+| `gxtb-v1.1` | 4 | 0.3.0 | the default Hessian of the axtb conventions is the response Hessian (was numerical) |
+| `gxtb-v1.1` | 5 | 0.3.0 | the H0 and ACP primitive pairs of the axtb conventions switched off smoothly from 20 to 25 (was the program's hard 20) |

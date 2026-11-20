@@ -48,7 +48,7 @@ use crate::calculator::{Calculator, Options, Version};
 use crate::options::Conventions;
 use axtb::method::{
     Composite, Correction as CompositeCorrection, Detail, Fingerprint, Guard, HessianOptions, Method, MethodInfo, Part,
-    Restart, Retry, RetryLadder, RetryOn, Rung, ScfSettings, SinglePoint, Try, Want, Wavefunction, WavefunctionData,
+    Restart, Retry, RetryLadder, Rung, ScfSettings, SinglePoint, Try, Want, Wavefunction, WavefunctionData,
 };
 use axtb::{Error, MixerKind, Result, SolvationModel, SolvationSpec};
 use axtb_base::threads::{self, Threads};
@@ -316,7 +316,7 @@ impl CompositeCalculator {
                 g.extend(Retry::rungs(gxtb_base, given));
                 let mut p = rungs(gfn2_base, &[], !reuse_guess);
                 p.extend(Retry::rungs(gfn2_base, given));
-                (RetryLadder { rungs: g, on: RetryOn::Failed }, RetryLadder { rungs: p, on: RetryOn::Failed })
+                (RetryLadder { rungs: g }, RetryLadder { rungs: p })
             }
             None => {
                 let gxtb_retries: Vec<(Option<f64>, usize)> = if options.retries && scf.etemp.is_none() {
@@ -326,8 +326,8 @@ impl CompositeCalculator {
                 };
                 let pair_retries = if options.retries { PAIR_RETRIES.to_vec() } else { vec![] };
                 (
-                    RetryLadder { rungs: rungs(gxtb_base, &gxtb_retries, false), on: RetryOn::Failed },
-                    RetryLadder { rungs: rungs(gfn2_base, &pair_retries, !reuse_guess), on: RetryOn::Failed },
+                    RetryLadder { rungs: rungs(gxtb_base, &gxtb_retries, false) },
+                    RetryLadder { rungs: rungs(gfn2_base, &pair_retries, !reuse_guess) },
                 )
             }
         };

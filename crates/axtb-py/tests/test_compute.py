@@ -43,7 +43,7 @@ METHODS = ["gfn2", "gxtb-v1.1", "gxtb-v2.0.1", "gfnff"]
 @pytest.mark.parametrize("structure", [WATER, CAFFEINE], ids=["water", "caffeine"])
 def test_every_method_and_calctype(method, calctype, structure):
     if calctype == "hessian" and structure is CAFFEINE and method == "gxtb-v1.1":
-        pytest.skip("numerical v1.1 Hessian of caffeine: slow, covered on water")
+        pytest.skip("v1.1 Hessian of caffeine: slow, covered on water")
     out = axtb.compute(inp(method, calctype, structure=structure))
     r = out.results
     n = len(structure.symbols)
@@ -121,7 +121,7 @@ def test_composite_and_its_record():
     assert set(rec["composite"]) >= {"definition", "components", "parts"}
     assert rec["wavefunction"] == {"part": "gxtb"}
     assert rec["contingent"]["composite.retries"]["fired"] is False
-    assert rec["numerics"] == "gxtb-v2.0.1:1+gfn2:1"
+    assert rec["numerics"] == "gxtb-v2.0.1:3+gfn2:3"
     assert abs(sum(out.results.energy_components.values()) - out.results.energy) < 1e-12
 
 

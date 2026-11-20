@@ -14,7 +14,7 @@
 //! qccodec codec select it by method name): `Calculator::new(Version::V2_0_1, numbers,
 //! positions, charge, uhf, Options::default())`, then [`Method::singlepoint`] (energy, analytic
 //! gradient) and [`Method::hessian`] (2.0.1: analytic by default, response or numerical; v1.1:
-//! numerical). [`Options`] holds the settings of both versions and refuses those of the other
+//! response by default, or numerical; in its program's conventions numerical only). [`Options`] holds the settings of both versions and refuses those of the other
 //! one. Lower down, [`scf::Setup`] (`Setup::new(mol, Model::new(version, conventions))`) and
 //! [`scf::Setup::scf`], with the settings of one SCF ([`ScfOptions`]).
 //!

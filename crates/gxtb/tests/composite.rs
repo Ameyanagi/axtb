@@ -313,7 +313,7 @@ fn settings_resolve_as_documented() {
     assert!(CompositeCalculator::new(&nums, &pos, 0.0, None, bad).is_err());
     assert!("GFN2-xTB".parse::<axtb_gxtb::Correction>().is_ok());
     assert!("gfn1".parse::<axtb_gxtb::Correction>().is_err());
-    // v1.1 works too, with its numerical Hessian by default
+    // v1.1 works too, with its response Hessian by default (the default conventions)
     let mut v1 = CompositeCalculator::new(
         &nums,
         &pos,
@@ -322,7 +322,7 @@ fn settings_resolve_as_documented() {
         CompositeOptions { version: Version::V1_1, ..opts(Conventions::Axtb) },
     )
     .unwrap();
-    assert_eq!(v1.info().hessian.default, HessianMethod::Numerical);
+    assert_eq!(v1.info().hessian.default, HessianMethod::Response);
     assert!(v1.singlepoint(&pos, &Want::GRADIENT).is_ok());
     let _ = HessianOptions::default();
 }

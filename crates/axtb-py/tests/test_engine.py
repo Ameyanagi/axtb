@@ -200,6 +200,6 @@ def test_name_helpers():
     assert _axtb.canonical_solvent("ammonia", "alpb") is None or isinstance(_axtb.canonical_solvent("ammonia", "alpb"), str)
     assert "water" in _axtb.solvents("alpb")
     assert _axtb.supported_elements("gfn2") == list(range(1, 87))
-    assert _axtb.numerics("gxtb-v2.0.1", True) == "gxtb-v2.0.1:1+gfn2:1"
+    assert _axtb.numerics("gxtb-v2.0.1", True) == "gxtb-v2.0.1:3+gfn2:3"
     assert _axtb.single_thread_atoms("gfnff", False) == 100
     assert _axtb.ANALYSIS_NUMERICS == "analysis:1"

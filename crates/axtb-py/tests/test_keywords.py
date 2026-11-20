@@ -318,7 +318,7 @@ def test_composite_resolved(method, keywords, session):
 @pytest.mark.parametrize("method,etemp,max_iter,mixer,guess,hm,step,hacc", [
     ("gfn2", 300.0, 250, "broyden-then-diis", "eeq", "analytic", None, 1e-3),
     ("gxtb-v2.0.1", 0.0, 250, None, "eeq-bc", "analytic", None, 1e-5),
-    ("gxtb-v1.1", 0.0, 1000, None, "eeq-bc", "numerical", 0.005, 0.01),
+    ("gxtb-v1.1", 0.0, 1000, None, "eeq-bc", "response", 2e-4, 1e-5),
 ])
 def test_defaults(method, etemp, max_iter, mixer, guess, hm, step, hacc):
     s = plan(inp(method, "hessian")).settings
@@ -334,6 +334,9 @@ def test_defaults(method, etemp, max_iter, mixer, guess, hm, step, hacc):
 def test_program_conventions_defaults():
     s = plan(inp("gxtb-v2.0.1", "hessian", {"conventions": "gxtb"}), session=True).settings
     assert s["freq"]["conventions"] == "xtb-6.7.1" and s["scf"]["restart"] == "off"
+    # g-xTB v1.1's program conventions offer the numerical Hessian only
+    v1 = plan(inp("gxtb-v1.1", "hessian", {"conventions": "gxtb"})).settings
+    assert v1["hessian"] == {"method": "numerical", "step": 0.005, "accuracy_scale": 0.01}
     assert "hamiltonian" not in s["output"]
     s = plan(inp("gfnff", "hessian", {"conventions": "xtb"})).settings
     assert s["freq"]["scale"] == 1.03 and s["freq"]["conventions"] == "xtb-6.8.0"
