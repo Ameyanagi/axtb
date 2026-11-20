@@ -8,13 +8,53 @@ Rust crates, the CLI and the Python package share one version.
 Result changes decided after 0.2.0, one commit each; each bumps the numerics epochs of the
 methods whose results it may change ("Numerics epochs" at the end).
 
+### g-xTB v1.1: no steps in the energy surface (axtb conventions)
+
+- v1.1 in the axtb conventions switches the primitive pairs of its H0 and ACP overlaps off
+  smoothly: each pair's contribution is scaled by a quintic smoothstep in x = a b R²/(a + b),
+  from 1 at x = 20 (the 1.1.0 program's hard cutoff) to 0 at 25. The gradient (and the response
+  Hessian built from it) includes the switch's derivative. A hard cutoff made the energy jump
+  by ~1e-11 to 1e-10 Eh wherever a primitive pair crossed it, and finite differences with steps
+  of 5e-4 bohr or more saw the jumps; moving the hard cutoff to 25 only moved them. The program
+  conventions keep the program's hard 20; GFN2-xTB and g-xTB 2.0.1 are unchanged, bit for bit.
+- Worst 5-point finite-difference error of the analytic gradient over all coordinates (SCF
+  accuracy 1e-6), hard 20 before → smooth now: CuCl4²⁻ 8.3e-9 → 3.0e-10 Eh/bohr at h = 1e-3,
+  caffeine 7.6e-9 → 2.2e-10; Ni(CO)4 (2.1e-10 → 1.4e-10 at h = 5e-4), water, O2, mesyl chloride,
+  iodomethane, SiH4/PH3, ferrocene and the anthracene dimer stay at ≤ 6.7e-10 (h = 5e-4) and
+  ≤ 3.8e-10 (h = 1e-3), the SCF's noise. A hard 25 would have left 1.2e-8 (Ni(CO)4) and 2.4e-8
+  (caffeine, h = 5e-4).
+- v1.1 energies in the axtb conventions move by up to 6.6e-9 Eh (CuCl4²⁻ at 5000 K; taxol
+  3.7e-9, caffeine 2.3e-9), gradients by 2.5e-8 Eh/bohr, Hessians by 2e-8 Eh/bohr², frequencies by
+  1e-5 cm⁻¹ (2.5e-4 cm⁻¹ for water stretched to 2.5 Å). v1.1 taxol gradients take about 4 %
+  longer on one thread (the pairs between 20 and 25 and the switch: 1.038 to 1.042 in two
+  measurements), the other v1.1 timings 1.5 to 2.6 % longer; GFN2-xTB and 2.0.1 are unchanged.
+- g-xTB v1.1 accuracy targets now pick tighter SCF factors. The accuracy model is recalibrated
+  on this engine (`bench/results/accuracy.json`; only v1.1's constants move): the closed-shell
+  gradient envelope rises from 1.12e-5 to 6.46e-5 Eh/bohr × acc^0.5, because the 39-atom gh106,
+  whose v1.1 SCF did not converge in 1000 iterations with the hard cutoff and now converges in
+  320, joins the calibration with a gradient error of 6.5e-5 Eh/bohr at factor 1 (without it the
+  envelope would be 6.8e-6); the open-shell table at factor 0.001 rises from 3.0e-7 to 4.4e-7
+  (the Cu(NH3)4²⁺ doublet), and the numerical Hessian's from 3.0e-3 to 3.5e-3. A v1.1 gradient
+  target of 1e-5 Eh/bohr runs at factor 0.001 instead of 0.1: caffeine 16 instead of 12
+  iterations (18 ms instead of 16), taxol 15 instead of 12 (0.40 s instead of 0.35, one thread).
+  On the held-out check (`tests/accuracy_heldout.py`, 10 molecules outside the calibration,
+  targets 1e-4 to 1e-6 Eh/bohr) every v1.1 error stays within its target with the old constants
+  and the new ones (worst error over target 0.038 and 0.005).
+- Golden set (191 cases: one new, `gxtb11-cucl4-etemp5000-grad`): the 23 v1.1 cases in the axtb
+  conventions change, no other.
+- Rust: `axtb::integrals::Screen` (hard or smooth) for the primitive-pair screening of
+  `overlap`, `multipole`, `multipole_raw`, `multipole_grad` and `overlap_grad_coeff`, which take
+  `impl Into<Screen>` (a number is a hard screen, as before); axtb-gxtb's `Model::intcut_h0` is
+  `Model::screen_h0`, `AcpSet::intcut` is `AcpSet::screen`, new `h0::SCREEN_V1_1`.
+- Numerics epoch `gxtb-v1.1:5`.
+
 ### Python: a session's Hessian frame without history is no warm start
 
 - A session frame of a Hessian request on a lineage without history reports `warm_start: false`
   (and `contingent["scf.restart"]` not fired). Its single point starts from the Hessian's own
   reference (`record.scf.start` "previous"), which is no warm start in the session's sense;
-  before, GFN2-xTB's frames, and g-xTB's since the change above, reported true. No number
-  changes.
+  before, GFN2-xTB's frames, and g-xTB's since a Hessian leaves its reference as the previous
+  wavefunction (below), reported true. No number changes.
 
 ### g-xTB v1.1's default Hessian is the response Hessian (axtb conventions)
 
@@ -620,3 +660,4 @@ before the epochs existed are listed in the entries above.
 | `gxtb-v1.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
 | `gxtb-v2.0.1` | 3 | 0.3.0 | a Hessian leaves its reference as the previous wavefunction; the restart policy decides the next start |
 | `gxtb-v1.1` | 4 | 0.3.0 | the default Hessian of the axtb conventions is the response Hessian (was numerical) |
+| `gxtb-v1.1` | 5 | 0.3.0 | the H0 and ACP primitive pairs of the axtb conventions switched off smoothly from 20 to 25 (was the program's hard 20) |

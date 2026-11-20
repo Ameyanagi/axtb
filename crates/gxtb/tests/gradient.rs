@@ -98,6 +98,37 @@ fn check_finite_differences(c: Conventions) {
     }
 }
 
+/// The default conventions' v1.1 energy is smooth: its primitive-pair screening switches the H0
+/// and ACP pairs off gradually (`axtb_gxtb::h0::SCREEN_V1_1`), so five-point differences of
+/// tight energies at h = 5e-4 and 1e-3 bohr give the analytic gradient in every coordinate (the
+/// program's hard 20 left errors of 8e-9 Eh/bohr at h = 1e-3 in CuCl4 2- and caffeine, a hard 25
+/// up to 2.4e-8 in Ni(CO)4 and caffeine, where a stencil crossed a pair's threshold).
+#[test]
+fn axtb_conventions_energy_is_smooth() {
+    let c = Conventions::Axtb;
+    let caffeine = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/structures/caffeine.xyz");
+    let mols = [
+        ("nickel_tetracarbonyl", molecule("nickel_tetracarbonyl")),
+        ("tetrachlorocuprate", molecule("tetrachlorocuprate")),
+        ("caffeine", read_xyz(&std::fs::read_to_string(caffeine).unwrap(), 0.0, Some(0)).unwrap()),
+    ];
+    for (name, mol) in mols {
+        let g = analytic(&mol, &tight(c));
+        for h in [5e-4, 1e-3] {
+            let mut worst: f64 = 0.0;
+            for a in 0..mol.nat() {
+                for k in 0..3 {
+                    let e = |d: f64| energy(&mol, a, k, d, c);
+                    let fd = (8.0 * (e(h) - e(-h)) - (e(2.0 * h) - e(-2.0 * h))) / (12.0 * h);
+                    worst = worst.max((fd - g[a][k]).abs());
+                }
+            }
+            println!("{name:22} h = {h:.0e}: max |analytic - FD| = {worst:.2e}");
+            assert!(worst < 1.5e-9, "{name} h = {h}: {worst:e}");
+        }
+    }
+}
+
 #[test]
 fn gradient_matches_finite_differences_exact_fock() {
     check_finite_differences(Conventions::Axtb);

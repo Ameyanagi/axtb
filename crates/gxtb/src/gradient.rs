@@ -302,8 +302,8 @@ impl Setup {
             }
         }
         let pos = &mol.positions;
-        let intcut = model.intcut_h0();
-        let pairs = ShellPairs::screened(mol, hb, self.cutoff, intcut);
+        let screen = model.screen_h0();
+        let pairs = ShellPairs::screened(mol, hb, self.cutoff, screen.cutoff());
         let parts = map_chunks(nat, self.parallel, |atoms| {
             let mut c = ch.zeroed_like();
             let (cg, [cq0, ccn]) = c.g_and_slots([qeff0, cn]);
@@ -333,7 +333,7 @@ impl Setup {
                             Some(&dsh[ib][shp.jsh]),
                             Some(&dsh[ia][shp.ish]),
                             pr.vec,
-                            intcut,
+                            screen,
                             &mut sab,
                             &mut dsab,
                             &mut bb,
@@ -462,7 +462,7 @@ impl Setup {
             }
         }
         drop(sp);
-        let (pairs, intcut) = (ShellPairs::screened(mol, bas, set.cutoff, set.intcut), set.intcut);
+        let (pairs, screen) = (ShellPairs::screened(mol, bas, set.cutoff, set.screen.cutoff()), set.screen);
         let qeff = self.slots.qeff;
         let parts = map_chunks(set.list.len(), self.parallel, |projs| {
             let mut c = ch.zeroed_like();
@@ -481,7 +481,7 @@ impl Setup {
                             None,
                             Some(&dsh[ia][shp.ish]),
                             pr.vec,
-                            intcut,
+                            screen,
                             &mut s,
                             &mut ds,
                             &mut sj,

@@ -100,7 +100,10 @@ cd <workdir> && OMP_NUM_THREADS=1 HOME=<dir with .gxtb .basisq .eeq> gxtb -c mol
   are stored packed (lower triangle, row by row). `molden.input` writes d/f Cartesian.
 - **Primitive screening** [C]: pairs with a_i a_j R²/(a_i + a_j) above 25 are skipped in the
   SCF-basis overlap (and its multipoles, presumably), above 20 in the H0 (`sintm_diat_`) and
-  ACP (`calcvacp_`) overlaps. Atom pairs beyond R² = 1600 bohr² are skipped in H0/ACP.
+  ACP (`calcvacp_`) overlaps. Atom pairs beyond R² = 1600 bohr² are skipped in H0/ACP. axtb's
+  program conventions keep these; its default conventions switch the H0 and ACP pairs off with
+  a quintic smoothstep between 20 and 25 instead (`h0::SCREEN_V1_1`), so that the energy has no
+  steps.
 - **Self distance** [C]: the program's packed distance array has 1e-12 bohr on the diagonal and
   the second-order and MFX kernels evaluate same-atom elements with R = 1e-12 (changes onsite
   values by ~1e-12 relative).

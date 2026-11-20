@@ -71,6 +71,7 @@ def mol(path: Path, charge=0.0, uhf=None):
 WATER, CAFF, TAXOL = S / "water.xyz", S / "caffeine.xyz", S / "taxol.xyz"
 W100, W333, C50 = S / "large/water100.xyz", S / "large/water333.xyz", S / "large/c50h102.xyz"
 O2, CU, FC = R2 / "reference/dioxygen_triplet/mol.xyz", S / "cu-nh3-4.xyz", S / "ferrocene.xyz"
+CUCL4 = ROOT / "crates/gxtb/tests/reference/tetrachlorocuprate/mol.xyz"
 BENI, CF3BR, TYR, IL, GH106, MB33, ZNCL4 = (S / f for f in ("beni-acetone.xyz", "cf3br-benzene.xyz", "tyr-xab.xyz",
                                          "s229-cl.xyz", "gh106.xyz", "mb33.xyz", "zncl4.xyz"))
 # hard SCFs (tests/scf_hard_set.py): stretched H2O and F2 (both bonds / the bond at 3 or 3.5 Å, singlets)
@@ -269,6 +270,10 @@ def corpus():
     add("gxtb2-caffeine-etemp-gxtb", caf, method="gxtb-v2.0.1", conventions="gxtb", etemp=3000.0)
     add("gxtb11-o2-triplet-etemp-grad", o2, method="gxtb-v1.1", gradient=True, etemp=5000.0)
     add("gxtb11-cu-doublet-etemp", cu, method="gxtb-v1.1", etemp=3000.0)
+    # v1.1's smooth primitive screening of H0 and ACP (axtb conventions; the program's hard 20 made steps of
+    # ~1e-10 Eh in this energy): CuCl4 2- (doublet) at 5000 K, tightly converged
+    add("gxtb11-cucl4-etemp5000-grad", mol(CUCL4, -2.0, 1), method="gxtb-v1.1", gradient=True, etemp=5000.0,
+        accuracy=1e-6, max_iter=1000)
     # Warm starts: a structure and two small displacements on one calculator, each SCF from the previous
     # geometry's converged wavefunction (guess "previous": GFN2's moments, g-xTB 2.0.1's state, v1.1's
     # densities); the axtb conventions of 2.0.1 restart at RESTART_ACCURACY, the program's at its own thresholds

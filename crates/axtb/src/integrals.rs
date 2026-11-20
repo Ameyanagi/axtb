@@ -11,7 +11,10 @@
 //! - quadrupoles are packed (xx, xy, yy, xz, yz, zz) in the traceless form
 //!   `Q = 3/2 r_a r_b - 1/2 r^2 δ_ab`;
 //! - derivatives are with respect to R_i, so the derivative with respect to R_j of a
-//!   translation-invariant quantity is its negative.
+//!   translation-invariant quantity is its negative;
+//! - primitive pairs are screened by x = a b |R_i - R_j|^2 / (a + b), the exponent of their
+//!   Gaussian product ([`Screen`]): cut at a threshold (a plain number is a hard screen), or
+//!   switched off smoothly over a window.
 
 use crate::basis::{ncart, nsph, Cgto, MAXL};
 use std::f64::consts::PI;
@@ -217,6 +220,59 @@ pub fn pair_screened(a: f64, b: f64, r2: f64, intcut: f64) -> bool {
     a * b * r2 / (a + b) > intcut * (1.0 + 1e-10)
 }
 
+/// The primitive-pair screening of an integral kernel, in x = a b R^2/(a + b) of a primitive pair.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Screen {
+    /// Pairs with x above the cutoff are left out (the programs' rule): the integrals jump where a
+    /// pair crosses it.
+    Hard(f64),
+    /// Each pair's contribution is scaled by s(x), a quintic smoothstep from 1 at x = `from` to 0
+    /// at x = `to` (continuous with its first and second derivatives); pairs beyond `to` are left
+    /// out. The first-derivative kernels ([`overlap_grad_coeff`], [`multipole_grad`]) include
+    /// the derivative of s; the others take hard screens only.
+    Smooth { from: f64, to: f64 },
+}
+
+impl Screen {
+    /// The largest x that contributes (the screening of whole shell or atom pairs,
+    /// [`pair_screened`]).
+    pub fn cutoff(self) -> f64 {
+        match self {
+            Screen::Hard(cutoff) => cutoff,
+            Screen::Smooth { to, .. } => to,
+        }
+    }
+
+    /// The pair's 1/(a + b), its prefactor (with the switch) and, under a smooth screen, the
+    /// derivative of its prefactor with respect to x from the switch alone (0 otherwise; a
+    /// hard screen is [`prefactor`] itself).
+    #[inline]
+    fn prefactor(self, ai: f64, aj: f64, r2: f64) -> Option<(f64, f64, f64)> {
+        match self {
+            Screen::Hard(intcut) => prefactor(ai, aj, r2, intcut).map(|(oab, pre)| (oab, pre, 0.0)),
+            Screen::Smooth { from, to } => {
+                let (oab, pre) = prefactor(ai, aj, r2, to)?;
+                let x = ai * aj * r2 * oab;
+                if x <= from {
+                    return Some((oab, pre, 0.0));
+                }
+                let w = to - from;
+                let u = (x - from) / w;
+                let s = 1.0 - u * u * u * (10.0 - 15.0 * u + 6.0 * u * u);
+                let ds = -30.0 * u * u * (1.0 - u) * (1.0 - u) / w;
+                Some((oab, pre * s, pre * ds))
+            }
+        }
+    }
+}
+
+impl From<f64> for Screen {
+    /// A hard screen at `cutoff`.
+    fn from(cutoff: f64) -> Self {
+        Screen::Hard(cutoff)
+    }
+}
+
 #[inline]
 fn prefactor(ai: f64, aj: f64, r2: f64, intcut: f64) -> Option<(f64, f64)> {
     let eab = ai + aj;
@@ -227,6 +283,14 @@ fn prefactor(ai: f64, aj: f64, r2: f64, intcut: f64) -> Option<(f64, f64)> {
     }
     let sqrtpi3 = PI.sqrt().powi(3);
     Some((oab, (-est).exp() * sqrtpi3 * oab.sqrt().powi(3)))
+}
+
+/// The derivative with respect to R_i of a smooth screen's switch, times the contraction
+/// coefficients `cdpre` (their product with d prefactor / dx): d x / d R_i = 2 a b/(a + b) vec.
+#[inline]
+fn switch_gradient(cdpre: f64, ai: f64, aj: f64, oab: f64, vec: [f64; 3]) -> [f64; 3] {
+    let f = cdpre * 2.0 * ai * aj * oab;
+    [f * vec[0], f * vec[1], f * vec[2]]
 }
 
 /// Remove the trace: Q = 3/2 M - 1/2 tr(M).
@@ -242,7 +306,8 @@ fn traceless(q: &mut [f64; 6]) {
 }
 
 /// Overlap block of a shell pair.
-pub fn overlap(cj: &Cgto, ci: &Cgto, vec: [f64; 3], intcut: f64, s: &mut [f64; MBLK]) {
+pub fn overlap(cj: &Cgto, ci: &Cgto, vec: [f64; 3], screen: impl Into<Screen>, s: &mut [f64; MBLK]) {
+    let screen = screen.into();
     let r2 = vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2];
     let (li, lj) = (ci.l, cj.l);
     let (ei, ej) = (cart_exponents(li), cart_exponents(lj));
@@ -252,7 +317,7 @@ pub fn overlap(cj: &Cgto, ci: &Cgto, vec: [f64; 3], intcut: f64, s: &mut [f64; M
     for ip in 0..ci.nprim {
         for jp in 0..cj.nprim {
             let (ai, aj) = (ci.alpha[ip], cj.alpha[jp]);
-            let Some((oab, pre)) = prefactor(ai, aj, r2, intcut) else { continue };
+            let Some((oab, pre, _)) = screen.prefactor(ai, aj, r2) else { continue };
             let rpi = [-vec[0] * aj * oab, -vec[1] * aj * oab, -vec[2] * aj * oab];
             let rpj = [vec[0] * ai * oab, vec[1] * ai * oab, vec[2] * ai * oab];
             build_1d(li, lj, rpi, rpj, oab, &mut t);
@@ -278,13 +343,13 @@ pub fn multipole(
     cj: &Cgto,
     ci: &Cgto,
     vec: [f64; 3],
-    intcut: f64,
+    screen: impl Into<Screen>,
     s: &mut [f64; MBLK],
     d: &mut [[f64; 3]; MBLK],
     q: &mut [[f64; 6]; MBLK],
     scratch: &mut Scratch,
 ) {
-    multipole_moments(cj, ci, vec, intcut, s, d, q, scratch, true);
+    multipole_moments(cj, ci, vec, screen.into(), s, d, q, scratch, true);
 }
 
 /// As [`multipole`], with the raw second moments (xx, xy, yy, xz, yz, zz) instead of the
@@ -293,20 +358,20 @@ pub fn multipole_raw(
     cj: &Cgto,
     ci: &Cgto,
     vec: [f64; 3],
-    intcut: f64,
+    screen: impl Into<Screen>,
     s: &mut [f64; MBLK],
     d: &mut [[f64; 3]; MBLK],
     q: &mut [[f64; 6]; MBLK],
     scratch: &mut Scratch,
 ) {
-    multipole_moments(cj, ci, vec, intcut, s, d, q, scratch, false);
+    multipole_moments(cj, ci, vec, screen.into(), s, d, q, scratch, false);
 }
 
 fn multipole_moments(
     cj: &Cgto,
     ci: &Cgto,
     vec: [f64; 3],
-    intcut: f64,
+    screen: Screen,
     s: &mut [f64; MBLK],
     d: &mut [[f64; 3]; MBLK],
     q: &mut [[f64; 6]; MBLK],
@@ -324,7 +389,7 @@ fn multipole_moments(
     for ip in 0..ci.nprim {
         for jp in 0..cj.nprim {
             let (ai, aj) = (ci.alpha[ip], cj.alpha[jp]);
-            let Some((oab, pre)) = prefactor(ai, aj, r2, intcut) else { continue };
+            let Some((oab, pre, _)) = screen.prefactor(ai, aj, r2) else { continue };
             let rpi = [-vec[0] * aj * oab, -vec[1] * aj * oab, -vec[2] * aj * oab];
             let rpj = [vec[0] * ai * oab, vec[1] * ai * oab, vec[2] * ai * oab];
             build_1d(li + 2, lj, rpi, rpj, oab, &mut t);
@@ -401,10 +466,11 @@ pub fn multipole_grad(
     cj: &Cgto,
     ci: &Cgto,
     vec: [f64; 3],
-    intcut: f64,
+    screen: impl Into<Screen>,
     out: &mut MultipoleGrad,
     scratch: &mut Scratch,
 ) {
+    let screen = screen.into();
     let r2 = vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2];
     let (li, lj) = (ci.l, cj.l);
     let (ei, ej) = (cart_exponents(li), cart_exponents(lj));
@@ -416,12 +482,15 @@ pub fn multipole_grad(
     val.iter_mut().for_each(|c| *c = [0.0; NV]);
     let der = &mut scratch.cart30[..ncart_pair];
     der.iter_mut().for_each(|c| *c = [0.0; 3 * NV]);
+    // moment exponents (mx, my, mz) for s, dx, dy, dz, xx, xy, yy, xz, yz, zz
+    const MOM: [[usize; 3]; NV] =
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [2, 0, 0], [1, 1, 0], [0, 2, 0], [1, 0, 1], [0, 1, 1], [0, 0, 2]];
     let mut t = [[[0.0; MT]; MT]; 3];
     for ip in 0..ci.nprim {
         let ai2 = 2.0 * ci.alpha[ip];
         for jp in 0..cj.nprim {
             let (ai, aj) = (ci.alpha[ip], cj.alpha[jp]);
-            let Some((oab, pre)) = prefactor(ai, aj, r2, intcut) else { continue };
+            let Some((oab, pre, dpre)) = screen.prefactor(ai, aj, r2) else { continue };
             let rpi = [-vec[0] * aj * oab, -vec[1] * aj * oab, -vec[2] * aj * oab];
             let rpj = [vec[0] * ai * oab, vec[1] * ai * oab, vec[2] * ai * oab];
             build_1d(li + 1, lj + 2, rpi, rpj, oab, &mut t);
@@ -439,19 +508,6 @@ pub fn multipole_grad(
                             }
                         }
                     }
-                    // moment exponents (mx, my, mz) for s, dx, dy, dz, xx, xy, yy, xz, yz, zz
-                    const MOM: [[usize; 3]; NV] = [
-                        [0, 0, 0],
-                        [1, 0, 0],
-                        [0, 1, 0],
-                        [0, 0, 1],
-                        [2, 0, 0],
-                        [1, 1, 0],
-                        [0, 2, 0],
-                        [1, 0, 1],
-                        [0, 1, 1],
-                        [0, 0, 2],
-                    ];
                     let vc = &mut val[jc + ncj * ic];
                     let dc = &mut der[jc + ncj * ic];
                     for (n, m) in MOM.iter().enumerate() {
@@ -460,6 +516,20 @@ pub fn multipole_grad(
                         dc[3 * n] += cc * g[0][m[0]] * y * z;
                         dc[3 * n + 1] += cc * x * g[1][m[1]] * z;
                         dc[3 * n + 2] += cc * x * y * g[2][m[2]];
+                    }
+                }
+            }
+            if dpre != 0.0 {
+                let gsw = switch_gradient(ci.coeff[ip] * cj.coeff[jp] * dpre, ai, aj, oab, vec);
+                for (ic, a) in ei.iter().enumerate() {
+                    for (jc, b) in ej.iter().enumerate() {
+                        let dc = &mut der[jc + ncj * ic];
+                        for (n, m) in MOM.iter().enumerate() {
+                            let (x, y, z) = (t[0][a[0]][b[0] + m[0]], t[1][a[1]][b[1] + m[1]], t[2][a[2]][b[2] + m[2]]);
+                            for k in 0..3 {
+                                dc[3 * n + k] += gsw[k] * x * y * z;
+                            }
+                        }
                     }
                 }
             }
@@ -531,12 +601,13 @@ pub fn overlap_grad_coeff(
     dcj: Option<&Cgto>,
     dci: Option<&Cgto>,
     vec: [f64; 3],
-    intcut: f64,
+    screen: impl Into<Screen>,
     s: &mut [f64; MBLK],
     ds: &mut [[f64; 3]; MBLK],
     sj: &mut [f64; MBLK],
     si: &mut [f64; MBLK],
 ) {
+    let screen = screen.into();
     let r2 = vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2];
     let (li, lj) = (ci.l, cj.l);
     let (ei, ej) = (cart_exponents(li), cart_exponents(lj));
@@ -548,7 +619,7 @@ pub fn overlap_grad_coeff(
         let ai2 = 2.0 * ci.alpha[ip];
         for jp in 0..cj.nprim {
             let (ai, aj) = (ci.alpha[ip], cj.alpha[jp]);
-            let Some((oab, pre)) = prefactor(ai, aj, r2, intcut) else { continue };
+            let Some((oab, pre, dpre)) = screen.prefactor(ai, aj, r2) else { continue };
             let rpi = [-vec[0] * aj * oab, -vec[1] * aj * oab, -vec[2] * aj * oab];
             let rpj = [vec[0] * ai * oab, vec[1] * ai * oab, vec[2] * ai * oab];
             build_1d(li + 1, lj, rpi, rpj, oab, &mut t);
@@ -574,6 +645,19 @@ pub fn overlap_grad_coeff(
                     c[3] += cc * x * y * g[2];
                     c[4] += ccj * x * y * z;
                     c[5] += cci * x * y * z;
+                }
+            }
+            if dpre != 0.0 {
+                // as in multipole_grad, bit for bit
+                let gsw = switch_gradient(ci.coeff[ip] * cj.coeff[jp] * dpre, ai, aj, oab, vec);
+                for (ic, a) in ei.iter().enumerate() {
+                    for (jc, b) in ej.iter().enumerate() {
+                        let c = &mut val[jc + ncj * ic];
+                        let (x, y, z) = (t[0][a[0]][b[0]], t[1][a[1]][b[1]], t[2][a[2]][b[2]]);
+                        for k in 0..3 {
+                            c[1 + k] += gsw[k] * x * y * z;
+                        }
+                    }
                 }
             }
         }
@@ -1218,6 +1302,74 @@ mod tests {
             }
         }
         assert!(worst < 1e-8, "integral second derivatives: max error {worst:.3e}");
+    }
+
+    /// A smooth screen: the switch's derivative is in the gradient kernels (central differences
+    /// of the switched integrals; primitive pairs inside the window at the test distance),
+    /// [`overlap_grad_coeff`] equals [`multipole_grad`] bit for bit as with a hard screen, and a
+    /// window above every pair gives the hard screen's bits.
+    #[test]
+    fn smooth_screen_derivatives_match_finite_differences() {
+        let sh = shells();
+        let vec0 = [0.3, -0.7, 1.1];
+        let r2 = vec0.iter().map(|x| x * x).sum::<f64>();
+        let screen = Screen::Smooth { from: 0.5, to: 2.5 };
+        let h = 1e-5;
+        let mut scr = Scratch::default();
+        let mut in_window = 0;
+        for ci in &sh {
+            for cj in &sh {
+                for (&a, &b) in
+                    ci.alpha[..ci.nprim].iter().flat_map(|a| cj.alpha[..cj.nprim].iter().map(move |b| (a, b)))
+                {
+                    let x = a * b * r2 / (a + b);
+                    in_window += (x > 0.5 && x < 2.5) as usize;
+                }
+                let n = nsph(ci.l) * nsph(cj.l);
+                let mut g = MultipoleGrad::default();
+                multipole_grad(cj, ci, vec0, screen, &mut g, &mut scr);
+                let (mut s, mut ds, mut sj, mut si) = ([0.0; MBLK], [[0.0; 3]; MBLK], [0.0; MBLK], [0.0; MBLK]);
+                overlap_grad_coeff(cj, ci, None, None, vec0, screen, &mut s, &mut ds, &mut sj, &mut si);
+                assert_eq!((&s[..n], &ds[..n]), (&g.s[..n], &g.ds[..n]));
+                let mut s0 = [0.0; MBLK];
+                overlap(cj, ci, vec0, screen, &mut s0);
+                assert_eq!(&s0[..n], &g.s[..n]);
+                for k in 0..3 {
+                    let mut vp = vec0;
+                    vp[k] += h;
+                    let mut vm = vec0;
+                    vm[k] -= h;
+                    let (mut sp, mut dp, mut qp) = ([0.0; MBLK], [[0.0; 3]; MBLK], [[0.0; 6]; MBLK]);
+                    let (mut sm, mut dm, mut qm) = ([0.0; MBLK], [[0.0; 3]; MBLK], [[0.0; 6]; MBLK]);
+                    multipole(cj, ci, vp, screen, &mut sp, &mut dp, &mut qp, &mut scr);
+                    multipole(cj, ci, vm, screen, &mut sm, &mut dm, &mut qm, &mut scr);
+                    for b in 0..n {
+                        let fd = (sp[b] - sm[b]) / (2.0 * h);
+                        assert!((fd - g.ds[b][k]).abs() < 1e-7, "ds {fd} {}", g.ds[b][k]);
+                        for c in 0..3 {
+                            let fd = (dp[b][c] - dm[b][c]) / (2.0 * h);
+                            assert!((fd - g.dd_i[b][k][c]).abs() < 1e-7, "dd_i {fd} {}", g.dd_i[b][k][c]);
+                            let fdj = ((dp[b][c] + vp[c] * sp[b]) - (dm[b][c] + vm[c] * sm[b])) / (2.0 * h);
+                            assert!((fdj - g.dd_j[b][k][c]).abs() < 1e-7, "dd_j {fdj} {}", g.dd_j[b][k][c]);
+                        }
+                        for c in 0..6 {
+                            let fd = (qp[b][c] - qm[b][c]) / (2.0 * h);
+                            assert!((fd - g.dq_i[b][k][c]).abs() < 1e-7, "dq_i {fd} {}", g.dq_i[b][k][c]);
+                            let (_, qjp) = shift_to_bra(vp, sp[b], dp[b], qp[b]);
+                            let (_, qjm) = shift_to_bra(vm, sm[b], dm[b], qm[b]);
+                            let fdj = (qjp[c] - qjm[c]) / (2.0 * h);
+                            assert!((fdj - g.dq_j[b][k][c]).abs() < 1e-7, "dq_j {fdj} {}", g.dq_j[b][k][c]);
+                        }
+                    }
+                }
+                // a window above every pair: the hard screen's bits
+                let mut hard = MultipoleGrad::default();
+                multipole_grad(cj, ci, vec0, 1e4, &mut hard, &mut scr);
+                multipole_grad(cj, ci, vec0, Screen::Smooth { from: 1e4, to: 1e4 + 5.0 }, &mut g, &mut scr);
+                assert_eq!((&hard.s[..n], &hard.ds[..n], &hard.dq_j[..n]), (&g.s[..n], &g.ds[..n], &g.dq_j[..n]));
+            }
+        }
+        assert!(in_window > 10, "{in_window} primitive pairs in the window");
     }
 
     #[test]

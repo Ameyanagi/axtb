@@ -625,7 +625,12 @@ ferrocene) and ≤ 1.1e-5 Eh in the energy differences tested (conformers, the S
 reaction and HCN → HNC with their barriers, bindings, dissociations;
 `tests/gxtb_energy_differences.py`, spec §4.18). In program conventions, as in the program, results depend slightly on the
 orientation of the molecule (up to ~1e-7 Eh; the program's onsite-exchange Fock matrix is not
-rotation covariant); the default conventions are invariant. v1.1's Hessian in the default
+rotation covariant); the default conventions are invariant. The default conventions also switch
+the primitive pairs of the H0 and ACP overlaps off smoothly between a b R²/(a + b) = 20 and 25,
+where the program cuts them at 20: a hard cutoff leaves steps of ~1e-11 to 1e-10 Eh in the
+energy surface wherever a pair crosses it, which finite differences with steps of 5e-4 bohr or
+more cross (CuCl4²⁻: 5-point error 8.3e-9 Eh/bohr at h = 1e-3); energies differ by up to
+~7e-9 Eh. v1.1's Hessian in the default
 conventions is the response Hessian (central differences of the analytic gradient functional
 with the density extrapolated by the coupled-perturbed response, step 2e-4 bohr, reference SCF
 at accuracy 1e-5; within 1e-6 Eh/bohr² of Richardson-extrapolated finite differences,

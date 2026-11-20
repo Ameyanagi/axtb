@@ -230,7 +230,7 @@ impl Setup {
         let h0_pairs: Vec<(usize, usize)> = pairs
             .iter()
             .copied()
-            .filter(|&(a, b)| !screened_at_every_step(h0_amin[a], h0_amin[b], dist(a, b), model.intcut_h0()))
+            .filter(|&(a, b)| !screened_at_every_step(h0_amin[a], h0_amin[b], dist(a, b), model.screen_h0().cutoff()))
             .collect();
         // SCF-basis integral pairs: variables R_A (3), q_eff A, q_eff B
         let scf_pair = |&(ia, ib): &(usize, usize)| -> Result<Block> {
@@ -391,7 +391,7 @@ impl Setup {
             .map(|i| scf_shells(&self.model, mol.numbers[i], self.basis.qeff[i], true))
             .collect::<Result<_>>()?;
         let set = AcpSet::new(&self.model, mol, &self.cn, self.cutoff);
-        let (cut2, intcut) = (set.cutoff * set.cutoff, set.intcut);
+        let (cut2, screen) = (set.cutoff * set.cutoff, set.screen);
         let scf_amin = &self.basis.scf.min_alpha_at;
         let projs: Vec<(usize, usize, f64, f64)> =
             set.list.iter().map(|(ip, p, w, _)| (*ip, p.l, p.alpha[0], *w)).collect();
@@ -413,10 +413,10 @@ impl Setup {
                 let mut ua =
                     [vec![0.0; na[ia] * np], vec![0.0; na[ia] * np], vec![0.0; na[ia] * np], vec![0.0; na[ia] * np]];
                 for (is, sh) in shells[ia].iter().enumerate() {
-                    overlap(&proj, sh, vec, intcut, &mut blk);
-                    overlap(&proj, &dsh[ia][is], vec, intcut, &mut bq);
+                    overlap(&proj, sh, vec, screen, &mut blk);
+                    overlap(&proj, &dsh[ia][is], vec, screen, &mut bq);
                     if ia != ip {
-                        multipole_grad(&proj, sh, vec, intcut, &mut mg, &mut scr);
+                        multipole_grad(&proj, sh, vec, screen, &mut mg, &mut scr);
                     }
                     for a in 0..2 * sh.l + 1 {
                         let mu = first[ia][is] + a;
@@ -527,7 +527,12 @@ impl Setup {
             // second derivatives of the overlaps: pair (projector atom, AO atom) differences
             for ia in 0..nat {
                 if u[ia].is_none()
-                    || screened_at_every_step(alpha, scf_amin[ia], norm2_sq(sub3(pos[ia], pos[ip])).sqrt(), intcut)
+                    || screened_at_every_step(
+                        alpha,
+                        scf_amin[ia],
+                        norm2_sq(sub3(pos[ia], pos[ip])).sqrt(),
+                        screen.cutoff(),
+                    )
                 {
                     continue;
                 }
@@ -538,9 +543,9 @@ impl Setup {
                     let mut out = [0.0; 4];
                     for (is, s_) in sh.iter().enumerate() {
                         if ia != ip {
-                            multipole_grad(&proj, s_, vec, intcut, &mut mg, &mut scr);
+                            multipole_grad(&proj, s_, vec, screen, &mut mg, &mut scr);
                         }
-                        overlap(&proj, &dq[is], vec, intcut, &mut bq);
+                        overlap(&proj, &dq[is], vec, screen, &mut bq);
                         for a in 0..2 * s_.l + 1 {
                             let mu = first[ia][is] + a;
                             for m in 0..np {

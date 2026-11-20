@@ -241,11 +241,11 @@ fn wavefunctions_belong_to_one_method_and_molecule() {
 fn numerics_in_every_response() {
     use axtb_driver::numerics;
     assert_eq!(numerics(Method::Gfn2, false), "gfn2:3");
-    assert_eq!(numerics(Method::GxtbV1_1, false), "gxtb-v1.1:4");
+    assert_eq!(numerics(Method::GxtbV1_1, false), "gxtb-v1.1:5");
     assert_eq!(numerics(Method::GxtbV2_0_1, false), "gxtb-v2.0.1:3");
     assert_eq!(numerics(Method::Gfnff, false), "gfnff:1");
     assert_eq!(numerics(Method::GxtbV2_0_1, true), "gxtb-v2.0.1:3+gfn2:3");
-    assert_eq!(numerics(Method::GxtbV1_1, true), "gxtb-v1.1:4+gfn2:3");
+    assert_eq!(numerics(Method::GxtbV1_1, true), "gxtb-v1.1:5+gfn2:3");
     // GFN2-xTB in solvent is GFN2-xTB's
     assert_eq!(numerics(Method::Gfn2, true), "gfn2:3");
     for (method, conventions) in [("gfn2", "xtb"), ("gfn2", "axtb"), ("gxtb-v2.0.1", "gxtb"), ("gfnff", "xtb")] {
@@ -263,6 +263,6 @@ fn numerics_in_every_response() {
     assert_eq!(run(&analysis).unwrap().numerics, axtb_driver::ANALYSIS_NUMERICS);
     // a calculator's responses
     let mut calc = Calculator::new(&with("gxtb-v1.1")).unwrap();
-    assert_eq!(calc.numerics(), "gxtb-v1.1:4");
-    assert_eq!(calc.compute(&water().positions, &Task::default()).unwrap().numerics, "gxtb-v1.1:4");
+    assert_eq!(calc.numerics(), "gxtb-v1.1:5");
+    assert_eq!(calc.compute(&water().positions, &Task::default()).unwrap().numerics, "gxtb-v1.1:5");
 }
