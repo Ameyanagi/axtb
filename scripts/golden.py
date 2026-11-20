@@ -13,6 +13,10 @@ and feature, a few thread counts and the run-time LAPACK path) and compare outpu
                                                   object, e.g. terms.band) new: ignored where the
                                                   golden output lacks them (a commit that adds
                                                   fields)
+    scripts/golden.py compare DIR --ignore-numerics
+                                                  the same, without comparing the `numerics`
+                                                  identities (a commit that bumps an epoch: every
+                                                  output of that method names the new one)
     scripts/golden.py list                        the cases
 
 Outputs are compared exactly (every float, every field) except the timing fields. Golden files
@@ -406,6 +410,15 @@ def trajectory_runner(axtb: str, given: str) -> str:
     return str(beside if beside.exists() else Path(axtb).parent / "examples/golden_trajectory")
 
 
+def without_numerics(x):
+    """The output without its `numerics` identities, at any depth."""
+    if isinstance(x, dict):
+        return {k: without_numerics(v) for k, v in x.items() if k != "numerics"}
+    if isinstance(x, list):
+        return [without_numerics(v) for v in x]
+    return x
+
+
 def strip_timings(x):
     """The output without its timing fields, at any depth."""
     if isinstance(x, dict):
@@ -744,6 +757,8 @@ def main():
     ap.add_argument("--allow", default="gxtb11", help="comma-separated substrings of the cases that may change")
     ap.add_argument("--added", default="", help="comma-separated response fields that are new (absent from DIR); "
                     "group.field for a field inside an object")
+    ap.add_argument("--ignore-numerics", action="store_true",
+                    help="leave the numerics identities out of the comparison (a commit that bumps epochs)")
     a = ap.parse_args()
     cases = corpus()
     if a.only:
@@ -787,6 +802,8 @@ def main():
     for name, req, env in cases:
         gold = json.loads((d / f"{name}.json").read_text())
         new = run(a.axtb, req, env, traj)
+        if a.ignore_numerics:
+            gold, new = without_numerics(gold), without_numerics(new)
         if added:
             new, dropped = drop_added(gold, new, added)
             for k in dropped:
