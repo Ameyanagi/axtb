@@ -28,6 +28,9 @@ methods whose results it may change ("Numerics epochs" at the end).
   1e-5 cm⁻¹ (2.5e-4 cm⁻¹ for water stretched to 2.5 Å). v1.1 taxol gradients take about 4 %
   longer on one thread (the pairs between 20 and 25 and the switch: 1.038 to 1.042 in two
   measurements), the other v1.1 timings 1.5 to 2.6 % longer; GFN2-xTB and 2.0.1 are unchanged.
+  Against the performance baseline, the v1.1 numerical Hessian (caffeine, one thread; no longer
+  v1.1's default in these conventions) is 1.027-1.033: `scripts/perf_gate.py` holds that cell to
+  an accepted 1.04 (`ACCEPTED`), every other cell to 1.02.
 - g-xTB v1.1 accuracy targets now pick tighter SCF factors. The accuracy model is recalibrated
   on this engine (`bench/results/accuracy.json`; only v1.1's constants move): the closed-shell
   gradient envelope rises from 1.12e-5 to 6.46e-5 Eh/bohr × acc^0.5, because the 39-atom gh106,
