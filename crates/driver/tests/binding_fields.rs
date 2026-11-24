@@ -5,7 +5,9 @@
 //! molecular quadrupole in every conventions, and the thermochemistry's average moment and
 //! imaginary frequencies. None of them changes another number or the CLI's JSON.
 
-use axtb_driver::{run, Calculator, Method, Request, Response, Task};
+use axtb_driver::{run, Method, Request};
+#[cfg(feature = "gxtb")]
+use axtb_driver::{Calculator, Response, Task};
 use std::path::Path;
 
 fn structure(name: &str) -> Request {
@@ -15,10 +17,12 @@ fn structure(name: &str) -> Request {
     Request::new(numbers, positions)
 }
 
+#[cfg(feature = "gxtb")]
 fn with(req: &Request, method: &str, conv: &str) -> Request {
     Request { method: Some(method.into()), conventions: Some(conv.into()), ..req.clone() }
 }
 
+#[cfg(feature = "gxtb")]
 fn numbers(r: &Response) -> Vec<u64> {
     let s = r.scf.as_ref().unwrap();
     let mut v = vec![r.energy.unwrap()];
@@ -32,6 +36,7 @@ fn numbers(r: &Response) -> Vec<u64> {
 
 /// The structured orbitals come without Molden text and change no number; their coefficients
 /// are S-orthonormal with the overlap of the same response (axtb's AO order in both).
+#[cfg(feature = "gxtb")]
 #[test]
 fn structured_orbitals() {
     let caffeine = structure("caffeine.xyz");
@@ -74,6 +79,7 @@ fn structured_orbitals() {
 /// Core electrons (Z less the valence reference occupations; Zn 28, Cl 10, C, N, O 2, H 0),
 /// shell populations (reference occupation less shell charge, to round-off; their atoms and
 /// angular momenta), the traceless quadrupole (the conventions' own where that is traceless).
+#[cfg(feature = "gxtb")]
 #[test]
 fn electrons_shells_and_quadrupole() {
     let zncl4 = Request { charge: -2.0, ..structure("zncl4.xyz") };

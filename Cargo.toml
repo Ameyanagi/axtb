@@ -21,7 +21,7 @@ axtb-d4 = { path = "crates/d4", version = "=0.2.0" }
 axtb-solvation = { path = "crates/solvation", version = "=0.2.0" }
 axtb-gfnff = { path = "crates/gfnff", version = "=0.2.0" }
 axtb-gxtb = { path = "crates/gxtb", version = "=0.2.0" }
-axtb-driver = { path = "crates/driver", version = "=0.2.0" }
+axtb-driver = { path = "crates/driver", version = "=0.2.0", default-features = false }
 
 # Lints for every crate ([lints] workspace = true in each). Allowed on purpose: index loops over
 # several arrays at once and long argument lists are the clearest form of the numerical kernels,

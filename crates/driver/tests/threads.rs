@@ -3,8 +3,10 @@
 //! which is every CPU unless a program changes it. With it disabled, faer panics on any use.
 //! In a file of its own, since the setting is per process.
 
+#[cfg(feature = "gxtb")]
 use axtb_driver::{run, task_threads, Calculator, Request, Task};
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn no_calculation_uses_faers_global_parallelism() {
     faer::disable_global_parallelism();
@@ -44,6 +46,7 @@ fn no_calculation_uses_faers_global_parallelism() {
 
 /// A one-off task of a tiny molecule runs on one thread, with the same results; larger
 /// molecules and g-xTB's Hessians keep the requested threads; zero threads stays the input error.
+#[cfg(feature = "gxtb")]
 #[test]
 fn tiny_one_off_tasks_run_on_one_thread() {
     let water = Request::new(vec![8, 1, 1], vec![[0.0, 0.0, 0.22], [0.0, 1.43, -0.89], [0.0, -1.43, -0.89]]);

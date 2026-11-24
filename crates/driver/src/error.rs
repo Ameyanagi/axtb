@@ -29,6 +29,10 @@ pub enum Error {
 }
 
 impl Error {
+    pub(crate) fn gxtb_unavailable() -> Self {
+        Self::Input("g-xTB is not included in this build of axtb (cargo feature \"gxtb\")".into())
+    }
+
     /// The kind as the front ends name it: `input`, `unsupported_element`, `topology`,
     /// `scf_not_converged`, `numerical` or `not_applicable`.
     pub fn kind(&self) -> &'static str {

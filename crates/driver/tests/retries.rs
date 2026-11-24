@@ -8,12 +8,16 @@
 //! (one SCF solution) take 8 to 11 iterations from the method's own start in every method, and 2
 //! or 3 from a converged state of the same geometry, so no outcome depends on round-off (the CPU).
 
-use axtb_driver::{run, Calculator, Error, Request, Response, ScfRetry, Task};
+use axtb_driver::{run, Error, Request, ScfRetry};
+#[cfg(feature = "gxtb")]
+use axtb_driver::{Calculator, Response, Task};
 
 /// Too few iterations for an SCF from the method's own start, enough for one from a converged
 /// state of the same geometry.
+#[cfg(feature = "gxtb")]
 const SHORT: usize = 5;
 
+#[cfg(feature = "gxtb")]
 fn water(method: &str) -> Request {
     let mut req = Request::new(vec![8, 1, 1], vec![[0.0, 0.0, 0.22], [0.0, 1.43, -0.89], [0.0, -1.43, -0.89]]);
     req.method = Some(method.into());
@@ -22,6 +26,7 @@ fn water(method: &str) -> Request {
 
 /// Water at the short iteration limit: the calculation's own settings fail, the first rung of
 /// [`ladder`] converges.
+#[cfg(feature = "gxtb")]
 fn short(method: &str) -> Request {
     Request { max_iter: Some(SHORT), ..water(method) }
 }
@@ -30,11 +35,13 @@ fn rung(etemp: Option<f64>, max_iter: Option<usize>) -> ScfRetry {
     ScfRetry { etemp, max_iter }
 }
 
+#[cfg(feature = "gxtb")]
 fn ladder() -> Option<Vec<ScfRetry>> {
     Some(vec![rung(Some(1000.0), Some(250)), rung(Some(3000.0), Some(250))])
 }
 
 /// The numbers of a response, bit for bit.
+#[cfg(feature = "gxtb")]
 fn numbers(r: &Response) -> Vec<u64> {
     let mut v = vec![r.energy.unwrap().to_bits()];
     v.extend(r.gradient.iter().flatten().flatten().map(|x| x.to_bits()));
@@ -43,6 +50,7 @@ fn numbers(r: &Response) -> Vec<u64> {
     v
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn a_rung_is_the_calculation_at_its_settings() {
     for method in ["gfn2", "gxtb-v2.0.1", "gxtb-v1.1"] {
@@ -70,6 +78,7 @@ fn a_rung_is_the_calculation_at_its_settings() {
     }
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn a_ladder_that_does_not_fire_changes_no_number() {
     for method in ["gfn2", "gxtb-v2.0.1", "gxtb-v1.1"] {
@@ -86,6 +95,7 @@ fn a_ladder_that_does_not_fire_changes_no_number() {
     }
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn a_calculator_keeps_its_own_settings_and_the_rungs_state() {
     for method in ["gfn2", "gxtb-v2.0.1", "gxtb-v1.1"] {
@@ -137,6 +147,7 @@ fn every_rung_failing_carries_every_try() {
     assert!(serde_json::to_value(&e).unwrap().get("attempts").is_none());
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn the_composite_climbs_them_per_part() {
     let composite =
@@ -158,6 +169,7 @@ fn the_composite_climbs_them_per_part() {
     assert_eq!(numbers(&r), numbers(&run(&direct).unwrap()));
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn refusals() {
     let input = |req: Request| match run(&req) {

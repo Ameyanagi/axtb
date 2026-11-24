@@ -61,7 +61,16 @@ impl Method {
         matches!(self, Method::GxtbV1_1 | Method::GxtbV2_0_1)
     }
 
+    /// Check that this build includes the method. A disabled method is an input error.
+    pub fn check_available(self) -> Result<()> {
+        if !cfg!(feature = "gxtb") && self.is_gxtb() {
+            return Err(Error::gxtb_unavailable());
+        }
+        Ok(())
+    }
+
     /// The g-xTB version of a g-xTB method.
+    #[cfg(feature = "gxtb")]
     pub(crate) fn gxtb_version(self) -> Option<axtb_gxtb::Version> {
         match self {
             Method::GxtbV1_1 => Some(axtb_gxtb::Version::V1_1),
@@ -97,6 +106,7 @@ pub fn gfn2_conventions(name: &str) -> Result<axtb::Conventions> {
 }
 
 /// g-xTB conventions: `axtb` (also `default`) or `gxtb` (the program's).
+#[cfg(feature = "gxtb")]
 pub(crate) fn gxtb_conventions(name: &str) -> Result<axtb_gxtb::Conventions> {
     match key(name).as_str() {
         "axtb" | "default" => Ok(axtb_gxtb::Conventions::Axtb),
@@ -187,6 +197,7 @@ pub fn molden_functions(name: &str) -> Result<axtb::MoldenFunctions> {
 }
 
 /// Solvation correction of the g-xTB composite: `gfn2` (also `GFN2-xTB`).
+#[cfg(feature = "gxtb")]
 pub(crate) fn correction(name: &str) -> Result<axtb_gxtb::Correction> {
     match key(name).as_str() {
         "gfn2" | "gfn2xtb" => Ok(axtb_gxtb::Correction::Gfn2),
@@ -217,7 +228,10 @@ pub fn canonical(kind: &str, name: &str, method: Option<&str>) -> Result<&'stati
             Ok(match Method::parse(m)? {
                 Method::Gfn2 => gfn2_conventions(name)?.label(),
                 Method::Gfnff => gfnff_conventions(name)?.label(),
+                #[cfg(feature = "gxtb")]
                 Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_conventions(name)?.label(),
+                #[cfg(not(feature = "gxtb"))]
+                Method::GxtbV1_1 | Method::GxtbV2_0_1 => return Err(Error::gxtb_unavailable()),
             })
         }
         "solvent" => [axtb_solvation::Model::Alpb, axtb_solvation::Model::Gbsa]
@@ -233,7 +247,7 @@ pub fn canonical(kind: &str, name: &str, method: Option<&str>) -> Result<&'stati
 /// The electrons a neutral atom of atomic number `z` brings to the orbitals of `method`: the sum
 /// of its reference shell occupations (the shells of its basis), so Z less them are its core
 /// electrons (`Electronic::core_electrons`); GFN-FF, which has no orbitals, all Z. `None` where the
-/// method's tables end (GFN2-xTB above Rn, g-xTB above Lr; [`supported_elements`] says which
+/// method is unavailable or its tables end (GFN2-xTB above Rn, g-xTB above Lr; [`supported_elements`] says which
 /// elements a method has parameters for). For the Python binding's check of the spin parity
 /// before any calculation runs.
 pub fn valence_electrons(method: Method, z: usize) -> Option<f64> {
@@ -248,8 +262,12 @@ pub fn valence_electrons(method: Method, z: usize) -> Option<f64> {
             let n = *NSHELL.get(i)?;
             Some((0..n).map(|ish| REFERENCE_OCC[i][ANG_SHELL[i][ish]]).sum())
         }
+        #[cfg(feature = "gxtb")]
         Method::GxtbV2_0_1 => axtb_gxtb::data::v2_0_1::REF_OCC.get(i).map(|occ| occ.iter().sum()),
+        #[cfg(feature = "gxtb")]
         Method::GxtbV1_1 => axtb_gxtb::data::runtime::REF_SHELL_OCC.get(i).map(|occ| occ.iter().sum()),
+        #[cfg(not(feature = "gxtb"))]
+        Method::GxtbV1_1 | Method::GxtbV2_0_1 => None,
     }
 }
 
@@ -269,8 +287,10 @@ pub struct ShellLayout {
 
 /// The shells of `method`'s basis for the atomic numbers `numbers`, atom by atom in the basis'
 /// order, from the parameter tables (no calculation): for the Python binding's check of a given
-/// wavefunction or given moments against the method. GFN-FF has none; `None` beyond the tables.
+/// wavefunction or given moments against the method. GFN-FF has no shells. Returns `None` for
+/// unavailable methods and atomic numbers beyond the tables.
 pub fn shell_layout(method: Method, numbers: &[usize]) -> Option<Vec<ShellLayout>> {
+    method.check_available().ok()?;
     let mut out = Vec::new();
     for (atom, &z) in numbers.iter().enumerate() {
         let i = z.checked_sub(1)?;
@@ -283,6 +303,7 @@ pub fn shell_layout(method: Method, numbers: &[usize]) -> Option<Vec<ShellLayout
                     out.push(ShellLayout { atom, l, reference_occupation: REFERENCE_OCC[i][l], exponents: Vec::new() });
                 }
             }
+            #[cfg(feature = "gxtb")]
             Method::GxtbV1_1 | Method::GxtbV2_0_1 => {
                 let element = axtb_gxtb::data::qvszp::ELEMENTS.get(z)?.as_ref()?;
                 let reference: &[f64; 4] = if method == Method::GxtbV2_0_1 {
@@ -299,14 +320,19 @@ pub fn shell_layout(method: Method, numbers: &[usize]) -> Option<Vec<ShellLayout
                     });
                 }
             }
+            #[cfg(not(feature = "gxtb"))]
+            Method::GxtbV1_1 | Method::GxtbV2_0_1 => return None,
         }
     }
     Some(out)
 }
 
 /// The atomic numbers `method` has parameters for (every element a one-atom calculation of the
-/// method can be set up for; computed once per process).
+/// method can be set up for; computed once per process). A disabled method has no supported elements.
 pub fn supported_elements(method: Method) -> Vec<usize> {
+    if method.check_available().is_err() {
+        return Vec::new();
+    }
     use std::sync::OnceLock;
     static TABLE: [OnceLock<Vec<usize>>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     let i = match method {

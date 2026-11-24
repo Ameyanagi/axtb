@@ -280,15 +280,19 @@ pub fn read_xyz(text: &str, method: Method, conventions: Option<&str>) -> Result
                 AATOAU
             }
         }
+        #[cfg(feature = "gxtb")]
         Method::GxtbV1_1 => {
             let mol = axtb_gxtb::read_xyz(text, 0.0, None)?;
             return Ok((mol.numbers, mol.positions));
         }
+        #[cfg(feature = "gxtb")]
         Method::GxtbV2_0_1 => {
             let c = conventions.map(names::gxtb_conventions).transpose()?.unwrap_or_default();
             let mol = axtb_gxtb::model::read_xyz(text, 0.0, None, c)?;
             return Ok((mol.numbers, mol.positions));
         }
+        #[cfg(not(feature = "gxtb"))]
+        Method::GxtbV1_1 | Method::GxtbV2_0_1 => return Err(Error::gxtb_unavailable()),
     };
     Ok(axtb::io::read_xyz(text, aatoau)?)
 }

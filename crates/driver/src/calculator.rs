@@ -28,7 +28,7 @@ pub use axtb::method::Wavefunction;
 /// runs again at each rung in order, each from the method's own start, until one succeeds: the
 /// whole calculation, so that a Hessian (its reference and every displaced or perturbed SCF) and
 /// the single point of its response come from one rung. The g-xTB solvation composite climbs
-/// them per part instead ([`axtb_gxtb::CompositeOptions::scf_retries`]). Afterwards the method has
+/// them per part instead (`CompositeOptions::scf_retries`). Afterwards the method has
 /// its own settings again, and the wavefunction of the rung that converged is the next SCF's
 /// history (a session still tries its own settings first).
 pub struct Calculator {
@@ -97,6 +97,7 @@ impl Calculator {
     /// [`Task::from_request`]).
     pub fn new(req: &Request) -> Result<Self> {
         let kind = Method::parse(req.method.as_deref().unwrap_or("gfn2"))?;
+        kind.check_available()?;
         let nat = req.numbers.len();
         if req.positions.len() != nat {
             return Err(input(format!("positions must have one row per atom ({nat}), not {}", req.positions.len())));
@@ -211,7 +212,10 @@ impl Calculator {
                 };
                 Box::new(axtb_gfnff::Calculator::new(&req.numbers, setup, req.charge, opts)?)
             }
+            #[cfg(feature = "gxtb")]
             Method::GxtbV1_1 | Method::GxtbV2_0_1 => gxtb_method(req, kind, threads, uhf, guess, restart)?,
+            #[cfg(not(feature = "gxtb"))]
+            Method::GxtbV1_1 | Method::GxtbV2_0_1 => return Err(Error::gxtb_unavailable()),
         };
         let composite = kind.is_gxtb() && req.solvation_correction.is_some();
         let numerics = crate::numerics(kind, composite);
@@ -355,14 +359,18 @@ impl Calculator {
 
     /// The electronic temperature (K) and iteration limit of `s` for this method, its defaults
     /// where `s` has none.
-    fn effective(&self, s: &ScfSettings) -> (f64, usize) {
+    fn effective(&self, s: &ScfSettings) -> Result<(f64, usize)> {
         let (etemp, max_iter) = match self.kind {
             Method::Gfn2 => (axtb::ETEMP, axtb::MAX_ITER),
+            #[cfg(feature = "gxtb")]
             Method::GxtbV1_1 => (axtb_gxtb::composite::GXTB_ETEMP, axtb_gxtb::options::MAX_ITER_V1_1),
+            #[cfg(feature = "gxtb")]
             Method::GxtbV2_0_1 => (axtb_gxtb::composite::GXTB_ETEMP, axtb_gxtb::scf::MAX_ITER),
+            #[cfg(not(feature = "gxtb"))]
+            Method::GxtbV1_1 | Method::GxtbV2_0_1 => return Err(Error::gxtb_unavailable()),
             Method::Gfnff => (0.0, 0),
         };
-        (s.etemp.unwrap_or(etemp), s.max_iter.unwrap_or(max_iter))
+        Ok((s.etemp.unwrap_or(etemp), s.max_iter.unwrap_or(max_iter)))
     }
 
     /// The calculation of `compute` on the `scf_retries` ladder: the Hessian (if any) and the
@@ -370,7 +378,7 @@ impl Calculator {
     /// until both succeed; returns them with the rung and every try.
     fn climb(&mut self, positions: &[[f64; 3]], want: &Want, hessian: Option<&HessianOptions>) -> Result<Climbed> {
         let base = self.method.scf_settings().cloned().expect("an SCF method has SCF settings");
-        let first = self.effective(&base);
+        let first = self.effective(&base)?;
         let mut rungs = vec![Rung::default()];
         rungs.extend(Retry::rungs(first, &self.retries));
         let ladder = RetryLadder { rungs, on: RetryOn::Failed };
@@ -514,6 +522,7 @@ impl Calculator {
 
 /// The g-xTB method of a request: plain, or the solvation composite with
 /// `solvation_correction`.
+#[cfg(feature = "gxtb")]
 fn gxtb_method(
     req: &Request,
     kind: Method,

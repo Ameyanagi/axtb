@@ -21,8 +21,15 @@ path = "src/main.rs"
 # the library `axtb` documents itself under that name
 doc = false
 
+[features]
+default = ["gxtb"]
+gxtb = ["axtb-driver/gxtb", "dep:axtb-gxtb"]
+
 [dependencies]
-axtb-driver = { workspace = true }
+axtb-driver = { workspace = true, default-features = false }
+# Optional here because Cargo does not support optional dev-dependencies.
+# Only the g-xTB integration tests use this direct dependency.
+axtb-gxtb = { workspace = true, optional = true }
 clap = { version = "4.5", features = ["derive"] }
 serde = "1"
 # exact decimal-to-double parsing of JSON requests (the default parser can be 1 ulp off)
@@ -32,7 +39,6 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 [dev-dependencies]
 axtb = { workspace = true }
 axtb-gfnff = { workspace = true }
-axtb-gxtb = { workspace = true }
 
 [lints]
 workspace = true

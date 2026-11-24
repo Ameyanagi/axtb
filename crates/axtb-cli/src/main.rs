@@ -285,6 +285,7 @@ fn request(mut cli: Cli) -> Result<Request, axtb_driver::Error> {
     }
     let Some(path) = &cli.structure else { usage("a structure file is required (or --json)") };
     let method = Method::parse(cli.method.as_deref().unwrap_or("gfn2"))?;
+    method.check_available()?;
     let read = |p: &PathBuf| match std::fs::read_to_string(p) {
         Ok(t) => axtb_driver::read_xyz(&t, method, cli.conventions.as_deref()).map_err(|e| match e {
             axtb_driver::Error::Input(m) => axtb_driver::Error::Input(format!("{}: {m}", p.display())),

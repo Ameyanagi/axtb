@@ -19,12 +19,16 @@ include = ["/src", "/Cargo.toml", "/README.md", "/COPYING", "/COPYING.LESSER", "
 name = "axtb_driver"
 path = "src/lib.rs"
 
+[features]
+default = ["gxtb"]
+gxtb = ["dep:axtb-gxtb"]
+
 [dependencies]
 axtb = { workspace = true }
 # GFN-FF (method "gfnff")
 axtb-gfnff = { workspace = true }
 # g-xTB (methods "gxtb-v1.1", "gxtb-v2.0.1") and its solvation composite
-axtb-gxtb = { workspace = true }
+axtb-gxtb = { workspace = true, optional = true }
 # the canonical solvent names (`names::canonical`)
 axtb-solvation = { workspace = true }
 serde = { version = "1", features = ["derive"] }

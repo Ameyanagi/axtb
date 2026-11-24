@@ -116,6 +116,9 @@ of faer that read every CPU's cache files when the first matrix product runs
 same `[patch.crates-io]` entries to your workspace if you start many processes on many-CPU
 machines.
 
+Disable the default Cargo feature `gxtb` to omit g-xTB and its embedded parameter data from
+builds of `axtb-driver`, `axtb-cli` or `axtb-py`.
+
 ## Use
 
 The CLI and the Python package run one request/response layer (`crates/driver`,

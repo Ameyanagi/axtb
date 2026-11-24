@@ -4,6 +4,8 @@
 //! restart policy given apart from the start (`Request::restart`), the SCF accuracy of later
 //! calls (`Calculator::set_scf_accuracy`), the errors' codes and the name and element helpers.
 
+#![cfg(feature = "gxtb")]
+
 use axtb_driver::{canonical, run, supported_elements, Calculator, Error, Method, Request, Response, Task};
 use std::path::Path;
 

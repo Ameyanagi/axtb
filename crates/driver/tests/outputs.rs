@@ -118,6 +118,7 @@ fn gfn2_outputs_change_no_number() {
 /// g-xTB 2.0.1 and v1.1 in both conventions: water and caffeine (closed shells, 166 basis
 /// functions), the Cu(NH3)4 2+ doublet (two spin channels), taxol (762) on four threads; the
 /// solvation composite.
+#[cfg(feature = "gxtb")]
 #[test]
 fn gxtb_outputs_change_no_number() {
     let caffeine = structure("caffeine.xyz");
@@ -145,6 +146,7 @@ fn gxtb_outputs_change_no_number() {
 /// The Fermi levels per spin and the electronic temperature used: `None` and 0 K for the Aufbau
 /// filling (g-xTB's default 0 K, GFN2-xTB at 0 K, and GFN2-xTB's program conventions up to
 /// 0.1 K), the same level twice for a closed shell, two levels for an open shell.
+#[cfg(feature = "gxtb")]
 #[test]
 fn fermi_levels_and_temperature() {
     let water = structure("water.xyz");
@@ -184,6 +186,7 @@ fn fermi_levels_and_temperature() {
 /// error, before anything runs: the Hamiltonian of g-xTB 2.0.1 in the program's conventions
 /// (also as the composite's base; with max_iter 1 its SCF would fail) and both matrices of
 /// GFN-FF. Their overlap is offered; the Hamiltonian brings the overlap; an analysis refuses both.
+#[cfg(feature = "gxtb")]
 #[test]
 fn ao_matrices_not_applicable() {
     let water = structure("water.xyz");
@@ -221,6 +224,7 @@ fn ao_matrices_not_applicable() {
 /// ALPB, GBSA, an open shell, 3000 K and without dispersion; g-xTB 2.0.1 and v1.1 in both
 /// conventions, closed and open shells; the solvation composite; GFN-FF in each of its
 /// conventions. The SCF methods have one subtotal, `electronic`; GFN-FF none.
+#[cfg(feature = "gxtb")]
 #[test]
 fn terms_partition_the_energy() {
     let caffeine = structure("caffeine.xyz");

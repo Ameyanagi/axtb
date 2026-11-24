@@ -3,7 +3,9 @@
 //! same response fields, the error kinds, and a stateful calculator that gives the one-shot
 //! results.
 
-use axtb_driver::{run, Calculator, Error, Method, Request, Task};
+use axtb_driver::{run, Error, Method, Request};
+#[cfg(feature = "gxtb")]
+use axtb_driver::{Calculator, Task};
 
 fn water() -> Request {
     Request::new(vec![8, 1, 1], vec![[0.0, 0.0, 0.22], [0.0, 1.43, -0.89], [0.0, -1.43, -0.89]])
@@ -17,6 +19,17 @@ fn json(req: &str) -> Result<Request, serde_json::Error> {
     serde_json::from_str(req)
 }
 
+#[cfg(not(feature = "gxtb"))]
+#[test]
+fn a_gxtb_request_reports_the_missing_feature() {
+    for method in ["gxtb-v1.1", "gxtb-v2.0.1"] {
+        let err = run(&with(method)).unwrap_err();
+        let Error::Input(message) = err else { panic!("expected an input error, got {err:?}") };
+        assert_eq!(message, "g-xTB is not included in this build of axtb (cargo feature \"gxtb\")");
+        assert!(axtb_driver::supported_elements(Method::parse(method).unwrap()).is_empty());
+    }
+}
+
 #[test]
 fn unknown_fields_are_refused() {
     let base = r#""numbers": [1, 1], "positions": [[0, 0, 0], [0, 0, 1.4]]"#;
@@ -26,6 +39,7 @@ fn unknown_fields_are_refused() {
     assert!(json(r#"{"numbers": [1]}"#).is_err(), "positions are required");
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn settings_that_do_not_apply_are_errors() {
     let input = |req: Request| match run(&req) {
@@ -57,6 +71,7 @@ fn settings_that_do_not_apply_are_errors() {
     assert!(msg.contains("no implicit-solvent parameters") && msg.contains("solvation_correction"), "{msg}");
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn named_starts_are_checked_per_method() {
     let start = |req: Request| run(&req).map(|r| r.scf.expect("an SCF method").guess);
@@ -78,6 +93,7 @@ fn named_starts_are_checked_per_method() {
     }
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn both_gxtb_versions_report_the_entropy_term() {
     for method in ["gxtb-v1.1", "gxtb-v2.0.1"] {
@@ -108,6 +124,7 @@ fn error_kinds() {
     assert_eq!(e.kind(), "input");
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn every_response_has_the_header() {
     for (method, conventions, canonical) in [
@@ -127,6 +144,7 @@ fn every_response_has_the_header() {
     }
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn calculator_gives_the_one_shot_results() {
     for method in ["gfn2", "gfnff", "gxtb-v2.0.1"] {
@@ -143,6 +161,7 @@ fn calculator_gives_the_one_shot_results() {
     }
 }
 
+#[cfg(feature = "gxtb")]
 #[test]
 fn the_composite_reports_its_parts() {
     let req = Request {
@@ -179,6 +198,7 @@ fn analysis_of_a_given_hessian() {
 /// A wavefunction starts only an SCF of its method and molecule (atomic numbers, charge,
 /// unpaired electrons; conventions may differ), and of its kind (a composite's parts or one
 /// SCF's); a given wavefunction starts the next SCF whatever the restart policy says.
+#[cfg(feature = "gxtb")]
 #[test]
 fn wavefunctions_belong_to_one_method_and_molecule() {
     let energy = Task::from_request(&Request::default()).unwrap();
@@ -237,6 +257,7 @@ fn wavefunctions_belong_to_one_method_and_molecule() {
 
 /// The numerics identity: one epoch per method, the same in every conventions; the composite's
 /// parts joined; in every response (an analysis: its own).
+#[cfg(feature = "gxtb")]
 #[test]
 fn numerics_in_every_response() {
     use axtb_driver::numerics;

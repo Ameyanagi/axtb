@@ -7,6 +7,10 @@ GFN-FF), the structure and the settings; `run` checks it, dispatches it, and ret
 `Response` with the same fields for every front end, including Hessians and their vibrational
 analysis. A stateful `Calculator` runs one geometry after another.
 
+The default Cargo feature `gxtb` includes both g-xTB methods and their embedded parameter data.
+Set `default-features = false` on the `axtb-driver` dependency to omit them. The driver still
+recognizes both method names and returns an input error if a request selects either one.
+
 Every response names the numerics identity of the code that produced it, `numerics`, which
 `numerics(method, composite)` gives before a run: `"<method>:<epoch>"` (`"gfn2:1"`,
 `"gxtb-v1.1:1"`, `"gxtb-v2.0.1:1"`, `"gfnff:1"`; the g-xTB solvation composite
