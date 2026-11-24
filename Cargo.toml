@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/base", "crates/axtb", "crates/axtb-py", "crates/axtb-cli", "crates/driver", "crates/d4", "crates/solvation", "crates/gxtb", "crates/gfnff"]
+# The patched crates in third_party/ are [patch] sources, not members. Excluding them lets
+# tools that read this repository as a dependency (Nix's importCargoLock) build them alone.
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.2.0"
