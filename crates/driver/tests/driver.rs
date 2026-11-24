@@ -27,6 +27,14 @@ fn a_gxtb_request_reports_the_missing_feature() {
         let Error::Input(message) = err else { panic!("expected an input error, got {err:?}") };
         assert_eq!(message, "g-xTB is not included in this build of axtb (cargo feature \"gxtb\")");
         assert!(axtb_driver::supported_elements(Method::parse(method).unwrap()).is_empty());
+        // refused before the other validation (threads 0, a Hessian step without a Hessian, an analysis)
+        for req in [
+            Request { threads: Some(0), ..with(method) },
+            Request { hessian_step: Some(0.001), ..with(method) },
+            Request { analyze_hessian: Some(vec![vec![0.0; 9]; 9]), ..with(method) },
+        ] {
+            assert!(matches!(run(&req), Err(Error::Input(m)) if m.contains("cargo feature")));
+        }
     }
 }
 

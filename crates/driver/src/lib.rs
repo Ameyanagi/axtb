@@ -95,6 +95,10 @@ pub fn numerics(method: Method, composite: bool) -> String {
 /// analysis of the given Hessian ([`analyze`]). `seconds` of the response includes the
 /// setup. The calculation runs on [`task_threads`] threads.
 pub fn run(req: &Request) -> Result<Response> {
+    // a method this build leaves out is refused before any other validation
+    if let Some(method) = req.method.as_deref().and_then(|name| Method::parse(name).ok()) {
+        method.check_available()?;
+    }
     let t0 = Instant::now();
     let mut out = if req.analyze_hessian.is_some() {
         analyze(req)?
