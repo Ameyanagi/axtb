@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
+[package]
+name = "reshiki-optbench"
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+
+[workspace]
+
+[features]
+# Older local optimizer checkouts can opt out of these APIs.
+default = ["knobs"]
+knobs = []
+internal = ["knobs"]
+
+[dependencies]
+anyhow = "1"
+axtb-driver = { path = "../../crates/driver", default-features = false }
+clap = { version = "4", features = ["derive"] }
+cosmolkit = { version = "=0.5.0", git = "https://github.com/Ameyanagi/COSMolKit.git", rev = "501f7b234031ba4d87461e14d0947c77a7d1a631", default-features = false, features = ["cap-conformer", "cap-forcefields", "cap-hydrogens", "cap-sanitize", "cap-smiles", "cap-transforms"] }
+rayon = "1"
+reshiki-optimize = { git = "https://github.com/Ameyanagi/ReShiki", branch = "xtb/l4b-fast-optimizer" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+
+[profile.release]
+opt-level = 3
+debug = 1
+
+# Preserve axtb's Linux cache-detection startup behavior in this standalone workspace.
+[patch.crates-io]
+gemm-common = { path = "../../third_party/gemm-common" }
+private-gemm-x86 = { path = "../../third_party/private-gemm-x86" }
