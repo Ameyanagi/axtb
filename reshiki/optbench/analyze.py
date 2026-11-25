@@ -515,12 +515,12 @@ def choose_configs(rows: list[Run], requested: str | None) -> list[str]:
 
 
 def parse_label(value: str) -> tuple[str, str]:
-    """Parse a --label argument, preserving embedded equals signs.
+    """Parse a --label argument. Config names may contain "=" (``hess=gfnff``); labels may not.
 
-    >>> dict(map(parse_label, ["anc=ANC-RFO (#1415 default)", "internal =TRIC (mode=internal)"]))
-    {'anc': 'ANC-RFO (#1415 default)', 'internal': 'TRIC (mode=internal)'}
+    >>> dict(map(parse_label, ["anc=ANC-RFO (#1415 default)", "internal+conv=eg =TRIC + stop"]))
+    {'anc': 'ANC-RFO (#1415 default)', 'internal+conv=eg': 'TRIC + stop'}
     """
-    config, separator, label = value.partition("=")
+    config, separator, label = value.rpartition("=")
     config = config.strip()
     if not separator or not config or not label.strip():
         raise argparse.ArgumentTypeError("expected CONFIG=TEXT with a nonempty config and label")
