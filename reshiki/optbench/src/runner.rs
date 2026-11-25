@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 #[cfg(feature = "knobs")]
-use reshiki_optimize::{Acceleration, InitialHessian, Rebuild, Trust, Update};
+use reshiki_optimize::{Acceleration, Convergence, InitialHessian, Rebuild, Trust, Update};
 use reshiki_optimize::{Accuracy, Level, Method, Options, Potential, Status, optimize};
 use serde::{Deserialize, Serialize};
 
@@ -126,10 +126,14 @@ fn parse_config(label: &str) -> Result<Config> {
             }
             #[cfg(feature = "knobs")]
             "contacts" => options.contacts = true,
+            #[cfg(feature = "knobs")]
+            "conv=standard" => options.convergence = Convergence::Standard,
+            #[cfg(feature = "knobs")]
+            "conv=eg" => options.convergence = Convergence::EnergyGradient { gradient_norm: 1e-3 },
             #[cfg(not(feature = "knobs"))]
             part if matches!(
                 key,
-                "hess" | "update" | "accel" | "adaptive" | "trust" | "reject" | "floor" | "rebuild" | "contacts"
+                "hess" | "update" | "accel" | "adaptive" | "trust" | "reject" | "floor" | "rebuild" | "contacts" | "conv"
             ) =>
             {
                 bail!("{part:?} requires the extended optimizer API and --features knobs");
