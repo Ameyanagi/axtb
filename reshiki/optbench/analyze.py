@@ -351,7 +351,9 @@ def grouped_runs(rows: list[Run]) -> dict[tuple[str, str, str], list[Run]]:
     return dict(sorted(grouped.items()))
 
 
-def write_summary(path: Path, rows: list[Run], baseline: str, molecules: list[Identity]) -> None:
+def write_summary(
+    path: Path, rows: list[Run], baseline: str, molecules: list[Identity], *, speed_plot: bool = False
+) -> None:
     lines = [
         "# Optimizer benchmark analysis",
         "",
@@ -467,6 +469,10 @@ def write_summary(path: Path, rows: list[Run], baseline: str, molecules: list[Id
             "appear only in the evaluation panel."
         ),
         "- `evaluation_cdf.png`: empirical CDF of converged evaluations. Missing values and failures are omitted.",
+    ]
+    if speed_plot:
+        lines.append("- `speed.png`: summed recorded wall seconds by potential, set, and plotted configuration.")
+    lines += [
         "",
         "Trace selections: " + (", ".join("`" + escape("/".join(key)) + "`" for key in molecules) or "none"),
         "",
@@ -508,6 +514,19 @@ def choose_configs(rows: list[Run], requested: str | None) -> list[str]:
     return selected
 
 
+def parse_label(value: str) -> tuple[str, str]:
+    """Parse a --label argument, preserving embedded equals signs.
+
+    >>> dict(map(parse_label, ["anc=ANC-RFO (#1415 default)", "internal =TRIC (mode=internal)"]))
+    {'anc': 'ANC-RFO (#1415 default)', 'internal': 'TRIC (mode=internal)'}
+    """
+    config, separator, label = value.partition("=")
+    config = config.strip()
+    if not separator or not config or not label.strip():
+        raise argparse.ArgumentTypeError("expected CONFIG=TEXT with a nonempty config and label")
+    return config, label
+
+
 def choose_molecules(rows: list[Run], requested: str | None) -> list[Identity]:
     available = {identity(row): row["atoms"] for row in rows if row["trace"]}
     ordered = sorted(available, key=lambda key: (available[key], key))
@@ -537,7 +556,16 @@ def energy_gap_trace(row: Run) -> list[tuple[int, float, float]]:
     return [(point[0], point[1], max(1e-12, point[2] - reference)) for point in row["trace"]]
 
 
-def write_plots(out: Path, rows: list[Run], configs: list[str], molecules: list[Identity]) -> None:
+def write_plots(
+    out: Path,
+    rows: list[Run],
+    configs: list[str],
+    molecules: list[Identity],
+    *,
+    labels: dict[str, str] | None = None,
+    speed_plot: bool = False,
+    same_host: bool = False,
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -548,15 +576,56 @@ def write_plots(out: Path, rows: list[Run], configs: list[str], molecules: list[
     palette = plt.get_cmap("tab20").colors
     palette = palette[::2] + palette[1::2]
     colors = {config: palette[index % len(palette)] for index, config in enumerate(configs)}
-    facets = sorted({(row["potential"], row["set"]) for row in rows})
+    overrides = labels or {}
+    display_labels = {config: overrides.get(config, config) for config in configs}
+    groups = defaultdict(list)
+    for row in rows:
+        groups[(row["potential"], row["set"])].append(row)
+    facets = sorted(groups)
+    potentials = sorted({potential for potential, _ in facets})
     ncols = min(2, len(facets))
     nrows = math.ceil(len(facets) / ncols)
-    legend = [Line2D([0], [0], color=colors[config], marker="o", label=config) for config in configs]
+    legend = [Line2D([0], [0], color=colors[config], marker="o", label=display_labels[config]) for config in configs]
+    max_ticks = max(len({identity(row) for row in group if row["atoms"] is not None}) for group in groups.values())
+
+    def save_plot(figure, filename, handles, legend_configs, *, heading=0.0, footer=0.0):
+        height = figure.get_figheight()
+        top = 1 - heading / height
+        if handles:
+            legend_labels = [display_labels[config] for config in legend_configs]
+            figure_legend = figure.legend(
+                handles,
+                legend_labels,
+                loc="upper center",
+                bbox_to_anchor=(0.5, top),
+                ncol=min(5, len(handles)),
+                frameon=False,
+            )
+            top -= (figure_legend.get_window_extent().height / figure.dpi + 0.12) / height
+        figure.tight_layout(rect=(0, footer / height, 1, top))
+        figure.savefig(out / filename, dpi=150, bbox_inches="tight")
+        plt.close(figure)
 
     for kind in ("evaluations", "evaluation_cdf"):
-        figure, axes = plt.subplots(nrows, ncols, figsize=(max(10, ncols * 8), nrows * 4.7), squeeze=False)
+        heading = 0.0
+        panel_width, panel_height = 8, 4.7
+        if kind == "evaluations":
+            panel_width, panel_height = max(8, max_ticks * 0.13), 5.5
+            heading = 0.65
+        height = nrows * panel_height + heading
+        figure, axes = plt.subplots(nrows, ncols, figsize=(max(10, ncols * panel_width), height), squeeze=False)
+        if kind == "evaluations":
+            figure.suptitle("Optimizer evaluation counts", y=1 - 0.12 / height)
+            figure.text(
+                0.5,
+                1 - 0.41 / height,
+                f"Potential{'s' if len(potentials) > 1 else ''}: {', '.join(potentials)}"
+                " · Evaluations per optimization from the same start",
+                ha="center",
+                va="top",
+            )
         for axis, (potential, dataset) in zip(axes.flat, facets):
-            group = [row for row in rows if (row["potential"], row["set"]) == (potential, dataset)]
+            group = groups[(potential, dataset)]
             sizes = {identity(row): row["atoms"] for row in group if row["atoms"] is not None}
             keys = sorted(sizes, key=lambda key: (sizes[key], key))
             indices = {key: index for index, key in enumerate(keys)}
@@ -578,38 +647,37 @@ def write_plots(out: Path, rows: list[Run], configs: list[str], molecules: list[
                         markersize=4,
                         linewidth=1.2,
                         color=colors[config],
-                        label=config,
+                        label=display_labels[config],
                     )
                 elif selected:
                     data, counts = np.unique([row["evaluations"] for row in selected], return_counts=True)
                     fraction = np.cumsum(counts) / len(selected)
                     axis.step(np.r_[data[0], data], np.r_[0, fraction], where="post", color=colors[config])
                     axis.scatter(data, fraction, s=10, color=colors[config])
-            axis.set_title(f"{potential} · {dataset}")
             axis.grid(True, alpha=0.25)
             if kind == "evaluations":
+                axis.set_title(dataset)
                 axis.set_yscale("log")
-                stride = max(1, math.ceil(len(keys) / 35))
-                shown = list(range(0, len(keys), stride))
                 axis.set_xticks(
-                    shown,
-                    [f"{keys[index][0]}/{keys[index][2]}" for index in shown],
-                    rotation=55,
+                    range(len(keys)),
+                    [f"{key[0]}/{key[2]}" for key in keys],
+                    rotation=70,
                     ha="right",
-                    fontsize=8,
+                    fontsize=7,
                 )
-                axis.set_xlabel("Molecule / start (increasing atom count)")
-                axis.set_ylabel("Potential evaluations")
+                xlabel = "Molecule / start (increasing atom count)"
+                if len(potentials) > 1:
+                    xlabel += f"\nPotential: {potential}"
+                axis.set_xlabel(xlabel)
+                axis.set_ylabel("Energy+gradient evaluations")
             else:
+                axis.set_title(f"{potential} · {dataset}")
                 axis.set_ylim(0, 1.03)
                 axis.set_xlabel("Potential evaluations")
                 axis.set_ylabel("Fraction of converged runs")
         for axis in list(axes.flat)[len(facets) :]:
             axis.set_visible(False)
-        figure.legend(handles=legend, loc="upper center", ncol=min(5, len(configs)), frameon=False)
-        figure.tight_layout(rect=(0, 0, 1, 1 - 0.035 * math.ceil(len(configs) / 5)))
-        figure.savefig(out / f"{kind}.png", dpi=150)
-        plt.close(figure)
+        save_plot(figure, f"{kind}.png", legend, configs, heading=heading)
 
     figure, axes = plt.subplots(max(1, len(molecules)), 2, figsize=(14, 3.6 * max(1, len(molecules))), squeeze=False)
     if not molecules:
@@ -619,25 +687,66 @@ def write_plots(out: Path, rows: list[Run], configs: list[str], molecules: list[
     for index, key in enumerate(molecules):
         selected = [row for row in rows if identity(row) == key and row["config"] in configs]
         for coordinate, axis in enumerate(axes[index]):
+            missing_xtb_time = False
             for row in selected:
                 trace = energy_gap_trace(row)
-                if trace and (coordinate == 0 or any(point[1] > 0 for point in trace)):
+                config = row["config"]
+                if coordinate == 1 and not any(point[1] > 0 for point in trace):
+                    missing_xtb_time |= config.startswith("xtb-opt-")
+                    continue
+                if trace:
                     axis.plot(
                         [point[coordinate] for point in trace],
                         [point[2] for point in trace],
-                        color=colors[row["config"]],
+                        color=colors[config],
                         linewidth=1.4,
-                        label=row["config"],
+                        label=display_labels[config],
                     )
             axis.set_yscale("log")
             axis.set_xlabel("Cumulative potential evaluations" if coordinate == 0 else "Cumulative wall time (s)")
             axis.set_ylabel("E − reference energy (Eh)")
-            axis.set_title(" · ".join(key))
+            title = " · ".join(key)
+            if missing_xtb_time:
+                title += "\nxtb wall time not per step"
+            axis.set_title(title)
             axis.grid(True, alpha=0.25)
-    figure.legend(handles=legend, loc="upper center", ncol=min(5, len(configs)), frameon=False)
-    figure.tight_layout(rect=(0, 0, 1, 1 - 0.035 * math.ceil(len(configs) / 5)))
-    figure.savefig(out / "convergence.png", dpi=150)
-    plt.close(figure)
+    save_plot(figure, "convergence.png", legend, configs)
+
+    if speed_plot:
+        totals = {}
+        for key, group in grouped_runs(rows).items():
+            if key[2] in configs and (seconds := values(group, "wall_seconds")):
+                totals[key] = sum(seconds)
+        speed_facets = sorted({(potential, dataset) for potential, dataset, _ in totals})
+        timed_configs = [config for config in configs if any((*facet, config) in totals for facet in speed_facets)]
+        figure, axis = plt.subplots(figsize=(max(10, len(speed_facets) * 1.5), 4.7))
+        handles = []
+        width = 0.8 / max(1, len(timed_configs))
+        for index, config in enumerate(timed_configs):
+            offset = (index - (len(timed_configs) - 1) / 2) * width
+            present = [
+                (i, totals[(*facet, config)]) for i, facet in enumerate(speed_facets) if (*facet, config) in totals
+            ]
+            positions, heights = zip(*present)
+            handles.append(
+                axis.bar(
+                    np.array(positions) + offset, heights, width, color=colors[config], label=display_labels[config]
+                )
+            )
+        multiple_potentials = len({potential for potential, _ in speed_facets}) > 1
+        axis.set_xticks(
+            range(len(speed_facets)),
+            [f"{dataset}\n{potential}" if multiple_potentials else dataset for potential, dataset in speed_facets],
+        )
+        axis.set_title("Total wall time by set")
+        axis.set_ylabel("Summed wall seconds")
+        axis.grid(True, axis="y", alpha=0.25)
+        axis.set_axisbelow(True)
+        if not timed_configs:
+            axis.text(0.5, 0.5, "No recorded wall times", transform=axis.transAxes, ha="center")
+        if same_host:
+            figure.text(0.5, 0.035, "same host, one job at a time", ha="center")
+        save_plot(figure, "speed.png", handles, timed_configs, footer=0.3 if same_host else 0.0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -649,8 +758,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", default="anc", help="paired baseline config (default: anc)")
     parser.add_argument("--configs", help="comma-separated plot configs (default: all; xTB normal always included)")
     parser.add_argument(
+        "--label",
+        action="append",
+        type=parse_label,
+        default=[],
+        metavar="CONFIG=TEXT",
+        help="plot legend text (repeatable)",
+    )
+    parser.add_argument(
         "--molecules", help="up to four comma-separated cases or case/set/start/potential trace selectors"
     )
+    parser.add_argument("--speed-plot", action="store_true", help="write speed.png with summed wall seconds per set")
+    parser.add_argument("--same-host", action="store_true", help="annotate speed.png with same-host serial timing")
     args = parser.parse_args(argv)
     try:
         rows = read_jsonl([*args.results, *args.xtb])
@@ -674,8 +793,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         args.out.mkdir(parents=True, exist_ok=True)
         write_csv(args.out / "per_molecule.csv", rows)
-        write_summary(args.out / "summary.md", rows, args.baseline, molecules)
-        write_plots(args.out, rows, configs, molecules)
+        write_summary(args.out / "summary.md", rows, args.baseline, molecules, speed_plot=args.speed_plot)
+        write_plots(
+            args.out,
+            rows,
+            configs,
+            molecules,
+            labels=dict(args.label),
+            speed_plot=args.speed_plot,
+            same_host=args.same_host,
+        )
     except (ValueError, TypeError, OSError) as exc:
         print(f"analyze.py: error: {exc}", file=sys.stderr)
         return 2
