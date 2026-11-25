@@ -86,7 +86,16 @@ fn parse_config(label: &str) -> Result<Config> {
             #[cfg(feature = "knobs")]
             "adaptive" => options.adaptive_accuracy = true,
             #[cfg(feature = "knobs")]
-            "trust=global" => options.trust = Trust::Global,
+            "trust=global" => options.trust = Trust::global(),
+            #[cfg(feature = "knobs")]
+            part if part.starts_with("trust=global:") => {
+                let (start, max) =
+                    part["trust=global:".len()..].split_once(':').context("expected trust=global:<start>:<max>")?;
+                let start: f64 = start.parse().context("invalid start radius in trust=global:<start>:<max>")?;
+                let max: f64 = max.parse().context("invalid maximum radius in trust=global:<start>:<max>")?;
+                ensure!(0.001 <= start && start <= max && max.is_finite(), "trust=global:<start>:<max> requires 0.001 <= start <= max");
+                options.trust = Trust::Global { start, min: 0.001, max };
+            }
             #[cfg(feature = "knobs")]
             "trust=peratom" => options.trust = Trust::per_atom(),
             #[cfg(feature = "knobs")]
