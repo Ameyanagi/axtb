@@ -1212,7 +1212,7 @@ dependencies = [
 [[package]]
 name = "reshiki-optimize"
 version = "0.1.0"
-source = "git+https://github.com/Ameyanagi/ReShiki?branch=xtb%2Fl4b-fast-optimizer#3c15217498d1c296fe91e6024d9b5801d826ea85"
+source = "git+https://github.com/Ameyanagi/ReShiki?branch=xtb%2Fl4b-fast-optimizer#9218da6ca0603fba8cae2db18ed0cf26d8c34ad0"
 dependencies = [
  "reshiki-qcdata",
  "thiserror 2.0.21",
@@ -1221,7 +1221,7 @@ dependencies = [
 [[package]]
 name = "reshiki-qcdata"
 version = "0.1.0"
-source = "git+https://github.com/Ameyanagi/ReShiki?branch=xtb%2Fl4b-fast-optimizer#3c15217498d1c296fe91e6024d9b5801d826ea85"
+source = "git+https://github.com/Ameyanagi/ReShiki?branch=xtb%2Fl4b-fast-optimizer#9218da6ca0603fba8cae2db18ed0cf26d8c34ad0"
 dependencies = [
  "base64",
  "miniz_oxide",

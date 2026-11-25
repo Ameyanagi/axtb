@@ -78,18 +78,26 @@ A configuration is a method followed by optional `+` modifiers.
 | Config element | Meaning |
 |---|---|
 | `anc`, `lbfgs` | ANC-RFO or Cartesian L-BFGS |
-| `internal` | Translation–rotation internal coordinates (TRIC), available with `--features internal` and an optimizer that exports `Method::Internal`. |
+| `internal` | Translation–rotation internal coordinates (TRIC) with RFO, available in the default build. |
 | `hess=model` | Model Hessian, the optimizer default |
 | `hess=self`, `hess=gfnff` | Analytic Hessian of the target potential or a separate GFN-FF calculator |
 | `hess=auto<N>` | Use the target's analytic Hessian for up to N atoms where available, for example `hess=auto30`. |
 | `update=bfgs\|damped\|bofill` | Hessian update |
 | `accel=none\|gdiis\|gediis` | Extrapolation scheme |
 | `adaptive` | Enable the optimizer's adaptive accuracy schedule. |
+| `trust=global` | Use the default global RFO trust radius. |
+| `trust=peratom` | Use per-atom trust defaults (0.08 bohr starting radius, 0.001 bohr minimum, 0.2 bohr maximum, and 0.4 bohr single-atom displacement cap). |
+| `trust=peratom:<start>:<max>` | Override the starting and maximum per-atom radii in bohr, keeping the default minimum and atom cap. |
+| `reject=<ratio>` | Reject RFO trials when the actual-to-predicted reduction ratio falls below this threshold. A ratio of `0` uses the default energy-rise criterion. |
+| `floor=<curvature>` | Set the RFO curvature floor in hartree/bohr². |
+| `rebuild=poor` | Rebuild the RFO basis after three consecutive accepted steps with a reduction ratio below 0.25 or after 60 accepted steps in one basis. |
+| `rebuild=every<N>` | Rebuild the RFO basis every N accepted steps, for example `rebuild=every15`. The default is 30. |
+| `contacts` | Add weak nonbonded contact curvature to the Lindh model Hessian. |
+| `maxsteps=<N>` | Limit the number of accepted optimization steps per stage. The default is 500. |
 | `tight`, `notightfinal` | Use tight optimization thresholds or turn off the final tight-accuracy verification. |
 | `preopt=gfnff` | Run the same config on GFN-FF first, then use its last accepted geometry for the target stage. |
 
-The default build enables `knobs` for the published optimizer branch. The
-`internal` feature enables `knobs` and requires the upstream TRIC variant.
+The default build enables `knobs` for the published optimizer branch.
 Use `--no-default-features` for the original ANC-RFO and L-BFGS API.
 MMFF94 operates on typed SMILES cases.
 Its analytic Hessian is unavailable, so use `hess=model`, `hess=auto<N>` for

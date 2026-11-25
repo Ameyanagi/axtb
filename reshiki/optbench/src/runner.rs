@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 #[cfg(feature = "knobs")]
-use reshiki_optimize::{Acceleration, InitialHessian, Update};
+use reshiki_optimize::{Acceleration, InitialHessian, Rebuild, Trust, Update};
 use reshiki_optimize::{Accuracy, Level, Method, Options, Potential, Status, optimize};
 use serde::{Deserialize, Serialize};
 
@@ -31,10 +31,10 @@ fn parse_config(label: &str) -> Result<Config> {
     let method = match parts.next().unwrap_or_default() {
         "anc" => Method::AncRfo,
         "lbfgs" => Method::Lbfgs,
-        #[cfg(feature = "internal")]
+        #[cfg(feature = "knobs")]
         "internal" => Method::Internal,
-        #[cfg(not(feature = "internal"))]
-        "internal" => bail!("internal requires an optimizer with Method::Internal and --features internal"),
+        #[cfg(not(feature = "knobs"))]
+        "internal" => bail!("internal requires an optimizer with Method::Internal and --features knobs"),
         method => bail!("unknown optimizer method {method:?}"),
     };
     let mut options = Options { method, ..Options::default() };
@@ -48,6 +48,9 @@ fn parse_config(label: &str) -> Result<Config> {
             "tight" => options.level = Level::Tight,
             "notightfinal" => options.tight_final = false,
             "preopt=gfnff" => preopt = true,
+            part if part.starts_with("maxsteps=") => {
+                options.max_steps = part["maxsteps=".len()..].parse().context("expected a nonnegative maxsteps=<N>")?;
+            }
             "hess=model" => {
                 hessian = Hessian::Model;
                 #[cfg(feature = "knobs")]
@@ -82,8 +85,53 @@ fn parse_config(label: &str) -> Result<Config> {
             "accel=gediis" => options.acceleration = Acceleration::Gediis,
             #[cfg(feature = "knobs")]
             "adaptive" => options.adaptive_accuracy = true,
+            #[cfg(feature = "knobs")]
+            "trust=global" => options.trust = Trust::Global,
+            #[cfg(feature = "knobs")]
+            "trust=peratom" => options.trust = Trust::per_atom(),
+            #[cfg(feature = "knobs")]
+            part if part.starts_with("trust=peratom:") => {
+                let (start, max) =
+                    part["trust=peratom:".len()..].split_once(':').context("expected trust=peratom:<start>:<max>")?;
+                let start: f64 = start.parse().context("invalid start radius in trust=peratom:<start>:<max>")?;
+                let max: f64 = max.parse().context("invalid maximum radius in trust=peratom:<start>:<max>")?;
+                let Trust::PerAtom { min, atom_cap, .. } = Trust::per_atom() else {
+                    unreachable!("Trust::per_atom() must return Trust::PerAtom");
+                };
+                ensure!(
+                    min <= start && start <= max && max.is_finite(),
+                    "trust=peratom:<start>:<max> requires {min} <= start <= max with finite radii"
+                );
+                options.trust = Trust::PerAtom { start, min, max, atom_cap };
+            }
+            #[cfg(feature = "knobs")]
+            part if part.starts_with("reject=") => {
+                let ratio: f64 = part["reject=".len()..].parse().context("expected reject=<ratio>")?;
+                ensure!(ratio.is_finite() && ratio >= 0., "reject=<ratio> requires a finite nonnegative ratio");
+                options.reject_ratio = ratio;
+            }
+            #[cfg(feature = "knobs")]
+            part if part.starts_with("floor=") => {
+                let floor: f64 = part["floor=".len()..].parse().context("expected floor=<curvature>")?;
+                ensure!(floor.is_finite() && floor > 0., "floor=<curvature> requires finite positive curvature");
+                options.curvature_floor = floor;
+            }
+            #[cfg(feature = "knobs")]
+            "rebuild=poor" => options.rebuild = Rebuild::OnPoorPrediction,
+            #[cfg(feature = "knobs")]
+            part if part.starts_with("rebuild=every") => {
+                let interval = part["rebuild=every".len()..].parse().context("expected rebuild=every<N>")?;
+                ensure!(interval > 0, "rebuild=every<N> requires a positive interval");
+                options.rebuild = Rebuild::Every(interval);
+            }
+            #[cfg(feature = "knobs")]
+            "contacts" => options.contacts = true,
             #[cfg(not(feature = "knobs"))]
-            part if matches!(key, "hess" | "update" | "accel" | "adaptive") => {
+            part if matches!(
+                key,
+                "hess" | "update" | "accel" | "adaptive" | "trust" | "reject" | "floor" | "rebuild" | "contacts"
+            ) =>
+            {
                 bail!("{part:?} requires the extended optimizer API and --features knobs");
             }
             _ => bail!("unknown config modifier {part:?} in {label:?}"),

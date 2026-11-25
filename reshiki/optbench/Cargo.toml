@@ -13,7 +13,6 @@ publish = false
 # Older local optimizer checkouts can opt out of these APIs.
 default = ["knobs"]
 knobs = []
-internal = ["knobs"]
 
 [dependencies]
 anyhow = "1"
