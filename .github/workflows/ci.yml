@@ -40,6 +40,11 @@ jobs:
           components: rustfmt, clippy
       - uses: astral-sh/setup-uv@v10.3.3
       - uses: Swatinem/rust-cache@v2
+      - name: x86 packing with a 260 MiB cache and 256 MiB heap
+        run: |
+          rustc --edition=2021 --test third_party/private-gemm-x86/src/packing.rs -o "$RUNNER_TEMP/axtb-packing-tests"
+          "$RUNNER_TEMP/axtb-packing-tests"
+          python3 scripts/check_packing_budget.py
       - name: scripts/check.sh fast
         run: scripts/check.sh fast
       - name: the minimum supported Rust (rust-version, 1.89) builds everything
