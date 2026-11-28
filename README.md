@@ -111,10 +111,9 @@ unless you ask for more: `RUSTFLAGS="-C target-cpu=x86-64-v3" cargo install axtb
 **As a Rust library.** Depend on the crates from crates.io: `axtb` (GFN2-xTB), `axtb-gxtb`
 (g-xTB), `axtb-gfnff` (GFN-FF), or `axtb-driver` (the request/response layer of the front
 ends); `axtb-d4` and `axtb-solvation` come with `axtb`. The workspace patches two dependencies
-of faer that read every CPU's cache files when the first matrix product runs
-(`third_party/README.md`). Cargo applies that patch only to builds of this workspace; add the
-same `[patch.crates-io]` entries to your workspace if you start many processes on many-CPU
-machines.
+of faer to read only cpu0's cache files and to bound x86 packing buffers by actual matrix
+panels (`third_party/README.md`). Cargo applies those patches only to builds of this workspace;
+add the same `[patch.crates-io]` entries to your workspace to use them.
 
 Disable the default Cargo feature `gxtb` to omit g-xTB and its embedded parameter data from
 builds of `axtb-driver`, `axtb-cli` or `axtb-py`.

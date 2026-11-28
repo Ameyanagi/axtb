@@ -20,6 +20,8 @@ pub struct Position {
 }
 
 mod cache;
+mod packing;
+use packing::{Page, buffer_pages};
 
 const FLAGS_ACCUM: usize = 1 << 0;
 const FLAGS_CONJ_LHS: usize = 1 << 1;
@@ -1277,24 +1279,11 @@ pub unsafe fn gemm(
 	let l2 = cache[1].cache_bytes / sizeof;
 	let l3 = cache[2].cache_bytes / sizeof;
 
-	#[repr(align(4096))]
-	struct Page([u8; 4096]);
-
-	let lhs_size = (l3.next_multiple_of(16) * sizeof).div_ceil(size_of::<Page>());
-	let rhs_size = (l3.next_multiple_of(nr) * sizeof).div_ceil(size_of::<Page>());
+	let lhs_size = buffer_pages(l3, m, 16, kc, sizeof);
+	let rhs_size = buffer_pages(l3, n, nr, kc, sizeof);
 
 	thread_local! {
-		static MEM: RefCell<Vec::<core::mem::MaybeUninit<Page>>> = {
-			let cache = *cache::CACHE_INFO;
-			let l3 = cache[2].cache_bytes;
-
-			let lhs_size = l3.div_ceil(size_of::<Page>());
-			let rhs_size = l3.div_ceil(size_of::<Page>());
-
-			let mut mem = Vec::with_capacity(lhs_size + rhs_size);
-			unsafe { mem.set_len(lhs_size + rhs_size) };
-			RefCell::new(mem)
-		};
+		static MEM: RefCell<Vec<core::mem::MaybeUninit<Page>>> = RefCell::new(Vec::new());
 	}
 
 	MEM.with(|mem| {
@@ -1313,7 +1302,7 @@ pub unsafe fn gemm(
 			},
 		};
 		if mem.len() < lhs_size + rhs_size {
-			mem.reserve_exact(lhs_size + rhs_size);
+			mem.reserve_exact(lhs_size + rhs_size - mem.len());
 			unsafe { mem.set_len(lhs_size + rhs_size) };
 		}
 
@@ -1467,8 +1456,8 @@ pub unsafe fn gemm(
 					packed_lhs_rs[0] = 0;
 					packed_rhs_cs[0] = 0;
 
-					assert!(lhs_size * size_of::<Page>() >= row_chunk[q - 2] * kc * sizeof);
-					assert!(rhs_size * size_of::<Page>() >= col_chunk[q - 2] * kc * sizeof);
+					assert!(lhs_size * size_of::<Page>() >= Ord::min(m, row_chunk[q - 2]).next_multiple_of(16) * kc * sizeof);
+					assert!(rhs_size * size_of::<Page>() >= Ord::min(n, col_chunk[q - 2]).next_multiple_of(nr) * kc * sizeof);
 
 					unsafe {
 						kernel(
