@@ -98,9 +98,9 @@ fn suite(threads: usize) {
 		}
 	}
 	// With the synthetic 260 MiB cache and k=1, the tall-kernel cutoff is 532480
-	// rows. Crossing it forces real RHS packing and recursive outer row offsets.
+	// rows. Crossing it with n > 6*nr forces both packed buffers and recursive offsets.
 	let tall_rows = (260 * 1024 * 1024 / std::mem::size_of::<f64>() / 64) + 1;
-	check(tall_rows, 3, 1, DstKind::Full, threads);
+	check(tall_rows, 25, 1, DstKind::Full, threads);
 }
 
 fn main() {

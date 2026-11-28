@@ -36,7 +36,7 @@ before deciding whether a matrix product needed packing. With a 260 MiB detected
 the six-basis-function water density product requested 520 MiB and failed a 256 MiB heap
 budget. The copy here bounds each existing cache-sized buffer by the padded whole matrix
 panel times the packed depth. Whole dimensions account for recursive outer offsets; LHS
-padding is at most 16 elements and RHS padding is the microkernel width. TLS starts empty and
+padding is at most 16 elements and RHS storage rounds to the microkernel width. TLS starts empty and
 grows to the required storage. Cache detection, tiling and arithmetic are unchanged.
 
 Run the focused regression on x86-64 with AVX2 and FMA:
@@ -47,7 +47,8 @@ python3 scripts/check_packing_budget.py
 
 It builds the real vendored kernel in a temporary source copy with a synthetic 260 MiB L3
 cache. A 256 MiB allocator budget covers 40 exact-result cases with one and four threads,
-including odd dimensions, depth tails beyond 512 and a tall matrix that forces RHS packing. The original kernel exits with status
+including odd dimensions, depth tails beyond 512 and a tall matrix that forces both packed buffers
+and recursive offsets. The original kernel exits with status
 75 on the first water-sized product. This test uses Rust dependencies only and avoids the
 vendored crate's BLAS-dependent development tests. CI runs it separately because
 `third_party/` is excluded from the workspace. `--kernel-source PATH` selects an older kernel

@@ -7,7 +7,7 @@ pub(crate) struct Page([u8; 4096]);
 pub(crate) fn buffer_pages(cache_elements: usize, extent: usize, padding: usize, depth: usize, element_size: usize) -> usize {
 	// Recursive packed offsets advance by logical matrix coordinates, so the
 	// whole padded dimension bounds both outer offsets and the final leaf pack.
-	// LHS packs pad to at most 16 elements; RHS pads to the microkernel width.
+	// LHS packs pad to at most 16 elements; RHS storage rounds to microkernel width.
 	let cache_elements = cache_elements.next_multiple_of(padding);
 	let panel_elements = extent.next_multiple_of(padding).saturating_mul(depth);
 	(cache_elements.min(panel_elements) * element_size).div_ceil(core::mem::size_of::<Page>())
